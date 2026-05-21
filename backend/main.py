@@ -1,0 +1,1200 @@
+from contextlib import asynccontextmanager
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from typing import Optional, Dict, Any
+import sqlite3
+import random
+import json as json_lib
+import time as time_lib
+import urllib.request
+import urllib.error
+from datetime import datetime, timedelta
+
+DB_PATH = "dashboard.db"
+ADMIN_PASSWORD = "admin123"
+
+
+@asynccontextmanager
+async def lifespan(app):
+    init_db()
+    seed_data()
+    yield
+
+
+app = FastAPI(title="Engineering Dashboard API", lifespan=lifespan)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+def get_db():
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def init_db():
+    conn = get_db()
+    conn.executescript("""
+        PRAGMA foreign_keys = ON;
+
+        CREATE TABLE IF NOT EXISTS team_members (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            stream TEXT NOT NULL,
+            avatar_color TEXT DEFAULT '#00cfff'
+        );
+
+        CREATE TABLE IF NOT EXISTS dev_metrics (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            member_id INTEGER REFERENCES team_members(id) ON DELETE CASCADE,
+            week INTEGER NOT NULL,
+            year INTEGER NOT NULL DEFAULT 2025,
+            prs_merged INTEGER DEFAULT 0,
+            tickets_closed INTEGER DEFAULT 0,
+            cycle_time_days REAL DEFAULT 0.0,
+            features_completed INTEGER DEFAULT 0,
+            deploys INTEGER DEFAULT 0,
+            UNIQUE(member_id, week, year)
+        );
+
+        CREATE TABLE IF NOT EXISTS support_metrics (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            member_id INTEGER REFERENCES team_members(id) ON DELETE CASCADE,
+            week INTEGER NOT NULL,
+            year INTEGER NOT NULL DEFAULT 2025,
+            incidents_opened INTEGER DEFAULT 0,
+            incidents_resolved INTEGER DEFAULT 0,
+            avg_resolution_hours REAL DEFAULT 0.0,
+            sla_breached INTEGER DEFAULT 0,
+            total_incidents INTEGER DEFAULT 0,
+            UNIQUE(member_id, week, year)
+        );
+
+        CREATE TABLE IF NOT EXISTS docs_metrics (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            member_id INTEGER REFERENCES team_members(id) ON DELETE CASCADE,
+            week INTEGER NOT NULL,
+            year INTEGER NOT NULL DEFAULT 2025,
+            docs_created INTEGER DEFAULT 0,
+            docs_updated INTEGER DEFAULT 0,
+            projects_covered INTEGER DEFAULT 0,
+            projects_total INTEGER DEFAULT 10,
+            UNIQUE(member_id, week, year)
+        );
+
+        CREATE TABLE IF NOT EXISTS score_rules (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            stream TEXT NOT NULL,
+            rule_key TEXT NOT NULL,
+            label TEXT NOT NULL,
+            points INTEGER NOT NULL,
+            condition TEXT DEFAULT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS config (
+            key TEXT PRIMARY KEY,
+            value TEXT DEFAULT ''
+        );
+
+        CREATE TABLE IF NOT EXISTS ai_usage_cache (
+            key TEXT PRIMARY KEY,
+            data TEXT NOT NULL,
+            cached_at REAL NOT NULL DEFAULT 0
+        );
+
+        CREATE TABLE IF NOT EXISTS weekly_tasks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            engineer_id INTEGER REFERENCES team_members(id) ON DELETE CASCADE,
+            week_number INTEGER NOT NULL,
+            year INTEGER NOT NULL,
+            what_was_done TEXT NOT NULL DEFAULT '[]',
+            next_week TEXT NOT NULL DEFAULT '[]',
+            stream TEXT NOT NULL DEFAULT 'dev',
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            UNIQUE(engineer_id, week_number, year)
+        );
+    """)
+    conn.commit()
+    conn.close()
+
+
+def seed_data():
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT COUNT(*) FROM team_members")
+    if c.fetchone()[0] > 0:
+        conn.close()
+        return
+
+    members = [
+        ("Алекс Петров", "dev", "#00cfff"),
+        ("Мария Иванова", "dev", "#7b61ff"),
+        ("Дмитрий Козлов", "support", "#00ff9d"),
+        ("Елена Соколова", "support", "#ff6b6b"),
+        ("Сергей Морозов", "docs", "#ffd700"),
+        ("Анна Волкова", "docs", "#ff8c00"),
+    ]
+    c.executemany("INSERT INTO team_members (name, stream, avatar_color) VALUES (?,?,?)", members)
+    conn.commit()
+
+    c.execute("SELECT id, stream FROM team_members ORDER BY id")
+    rows = [dict(r) for r in c.fetchall()]
+
+    rng = random.Random(42)
+    now = datetime.now().isocalendar()
+    current_week = now[1]
+    current_year = now[0]
+
+    for wo in range(8):
+        w = current_week - 7 + wo
+        if w <= 0:
+            w += 52
+        for row in rows:
+            mid, stream = row["id"], row["stream"]
+            if stream == "dev":
+                ct = round(rng.uniform(0.5, 4.5), 1)
+                c.execute(
+                    "INSERT OR IGNORE INTO dev_metrics "
+                    "(member_id,week,year,prs_merged,tickets_closed,cycle_time_days,features_completed,deploys) "
+                    "VALUES (?,?,?,?,?,?,?,?)",
+                    (mid, w, current_year,
+                     rng.randint(2, 9), rng.randint(3, 12), ct,
+                     rng.randint(1, 4), rng.randint(1, 6)),
+                )
+            elif stream == "support":
+                opened = rng.randint(2, 8)
+                resolved = rng.randint(max(1, opened - 2), opened)
+                c.execute(
+                    "INSERT OR IGNORE INTO support_metrics "
+                    "(member_id,week,year,incidents_opened,incidents_resolved,avg_resolution_hours,sla_breached,total_incidents) "
+                    "VALUES (?,?,?,?,?,?,?,?)",
+                    (mid, w, current_year,
+                     opened, resolved,
+                     round(rng.uniform(0.5, 6.0), 1),
+                     rng.randint(0, 2), opened),
+                )
+            elif stream == "docs":
+                c.execute(
+                    "INSERT OR IGNORE INTO docs_metrics "
+                    "(member_id,week,year,docs_created,docs_updated,projects_covered,projects_total) "
+                    "VALUES (?,?,?,?,?,?,?)",
+                    (mid, w, current_year,
+                     rng.randint(1, 5), rng.randint(2, 9),
+                     rng.randint(5, 9), 10),
+                )
+
+    rules = [
+        ("dev", "pr_merged", "PR merged", 50, None),
+        ("dev", "ticket_closed", "Ticket closed", 40, None),
+        ("dev", "fast_cycle", "Cycle time < 2 days (bonus)", 30, '{"metric":"cycle_time_days","lt":2}'),
+        ("support", "incident_resolved", "Incident resolved", 80, None),
+        ("support", "fast_resolve", "Resolved < 2h (bonus)", 50, '{"metric":"avg_resolution_hours","lt":2}'),
+        ("support", "sla_breached", "SLA breached", -40, None),
+        ("docs", "doc_created", "Doc created", 30, None),
+        ("docs", "doc_updated", "Doc updated", 15, None),
+        ("docs", "no_docs_penalty", "Project without docs > 2w", -20, None),
+    ]
+    c.executemany(
+        "INSERT INTO score_rules (stream,rule_key,label,points,condition) VALUES (?,?,?,?,?)",
+        rules,
+    )
+
+    cfg = [
+        ("github_token", ""),
+        ("jira_token", ""),
+        ("anthropic_admin_key", ""),
+        ("ai_auto_sync", "0"),
+        ("team_name", "Engineering Squad"),
+        ("current_week", str(current_week)),
+        ("current_year", str(current_year)),
+    ]
+    c.executemany("INSERT OR IGNORE INTO config (key,value) VALUES (?,?)", cfg)
+    conn.commit()
+    conn.close()
+
+
+# ── Score helpers ──────────────────────────────────────────────────────────────
+
+def get_rules(conn) -> list:
+    c = conn.cursor()
+    c.execute("SELECT * FROM score_rules")
+    return [dict(r) for r in c.fetchall()]
+
+
+def rule_pts(rules, key):
+    for r in rules:
+        if r["rule_key"] == key:
+            return r["points"]
+    return 0
+
+
+def calc_dev(m, rules):
+    pts = 0
+    bd = {}
+    bd["pr_merged"] = m["prs_merged"] * rule_pts(rules, "pr_merged")
+    bd["ticket_closed"] = m["tickets_closed"] * rule_pts(rules, "ticket_closed")
+    bd["fast_cycle"] = rule_pts(rules, "fast_cycle") if m["cycle_time_days"] < 2 else 0
+    for v in bd.values():
+        pts += v
+    return pts, bd
+
+
+def calc_support(m, rules):
+    pts = 0
+    bd = {}
+    bd["incident_resolved"] = m["incidents_resolved"] * rule_pts(rules, "incident_resolved")
+    bd["fast_resolve"] = (
+        rule_pts(rules, "fast_resolve")
+        if m["avg_resolution_hours"] < 2 and m["incidents_resolved"] > 0
+        else 0
+    )
+    bd["sla_breached"] = m["sla_breached"] * rule_pts(rules, "sla_breached")
+    for v in bd.values():
+        pts += v
+    return pts, bd
+
+
+def calc_docs(m, rules):
+    pts = 0
+    bd = {}
+    bd["doc_created"] = m["docs_created"] * rule_pts(rules, "doc_created")
+    bd["doc_updated"] = m["docs_updated"] * rule_pts(rules, "doc_updated")
+    uncovered = m["projects_total"] - m["projects_covered"]
+    bd["no_docs_penalty"] = uncovered * rule_pts(rules, "no_docs_penalty") if uncovered > 0 else 0
+    for v in bd.values():
+        pts += v
+    return pts, bd
+
+
+def current_week_year(conn):
+    c = conn.cursor()
+    c.execute("SELECT key,value FROM config WHERE key IN ('current_week','current_year')")
+    cfg = {r["key"]: int(r["value"]) for r in c.fetchall()}
+    now = datetime.now().isocalendar()
+    return cfg.get("current_week", now[1]), cfg.get("current_year", now[0])
+
+
+# ── AI Usage helpers ──────────────────────────────────────────────────────────
+
+ANTHROPIC_BASE = "https://api.anthropic.com"
+AI_CACHE_TTL = 3600  # seconds
+
+
+def _anthropic_get(path: str, admin_key: str) -> dict:
+    req = urllib.request.Request(
+        ANTHROPIC_BASE + path,
+        headers={
+            "anthropic-version": "2023-06-01",
+            "x-api-key": admin_key,
+            "anthropic-beta": "usage-2025-01",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        return json_lib.loads(resp.read())
+
+
+def _mock_ai_usage(conn) -> dict:
+    c = conn.cursor()
+    c.execute("SELECT * FROM team_members ORDER BY id")
+    members = [dict(r) for r in c.fetchall()]
+
+    rng = random.Random(77)
+    end = datetime.now()
+
+    tokens_per_day = []
+    for i in range(30):
+        dt = end - timedelta(days=29 - i)
+        base = rng.randint(15_000, 80_000)
+        tokens = int(base * (0.2 if dt.weekday() >= 5 else 1.0))
+        tokens_per_day.append({"date": dt.strftime("%Y-%m-%d"), "tokens": tokens})
+
+    tokens_per_user = []
+    for m in members:
+        tok = rng.randint(25_000, 280_000)
+        tokens_per_user.append({
+            "name": m["name"].split()[0],
+            "full_name": m["name"],
+            "member_id": m["id"],
+            "stream": m["stream"],
+            "tokens": tok,
+            "input_tokens": int(tok * 0.72),
+            "output_tokens": int(tok * 0.28),
+        })
+    tokens_per_user.sort(key=lambda x: x["tokens"], reverse=True)
+
+    total = sum(d["tokens"] for d in tokens_per_day)
+    return {
+        "total_tokens": total,
+        "total_cost_usd": round(total * 0.000003, 2),
+        "tokens_per_day": tokens_per_day,
+        "tokens_per_user": tokens_per_user,
+        "source": "mock",
+    }
+
+
+def _live_ai_usage(admin_key: str, conn) -> dict:
+    end = datetime.now()
+    start = end - timedelta(days=30)
+    qs = f"?start_date={start.strftime('%Y-%m-%d')}&end_date={end.strftime('%Y-%m-%d')}"
+
+    ws_data = _anthropic_get(f"/v1/usage/workspaces{qs}", admin_key)
+    user_data = _anthropic_get(f"/v1/usage/workspaces/users{qs}", admin_key)
+
+    day_map: dict = {}
+    total_tokens = 0
+    for item in ws_data.get("data", []):
+        date = (item.get("created_at") or item.get("date") or "")[:10]
+        tok = item.get("input_tokens", 0) + item.get("output_tokens", 0)
+        day_map[date] = day_map.get(date, 0) + tok
+        total_tokens += tok
+
+    tokens_per_day = [{"date": k, "tokens": v} for k, v in sorted(day_map.items())]
+
+    tokens_per_user = []
+    for item in user_data.get("data", []):
+        name = item.get("user_email") or item.get("user_id") or "Unknown"
+        tok = item.get("input_tokens", 0) + item.get("output_tokens", 0)
+        tokens_per_user.append({
+            "name": name.split("@")[0],
+            "full_name": name,
+            "member_id": None,
+            "stream": None,
+            "tokens": tok,
+            "input_tokens": item.get("input_tokens", 0),
+            "output_tokens": item.get("output_tokens", 0),
+        })
+    tokens_per_user.sort(key=lambda x: x["tokens"], reverse=True)
+
+    return {
+        "total_tokens": total_tokens,
+        "total_cost_usd": round(total_tokens * 0.000003, 2),
+        "tokens_per_day": tokens_per_day,
+        "tokens_per_user": tokens_per_user,
+        "source": "api",
+    }
+
+
+def _compute_leverage(conn, tokens_per_user: list) -> list:
+    c = conn.cursor()
+    week, year = current_week_year(conn)
+    c.execute("SELECT * FROM team_members ORDER BY id")
+    members = [dict(r) for r in c.fetchall()]
+
+    token_by_name = {u["name"].lower(): u for u in tokens_per_user}
+    token_by_idx = {i: u for i, u in enumerate(tokens_per_user)}
+
+    scores = []
+    for i, m in enumerate(members):
+        first = m["name"].split()[0].lower()
+        ud = token_by_name.get(first) or token_by_idx.get(i) or {}
+        tok = ud.get("tokens", 0)
+
+        tasks = 0
+        if m["stream"] == "dev":
+            c.execute(
+                "SELECT prs_merged, tickets_closed, deploys FROM dev_metrics "
+                "WHERE member_id=? AND week=? AND year=?", (m["id"], week, year)
+            )
+            row = c.fetchone()
+            if row:
+                tasks = row["prs_merged"] + row["tickets_closed"] + row["deploys"]
+        elif m["stream"] == "support":
+            c.execute(
+                "SELECT incidents_resolved FROM support_metrics "
+                "WHERE member_id=? AND week=? AND year=?", (m["id"], week, year)
+            )
+            row = c.fetchone()
+            if row:
+                tasks = row["incidents_resolved"]
+        elif m["stream"] == "docs":
+            c.execute(
+                "SELECT docs_created, docs_updated FROM docs_metrics "
+                "WHERE member_id=? AND week=? AND year=?", (m["id"], week, year)
+            )
+            row = c.fetchone()
+            if row:
+                tasks = row["docs_created"] + row["docs_updated"]
+
+        tok_k = tok / 1000
+        leverage = round(tasks / max(tok_k, 0.1), 3)
+
+        rng = random.Random(m["id"] * 13 + week)
+        trend = random.choice(["up", "up", "stable", "down"])  # slightly optimistic mock
+        scores.append({
+            "id": m["id"],
+            "name": m["name"],
+            "stream": m["stream"],
+            "avatar_color": m["avatar_color"],
+            "tokens_used": tok,
+            "tasks_completed": tasks,
+            "leverage_score": leverage,
+            "trend": trend,
+        })
+
+    scores.sort(key=lambda x: x["leverage_score"], reverse=True)
+    return scores
+
+
+def _get_or_fetch_ai_usage(conn, force: bool = False) -> dict:
+    c = conn.cursor()
+    if not force:
+        c.execute("SELECT data, cached_at FROM ai_usage_cache WHERE key='main'")
+        row = c.fetchone()
+        if row and (time_lib.time() - row["cached_at"]) < AI_CACHE_TTL:
+            return json_lib.loads(row["data"])
+
+    c.execute("SELECT value FROM config WHERE key='anthropic_admin_key'")
+    row = c.fetchone()
+    admin_key = (row["value"] if row else "") or ""
+
+    try:
+        result = _live_ai_usage(admin_key, conn) if admin_key else _mock_ai_usage(conn)
+    except Exception as exc:
+        result = _mock_ai_usage(conn)
+        result["api_error"] = str(exc)
+
+    result["leverage_scores"] = _compute_leverage(conn, result["tokens_per_user"])
+
+    c.execute(
+        "INSERT OR REPLACE INTO ai_usage_cache (key, data, cached_at) VALUES (?,?,?)",
+        ("main", json_lib.dumps(result), time_lib.time()),
+    )
+    conn.commit()
+    return result
+
+
+# ── Public routes ──────────────────────────────────────────────────────────────
+
+@app.get("/api/overview")
+def overview():
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT key,value FROM config")
+    cfg = {r["key"]: r["value"] for r in c.fetchall()}
+    conn.close()
+    return {
+        "team_name": cfg.get("team_name", "Engineering Team"),
+        "current_week": int(cfg.get("current_week", 1)),
+        "current_year": int(cfg.get("current_year", 2025)),
+    }
+
+
+@app.get("/api/leaderboard")
+def leaderboard():
+    conn = get_db()
+    c = conn.cursor()
+    rules = get_rules(conn)
+    week, year = current_week_year(conn)
+
+    c.execute("SELECT * FROM team_members ORDER BY id")
+    members = [dict(r) for r in c.fetchall()]
+
+    board = []
+    for m in members:
+        mid, stream = m["id"], m["stream"]
+        weekly_scores = []
+        bd_total: Dict[str, int] = {}
+
+        for wo in range(8):
+            w = week - 7 + wo
+            if w <= 0:
+                w += 52
+
+            sw = 0
+            if stream == "dev":
+                c.execute("SELECT * FROM dev_metrics WHERE member_id=? AND week=? AND year=?", (mid, w, year))
+                row = c.fetchone()
+                if row:
+                    sw, bd = calc_dev(dict(row), rules)
+                    for k, v in bd.items():
+                        bd_total[k] = bd_total.get(k, 0) + v
+            elif stream == "support":
+                c.execute("SELECT * FROM support_metrics WHERE member_id=? AND week=? AND year=?", (mid, w, year))
+                row = c.fetchone()
+                if row:
+                    sw, bd = calc_support(dict(row), rules)
+                    for k, v in bd.items():
+                        bd_total[k] = bd_total.get(k, 0) + v
+            elif stream == "docs":
+                c.execute("SELECT * FROM docs_metrics WHERE member_id=? AND week=? AND year=?", (mid, w, year))
+                row = c.fetchone()
+                if row:
+                    sw, bd = calc_docs(dict(row), rules)
+                    for k, v in bd.items():
+                        bd_total[k] = bd_total.get(k, 0) + v
+
+            weekly_scores.append(sw)
+
+        total = sum(weekly_scores)
+
+        # Badges
+        badges = []
+        # Fire: last 3 weeks all positive and increasing
+        if len(weekly_scores) >= 3:
+            last3 = weekly_scores[-3:]
+            if all(v > 0 for v in last3) and last3[-1] >= last3[-2] >= last3[-3]:
+                badges.append("fire")
+        # Shield: support with zero breaches in last 4 weeks
+        if stream == "support":
+            breach_total = 0
+            for wo in range(4):
+                w2 = week - 3 + wo
+                if w2 <= 0:
+                    w2 += 52
+                c.execute("SELECT sla_breached FROM support_metrics WHERE member_id=? AND week=? AND year=?", (mid, w2, year))
+                row = c.fetchone()
+                if row:
+                    breach_total += row["sla_breached"]
+            if breach_total == 0:
+                badges.append("shield")
+        # Scribe: docs_created >= 3 this week
+        if stream == "docs":
+            c.execute("SELECT docs_created FROM docs_metrics WHERE member_id=? AND week=? AND year=?", (mid, week, year))
+            row = c.fetchone()
+            if row and row["docs_created"] >= 3:
+                badges.append("scribe")
+
+        board.append({
+            "id": mid,
+            "name": m["name"],
+            "stream": stream,
+            "avatar_color": m["avatar_color"],
+            "total_score": total,
+            "weekly_scores": weekly_scores,
+            "breakdown": bd_total,
+            "badges": badges,
+        })
+
+    board.sort(key=lambda x: x["total_score"], reverse=True)
+    # MVP = top scorer
+    if board:
+        board[0]["badges"] = list(set(board[0]["badges"] + ["mvp"]))
+
+    conn.close()
+    return board
+
+
+def _weeks_range(week):
+    weeks = []
+    for wo in range(8):
+        w = week - 7 + wo
+        if w <= 0:
+            w += 52
+        weeks.append(w)
+    return weeks
+
+
+@app.get("/api/metrics/dev")
+def metrics_dev():
+    conn = get_db()
+    c = conn.cursor()
+    rules = get_rules(conn)
+    week, year = current_week_year(conn)
+
+    c.execute("SELECT * FROM team_members WHERE stream='dev'")
+    members = [dict(r) for r in c.fetchall()]
+    weeks = _weeks_range(week)
+
+    weekly_chart = []
+    totals = {"prs_merged": 0, "tickets_closed": 0, "cycle_time_days": [], "features_completed": 0, "deploys": 0}
+    bottlenecks = []
+
+    for i, w in enumerate(weeks):
+        wd = {"week": f"W{w}", "score": 0, "prs": 0, "tickets": 0, "deploys": 0}
+        for m in members:
+            c.execute("SELECT * FROM dev_metrics WHERE member_id=? AND week=? AND year=?", (m["id"], w, year))
+            row = c.fetchone()
+            if row:
+                row = dict(row)
+                sc, _ = calc_dev(row, rules)
+                wd["score"] += sc
+                wd["prs"] += row["prs_merged"]
+                wd["tickets"] += row["tickets_closed"]
+                wd["deploys"] += row["deploys"]
+                if i == 7:
+                    totals["prs_merged"] += row["prs_merged"]
+                    totals["tickets_closed"] += row["tickets_closed"]
+                    totals["cycle_time_days"].append(row["cycle_time_days"])
+                    totals["features_completed"] += row["features_completed"]
+                    totals["deploys"] += row["deploys"]
+        weekly_chart.append(wd)
+
+    for m in members:
+        c.execute("SELECT * FROM dev_metrics WHERE member_id=? AND week=? AND year=?", (m["id"], week, year))
+        row = c.fetchone()
+        if row:
+            row = dict(row)
+            bottlenecks.append({
+                "name": m["name"].split()[0],
+                "prs_merged": row["prs_merged"],
+                "tickets_closed": row["tickets_closed"],
+                "cycle_time_days": row["cycle_time_days"],
+                "deploys": row["deploys"],
+            })
+
+    ct_list = totals["cycle_time_days"]
+    avg_ct = round(sum(ct_list) / len(ct_list), 1) if ct_list else 0
+    conn.close()
+    return {
+        "totals": {
+            "prs_merged": totals["prs_merged"],
+            "tickets_closed": totals["tickets_closed"],
+            "avg_cycle_time": avg_ct,
+            "features_completed": totals["features_completed"],
+            "deploys": totals["deploys"],
+            "deploy_frequency": round(totals["deploys"] / max(len(members), 1), 1),
+        },
+        "weekly_chart": weekly_chart,
+        "bottlenecks": bottlenecks,
+    }
+
+
+@app.get("/api/metrics/support")
+def metrics_support():
+    conn = get_db()
+    c = conn.cursor()
+    rules = get_rules(conn)
+    week, year = current_week_year(conn)
+
+    c.execute("SELECT * FROM team_members WHERE stream='support'")
+    members = [dict(r) for r in c.fetchall()]
+    weeks = _weeks_range(week)
+
+    weekly_chart = []
+    totals = {"incidents_opened": 0, "incidents_resolved": 0, "avg_resolution_hours": [], "sla_breached": 0, "total_incidents": 0}
+    bottlenecks = []
+
+    for i, w in enumerate(weeks):
+        wd = {"week": f"W{w}", "score": 0, "resolved": 0, "breached": 0}
+        for m in members:
+            c.execute("SELECT * FROM support_metrics WHERE member_id=? AND week=? AND year=?", (m["id"], w, year))
+            row = c.fetchone()
+            if row:
+                row = dict(row)
+                sc, _ = calc_support(row, rules)
+                wd["score"] += sc
+                wd["resolved"] += row["incidents_resolved"]
+                wd["breached"] += row["sla_breached"]
+                if i == 7:
+                    totals["incidents_opened"] += row["incidents_opened"]
+                    totals["incidents_resolved"] += row["incidents_resolved"]
+                    totals["avg_resolution_hours"].append(row["avg_resolution_hours"])
+                    totals["sla_breached"] += row["sla_breached"]
+                    totals["total_incidents"] += row["total_incidents"]
+        weekly_chart.append(wd)
+
+    for m in members:
+        c.execute("SELECT * FROM support_metrics WHERE member_id=? AND week=? AND year=?", (m["id"], week, year))
+        row = c.fetchone()
+        if row:
+            row = dict(row)
+            bottlenecks.append({
+                "name": m["name"].split()[0],
+                "incidents_resolved": row["incidents_resolved"],
+                "avg_resolution_hours": row["avg_resolution_hours"],
+                "sla_breached": row["sla_breached"],
+            })
+
+    rh = totals["avg_resolution_hours"]
+    avg_res = round(sum(rh) / len(rh), 1) if rh else 0
+    ti = totals["total_incidents"]
+    sla_pct = round(((ti - totals["sla_breached"]) / max(ti, 1)) * 100, 1)
+
+    conn.close()
+    return {
+        "totals": {
+            "incidents_opened": totals["incidents_opened"],
+            "incidents_resolved": totals["incidents_resolved"],
+            "avg_resolution_hours": avg_res,
+            "sla_breached": totals["sla_breached"],
+            "sla_percentage": sla_pct,
+        },
+        "weekly_chart": weekly_chart,
+        "bottlenecks": bottlenecks,
+    }
+
+
+@app.get("/api/metrics/docs")
+def metrics_docs():
+    conn = get_db()
+    c = conn.cursor()
+    rules = get_rules(conn)
+    week, year = current_week_year(conn)
+
+    c.execute("SELECT * FROM team_members WHERE stream='docs'")
+    members = [dict(r) for r in c.fetchall()]
+    weeks = _weeks_range(week)
+
+    weekly_chart = []
+    totals = {"docs_created": 0, "docs_updated": 0, "projects_covered": 0, "projects_total": 0}
+    bottlenecks = []
+
+    for i, w in enumerate(weeks):
+        wd = {"week": f"W{w}", "score": 0, "created": 0, "updated": 0}
+        for m in members:
+            c.execute("SELECT * FROM docs_metrics WHERE member_id=? AND week=? AND year=?", (m["id"], w, year))
+            row = c.fetchone()
+            if row:
+                row = dict(row)
+                sc, _ = calc_docs(row, rules)
+                wd["score"] += sc
+                wd["created"] += row["docs_created"]
+                wd["updated"] += row["docs_updated"]
+                if i == 7:
+                    totals["docs_created"] += row["docs_created"]
+                    totals["docs_updated"] += row["docs_updated"]
+                    totals["projects_covered"] = max(totals["projects_covered"], row["projects_covered"])
+                    totals["projects_total"] = max(totals["projects_total"], row["projects_total"])
+        weekly_chart.append(wd)
+
+    for m in members:
+        c.execute("SELECT * FROM docs_metrics WHERE member_id=? AND week=? AND year=?", (m["id"], week, year))
+        row = c.fetchone()
+        if row:
+            row = dict(row)
+            bottlenecks.append({
+                "name": m["name"].split()[0],
+                "docs_created": row["docs_created"],
+                "docs_updated": row["docs_updated"],
+                "projects_covered": row["projects_covered"],
+                "projects_total": row["projects_total"],
+            })
+
+    cov = round((totals["projects_covered"] / max(totals["projects_total"], 1)) * 100, 1)
+    conn.close()
+    return {
+        "totals": {
+            "docs_created": totals["docs_created"],
+            "docs_updated": totals["docs_updated"],
+            "projects_covered": totals["projects_covered"],
+            "projects_total": totals["projects_total"],
+            "coverage_percentage": cov,
+        },
+        "weekly_chart": weekly_chart,
+        "bottlenecks": bottlenecks,
+    }
+
+
+# ── Score rules ────────────────────────────────────────────────────────────────
+
+@app.get("/api/score-rules")
+def get_score_rules():
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT * FROM score_rules ORDER BY stream, id")
+    rules = [dict(r) for r in c.fetchall()]
+    conn.close()
+    return rules
+
+
+class ScoreRuleUpdate(BaseModel):
+    label: Optional[str] = None
+    points: Optional[int] = None
+
+
+@app.put("/api/score-rules/{rule_id}")
+def update_score_rule(rule_id: int, data: ScoreRuleUpdate, password: str = ""):
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    conn = get_db()
+    c = conn.cursor()
+    if data.label is not None:
+        c.execute("UPDATE score_rules SET label=? WHERE id=?", (data.label, rule_id))
+    if data.points is not None:
+        c.execute("UPDATE score_rules SET points=? WHERE id=?", (data.points, rule_id))
+    conn.commit()
+    conn.close()
+    return {"ok": True}
+
+
+# ── Team members ───────────────────────────────────────────────────────────────
+
+@app.get("/api/team")
+def get_team():
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT * FROM team_members ORDER BY stream, name")
+    members = [dict(r) for r in c.fetchall()]
+    conn.close()
+    return members
+
+
+class MemberCreate(BaseModel):
+    name: str
+    stream: str
+    avatar_color: Optional[str] = "#00cfff"
+
+
+class MemberUpdate(BaseModel):
+    name: Optional[str] = None
+    stream: Optional[str] = None
+    avatar_color: Optional[str] = None
+
+
+@app.post("/api/team")
+def create_member(data: MemberCreate, password: str = ""):
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("INSERT INTO team_members (name, stream, avatar_color) VALUES (?,?,?)",
+              (data.name, data.stream, data.avatar_color))
+    mid = c.lastrowid
+    conn.commit()
+    conn.close()
+    return {"id": mid, "name": data.name, "stream": data.stream, "avatar_color": data.avatar_color}
+
+
+@app.put("/api/team/{member_id}")
+def update_member(member_id: int, data: MemberUpdate, password: str = ""):
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    conn = get_db()
+    c = conn.cursor()
+    for field in ("name", "stream", "avatar_color"):
+        val = getattr(data, field)
+        if val is not None:
+            c.execute(f"UPDATE team_members SET {field}=? WHERE id=?", (val, member_id))
+    conn.commit()
+    conn.close()
+    return {"ok": True}
+
+
+@app.delete("/api/team/{member_id}")
+def delete_member(member_id: int, password: str = ""):
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("DELETE FROM team_members WHERE id=?", (member_id,))
+    conn.commit()
+    conn.close()
+    return {"ok": True}
+
+
+# ── Engineer profile & weekly tasks ────────────────────────────────────────────
+
+def _member_scores_8w(conn, member_id: int, stream: str, week: int, year: int, rules: list):
+    """Returns (weekly_scores list, breakdown_total dict) for the 8 weeks ending at `week`."""
+    c = conn.cursor()
+    weekly_scores = []
+    bd_total: dict = {}
+    for wo in range(8):
+        w = week - 7 + wo
+        if w <= 0:
+            w += 52
+        sw = 0
+        if stream == "dev":
+            c.execute("SELECT * FROM dev_metrics WHERE member_id=? AND week=? AND year=?", (member_id, w, year))
+            row = c.fetchone()
+            if row:
+                sw, bd = calc_dev(dict(row), rules)
+                for k, v in bd.items():
+                    bd_total[k] = bd_total.get(k, 0) + v
+        elif stream == "support":
+            c.execute("SELECT * FROM support_metrics WHERE member_id=? AND week=? AND year=?", (member_id, w, year))
+            row = c.fetchone()
+            if row:
+                sw, bd = calc_support(dict(row), rules)
+                for k, v in bd.items():
+                    bd_total[k] = bd_total.get(k, 0) + v
+        elif stream == "docs":
+            c.execute("SELECT * FROM docs_metrics WHERE member_id=? AND week=? AND year=?", (member_id, w, year))
+            row = c.fetchone()
+            if row:
+                sw, bd = calc_docs(dict(row), rules)
+                for k, v in bd.items():
+                    bd_total[k] = bd_total.get(k, 0) + v
+        weekly_scores.append(sw)
+    return weekly_scores, bd_total
+
+
+@app.get("/api/engineers/{member_id}/profile")
+def engineer_profile(member_id: int):
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT * FROM team_members WHERE id=?", (member_id,))
+    row = c.fetchone()
+    if not row:
+        conn.close()
+        raise HTTPException(404, "Engineer not found")
+    member = dict(row)
+
+    rules = get_rules(conn)
+    week, year = current_week_year(conn)
+    weekly_scores, bd_total = _member_scores_8w(conn, member_id, member["stream"], week, year, rules)
+    total = sum(weekly_scores)
+
+    # Weeks labels for chart
+    weeks_labels = []
+    for wo in range(8):
+        w = week - 7 + wo
+        if w <= 0:
+            w += 52
+        weeks_labels.append(w)
+    weekly_chart = [{"week": f"W{w}", "score": s} for w, s in zip(weeks_labels, weekly_scores)]
+
+    # Badges (same logic as leaderboard)
+    badges = []
+    if len(weekly_scores) >= 3:
+        last3 = weekly_scores[-3:]
+        if all(v > 0 for v in last3) and last3[-1] >= last3[-2] >= last3[-3]:
+            badges.append("fire")
+    if member["stream"] == "support":
+        breach_total = 0
+        for wo in range(4):
+            w2 = week - 3 + wo
+            if w2 <= 0:
+                w2 += 52
+            c.execute("SELECT sla_breached FROM support_metrics WHERE member_id=? AND week=? AND year=?",
+                      (member_id, w2, year))
+            r2 = c.fetchone()
+            if r2:
+                breach_total += r2["sla_breached"]
+        if breach_total == 0:
+            badges.append("shield")
+    if member["stream"] == "docs":
+        c.execute("SELECT docs_created FROM docs_metrics WHERE member_id=? AND week=? AND year=?",
+                  (member_id, week, year))
+        r2 = c.fetchone()
+        if r2 and r2["docs_created"] >= 3:
+            badges.append("scribe")
+
+    # MVP: check if this member has highest total among all
+    c.execute("SELECT id, stream FROM team_members")
+    all_members = [dict(r) for r in c.fetchall()]
+    all_totals = {}
+    for m2 in all_members:
+        sc, _ = _member_scores_8w(conn, m2["id"], m2["stream"], week, year, rules)
+        all_totals[m2["id"]] = sum(sc)
+    if all_totals and all_totals.get(member_id, 0) == max(all_totals.values()):
+        badges.append("mvp")
+
+    conn.close()
+    return {
+        "id": member_id,
+        "name": member["name"],
+        "stream": member["stream"],
+        "avatar_color": member["avatar_color"],
+        "total_score": total,
+        "current_week_score": weekly_scores[-1] if weekly_scores else 0,
+        "weekly_scores": weekly_scores,
+        "weekly_chart": weekly_chart,
+        "badges": badges,
+        "breakdown": bd_total,
+        "current_week": week,
+        "current_year": year,
+    }
+
+
+@app.get("/api/engineers/{member_id}/tasks")
+def get_engineer_tasks(member_id: int, week: int = None, year: int = None):
+    conn = get_db()
+    c = conn.cursor()
+    if week is None or year is None:
+        cw, cy = current_week_year(conn)
+        week = week if week is not None else cw
+        year = year if year is not None else cy
+    c.execute(
+        "SELECT * FROM weekly_tasks WHERE engineer_id=? AND week_number=? AND year=?",
+        (member_id, week, year),
+    )
+    row = c.fetchone()
+    conn.close()
+    if not row:
+        return None
+    row = dict(row)
+    row["what_was_done"] = json_lib.loads(row["what_was_done"])
+    row["next_week"] = json_lib.loads(row["next_week"])
+    return row
+
+
+class WeeklyTasksCreate(BaseModel):
+    week_number: int
+    year: int
+    what_was_done: list
+    next_week: list
+    stream: str = "dev"
+
+
+@app.post("/api/engineers/{member_id}/tasks")
+def upsert_engineer_tasks(member_id: int, data: WeeklyTasksCreate, password: str = ""):
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    conn = get_db()
+    c = conn.cursor()
+    c.execute(
+        "INSERT OR REPLACE INTO weekly_tasks "
+        "(engineer_id, week_number, year, what_was_done, next_week, stream) "
+        "VALUES (?,?,?,?,?,?)",
+        (member_id, data.week_number, data.year,
+         json_lib.dumps(data.what_was_done, ensure_ascii=False),
+         json_lib.dumps(data.next_week, ensure_ascii=False),
+         data.stream),
+    )
+    task_id = c.lastrowid
+    conn.commit()
+    conn.close()
+    return {"id": task_id, "ok": True}
+
+
+@app.delete("/api/engineers/{member_id}/tasks/{task_id}")
+def delete_engineer_tasks(member_id: int, task_id: int, password: str = ""):
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("DELETE FROM weekly_tasks WHERE id=? AND engineer_id=?", (task_id, member_id))
+    conn.commit()
+    conn.close()
+    return {"ok": True}
+
+
+# ── Config ─────────────────────────────────────────────────────────────────────
+
+@app.get("/api/config")
+def get_config():
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT key,value FROM config")
+    cfg = {r["key"]: r["value"] for r in c.fetchall()}
+    conn.close()
+    return cfg
+
+
+class ConfigUpdate(BaseModel):
+    github_token: Optional[str] = None
+    jira_token: Optional[str] = None
+    anthropic_admin_key: Optional[str] = None
+    ai_auto_sync: Optional[str] = None
+    team_name: Optional[str] = None
+    current_week: Optional[int] = None
+    current_year: Optional[int] = None
+
+
+@app.put("/api/config")
+def update_config(data: ConfigUpdate, password: str = ""):
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    conn = get_db()
+    c = conn.cursor()
+    for k, v in data.dict(exclude_none=True).items():
+        c.execute("INSERT OR REPLACE INTO config (key,value) VALUES (?,?)", (k, str(v)))
+    conn.commit()
+    conn.close()
+    return {"ok": True}
+
+
+# ── Admin metrics CRUD ─────────────────────────────────────────────────────────
+
+@app.get("/api/admin/metrics/{stream}/{week}")
+def admin_get_metrics(stream: str, week: int, year: int = None, password: str = ""):
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    conn = get_db()
+    c = conn.cursor()
+    if year is None:
+        _, year = current_week_year(conn)
+
+    c.execute("SELECT * FROM team_members WHERE stream=?", (stream,))
+    members = [dict(r) for r in c.fetchall()]
+
+    result = []
+    for m in members:
+        c.execute(f"SELECT * FROM {stream}_metrics WHERE member_id=? AND week=? AND year=?",
+                  (m["id"], week, year))
+        row = c.fetchone()
+        result.append({"member": m, "metrics": dict(row) if row else None})
+    conn.close()
+    return result
+
+
+class MetricUpdate(BaseModel):
+    metrics: Dict[str, Any]
+
+
+@app.put("/api/admin/metrics/{stream}/{week}/{member_id}")
+def admin_update_metrics(stream: str, week: int, member_id: int, data: MetricUpdate,
+                         year: int = None, password: str = ""):
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    conn = get_db()
+    c = conn.cursor()
+    if year is None:
+        _, year = current_week_year(conn)
+
+    m = data.metrics
+    if stream == "dev":
+        c.execute(
+            "INSERT OR REPLACE INTO dev_metrics "
+            "(member_id,week,year,prs_merged,tickets_closed,cycle_time_days,features_completed,deploys) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            (member_id, week, year,
+             m.get("prs_merged", 0), m.get("tickets_closed", 0),
+             m.get("cycle_time_days", 0.0), m.get("features_completed", 0),
+             m.get("deploys", 0)),
+        )
+    elif stream == "support":
+        c.execute(
+            "INSERT OR REPLACE INTO support_metrics "
+            "(member_id,week,year,incidents_opened,incidents_resolved,avg_resolution_hours,sla_breached,total_incidents) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            (member_id, week, year,
+             m.get("incidents_opened", 0), m.get("incidents_resolved", 0),
+             m.get("avg_resolution_hours", 0.0), m.get("sla_breached", 0),
+             m.get("total_incidents", 0)),
+        )
+    elif stream == "docs":
+        c.execute(
+            "INSERT OR REPLACE INTO docs_metrics "
+            "(member_id,week,year,docs_created,docs_updated,projects_covered,projects_total) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (member_id, week, year,
+             m.get("docs_created", 0), m.get("docs_updated", 0),
+             m.get("projects_covered", 0), m.get("projects_total", 10)),
+        )
+    conn.commit()
+    conn.close()
+    return {"ok": True}
+
+
+# ── AI Usage routes ────────────────────────────────────────────────────────────
+
+@app.get("/api/ai-usage")
+def get_ai_usage():
+    conn = get_db()
+    try:
+        result = _get_or_fetch_ai_usage(conn)
+    finally:
+        conn.close()
+    return result
+
+
+@app.post("/api/ai-usage/sync")
+def sync_ai_usage(password: str = ""):
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    conn = get_db()
+    try:
+        result = _get_or_fetch_ai_usage(conn, force=True)
+    finally:
+        conn.close()
+    return result
+
+
+@app.post("/api/admin/verify")
+def verify_admin(password: str = ""):
+    if password == ADMIN_PASSWORD:
+        return {"ok": True}
+    raise HTTPException(403, "Invalid password")
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000, reload=True)
