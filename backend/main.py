@@ -1,5 +1,5 @@
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional, Dict, Any
@@ -150,10 +150,11 @@ def seed_data():
         return
 
     # DO NOT CHANGE THESE NAMES
+    all_streams = json_lib.dumps(["dev", "support", "docs"])
     members = [
-        ("Andrey Brunetkin",   "dev",     "#00cfff"),
-        ("Andrey Pogrebnyak",  "support", "#7b61ff"),
-        ("Evgeniy Vinogradov", "docs",    "#00ff9d"),
+        ("Andrey Brunetkin",   all_streams, "#00cfff"),
+        ("Andrey Pogrebnyak",  all_streams, "#7b61ff"),
+        ("Evgeniy Vinogradov", all_streams, "#00ff9d"),
     ]
     c.executemany("INSERT INTO team_members (name, stream, avatar_color) VALUES (?,?,?)", members)
     conn.commit()
@@ -171,38 +172,39 @@ def seed_data():
         if w <= 0:
             w += 52
         for row in rows:
-            mid, stream = row["id"], row["stream"]
-            if stream == "dev":
-                ct = round(rng.uniform(0.5, 4.5), 1)
-                c.execute(
-                    "INSERT OR IGNORE INTO dev_metrics "
-                    "(member_id,week,year,prs_merged,tickets_closed,cycle_time_days,features_completed,deploys) "
-                    "VALUES (?,?,?,?,?,?,?,?)",
-                    (mid, w, current_year,
-                     rng.randint(2, 9), rng.randint(3, 12), ct,
-                     rng.randint(1, 4), rng.randint(1, 6)),
-                )
-            elif stream == "support":
-                opened = rng.randint(2, 8)
-                resolved = rng.randint(max(1, opened - 2), opened)
-                c.execute(
-                    "INSERT OR IGNORE INTO support_metrics "
-                    "(member_id,week,year,incidents_opened,incidents_resolved,avg_resolution_hours,sla_breached,total_incidents) "
-                    "VALUES (?,?,?,?,?,?,?,?)",
-                    (mid, w, current_year,
-                     opened, resolved,
-                     round(rng.uniform(0.5, 6.0), 1),
-                     rng.randint(0, 2), opened),
-                )
-            elif stream == "docs":
-                c.execute(
-                    "INSERT OR IGNORE INTO docs_metrics "
-                    "(member_id,week,year,docs_created,docs_updated,projects_covered,projects_total) "
-                    "VALUES (?,?,?,?,?,?,?)",
-                    (mid, w, current_year,
-                     rng.randint(1, 5), rng.randint(2, 9),
-                     rng.randint(5, 9), 10),
-                )
+            mid = row["id"]
+            for stream in parse_streams(row["stream"]):
+                if stream == "dev":
+                    ct = round(rng.uniform(0.5, 4.5), 1)
+                    c.execute(
+                        "INSERT OR IGNORE INTO dev_metrics "
+                        "(member_id,week,year,prs_merged,tickets_closed,cycle_time_days,features_completed,deploys) "
+                        "VALUES (?,?,?,?,?,?,?,?)",
+                        (mid, w, current_year,
+                         rng.randint(2, 9), rng.randint(3, 12), ct,
+                         rng.randint(1, 4), rng.randint(1, 6)),
+                    )
+                elif stream == "support":
+                    opened = rng.randint(2, 8)
+                    resolved = rng.randint(max(1, opened - 2), opened)
+                    c.execute(
+                        "INSERT OR IGNORE INTO support_metrics "
+                        "(member_id,week,year,incidents_opened,incidents_resolved,avg_resolution_hours,sla_breached,total_incidents) "
+                        "VALUES (?,?,?,?,?,?,?,?)",
+                        (mid, w, current_year,
+                         opened, resolved,
+                         round(rng.uniform(0.5, 6.0), 1),
+                         rng.randint(0, 2), opened),
+                    )
+                elif stream == "docs":
+                    c.execute(
+                        "INSERT OR IGNORE INTO docs_metrics "
+                        "(member_id,week,year,docs_created,docs_updated,projects_covered,projects_total) "
+                        "VALUES (?,?,?,?,?,?,?)",
+                        (mid, w, current_year,
+                         rng.randint(1, 5), rng.randint(2, 9),
+                         rng.randint(5, 9), 10),
+                    )
 
     rules = [
         ("dev", "pr_merged", "PR merged", 50, None),
@@ -1267,6 +1269,20 @@ def change_password(data: ChangePasswordRequest):
     conn.commit()
     conn.close()
     return {"ok": True}
+
+
+@app.post("/api/admin/reset-seed")
+def reset_seed(x_admin_password: str = Header(default="")):
+    if x_admin_password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("DELETE FROM team_members")   # cascades to all metrics and weekly_tasks
+    c.execute("DELETE FROM score_rules")    # prevent duplicate rules on reseed
+    conn.commit()
+    conn.close()
+    seed_data()
+    return {"status": "ok"}
 
 
 if __name__ == "__main__":
