@@ -149,13 +149,11 @@ def seed_data():
         conn.close()
         return
 
+    # DO NOT CHANGE THESE NAMES
     members = [
-        ("Алекс Петров", "dev", "#00cfff"),
-        ("Мария Иванова", "dev", "#7b61ff"),
-        ("Дмитрий Козлов", "support", "#00ff9d"),
-        ("Елена Соколова", "support", "#ff6b6b"),
-        ("Сергей Морозов", "docs", "#ffd700"),
-        ("Анна Волкова", "docs", "#ff8c00"),
+        ("Andrey Brunetkin",   "dev",     "#00cfff"),
+        ("Andrey Pogrebnyak",  "support", "#7b61ff"),
+        ("Evgeniy Vinogradov", "docs",    "#00ff9d"),
     ]
     c.executemany("INSERT INTO team_members (name, stream, avatar_color) VALUES (?,?,?)", members)
     conn.commit()
