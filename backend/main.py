@@ -251,6 +251,18 @@ def rule_pts(rules, key):
     return 0
 
 
+def parse_streams(stream_val) -> list:
+    """Parse stream field (plain string or JSON array) into a list of stream names."""
+    if isinstance(stream_val, list):
+        return stream_val
+    if stream_val and stream_val.startswith('['):
+        try:
+            return json_lib.loads(stream_val)
+        except Exception:
+            pass
+    return [stream_val] if stream_val else ['dev']
+
+
 def calc_dev(m, rules):
     pts = 0
     bd = {}
@@ -413,30 +425,31 @@ def _compute_leverage(conn, tokens_per_user: list) -> list:
         tok = ud.get("tokens", 0)
 
         tasks = 0
-        if m["stream"] == "dev":
-            c.execute(
-                "SELECT prs_merged, tickets_closed, deploys FROM dev_metrics "
-                "WHERE member_id=? AND week=? AND year=?", (m["id"], week, year)
-            )
-            row = c.fetchone()
-            if row:
-                tasks = row["prs_merged"] + row["tickets_closed"] + row["deploys"]
-        elif m["stream"] == "support":
-            c.execute(
-                "SELECT incidents_resolved FROM support_metrics "
-                "WHERE member_id=? AND week=? AND year=?", (m["id"], week, year)
-            )
-            row = c.fetchone()
-            if row:
-                tasks = row["incidents_resolved"]
-        elif m["stream"] == "docs":
-            c.execute(
-                "SELECT docs_created, docs_updated FROM docs_metrics "
-                "WHERE member_id=? AND week=? AND year=?", (m["id"], week, year)
-            )
-            row = c.fetchone()
-            if row:
-                tasks = row["docs_created"] + row["docs_updated"]
+        for ms in parse_streams(m["stream"]):
+            if ms == "dev":
+                c.execute(
+                    "SELECT prs_merged, tickets_closed, deploys FROM dev_metrics "
+                    "WHERE member_id=? AND week=? AND year=?", (m["id"], week, year)
+                )
+                row = c.fetchone()
+                if row:
+                    tasks += row["prs_merged"] + row["tickets_closed"] + row["deploys"]
+            elif ms == "support":
+                c.execute(
+                    "SELECT incidents_resolved FROM support_metrics "
+                    "WHERE member_id=? AND week=? AND year=?", (m["id"], week, year)
+                )
+                row = c.fetchone()
+                if row:
+                    tasks += row["incidents_resolved"]
+            elif ms == "docs":
+                c.execute(
+                    "SELECT docs_created, docs_updated FROM docs_metrics "
+                    "WHERE member_id=? AND week=? AND year=?", (m["id"], week, year)
+                )
+                row = c.fetchone()
+                if row:
+                    tasks += row["docs_created"] + row["docs_updated"]
 
         tok_k = tok / 1000
         leverage = round(tasks / max(tok_k, 0.1), 3)
@@ -514,7 +527,8 @@ def leaderboard():
 
     board = []
     for m in members:
-        mid, stream = m["id"], m["stream"]
+        mid = m["id"]
+        streams = parse_streams(m["stream"])
         weekly_scores = []
         bd_total: Dict[str, int] = {}
 
@@ -524,27 +538,31 @@ def leaderboard():
                 w += 52
 
             sw = 0
-            if stream == "dev":
-                c.execute("SELECT * FROM dev_metrics WHERE member_id=? AND week=? AND year=?", (mid, w, year))
-                row = c.fetchone()
-                if row:
-                    sw, bd = calc_dev(dict(row), rules)
-                    for k, v in bd.items():
-                        bd_total[k] = bd_total.get(k, 0) + v
-            elif stream == "support":
-                c.execute("SELECT * FROM support_metrics WHERE member_id=? AND week=? AND year=?", (mid, w, year))
-                row = c.fetchone()
-                if row:
-                    sw, bd = calc_support(dict(row), rules)
-                    for k, v in bd.items():
-                        bd_total[k] = bd_total.get(k, 0) + v
-            elif stream == "docs":
-                c.execute("SELECT * FROM docs_metrics WHERE member_id=? AND week=? AND year=?", (mid, w, year))
-                row = c.fetchone()
-                if row:
-                    sw, bd = calc_docs(dict(row), rules)
-                    for k, v in bd.items():
-                        bd_total[k] = bd_total.get(k, 0) + v
+            for stream in streams:
+                if stream == "dev":
+                    c.execute("SELECT * FROM dev_metrics WHERE member_id=? AND week=? AND year=?", (mid, w, year))
+                    row = c.fetchone()
+                    if row:
+                        s2, bd = calc_dev(dict(row), rules)
+                        sw += s2
+                        for k, v in bd.items():
+                            bd_total[k] = bd_total.get(k, 0) + v
+                elif stream == "support":
+                    c.execute("SELECT * FROM support_metrics WHERE member_id=? AND week=? AND year=?", (mid, w, year))
+                    row = c.fetchone()
+                    if row:
+                        s2, bd = calc_support(dict(row), rules)
+                        sw += s2
+                        for k, v in bd.items():
+                            bd_total[k] = bd_total.get(k, 0) + v
+                elif stream == "docs":
+                    c.execute("SELECT * FROM docs_metrics WHERE member_id=? AND week=? AND year=?", (mid, w, year))
+                    row = c.fetchone()
+                    if row:
+                        s2, bd = calc_docs(dict(row), rules)
+                        sw += s2
+                        for k, v in bd.items():
+                            bd_total[k] = bd_total.get(k, 0) + v
 
             weekly_scores.append(sw)
 
@@ -552,13 +570,11 @@ def leaderboard():
 
         # Badges
         badges = []
-        # Fire: last 3 weeks all positive and increasing
         if len(weekly_scores) >= 3:
             last3 = weekly_scores[-3:]
             if all(v > 0 for v in last3) and last3[-1] >= last3[-2] >= last3[-3]:
                 badges.append("fire")
-        # Shield: support with zero breaches in last 4 weeks
-        if stream == "support":
+        if "support" in streams:
             breach_total = 0
             for wo in range(4):
                 w2 = week - 3 + wo
@@ -570,8 +586,7 @@ def leaderboard():
                     breach_total += row["sla_breached"]
             if breach_total == 0:
                 badges.append("shield")
-        # Scribe: docs_created >= 3 this week
-        if stream == "docs":
+        if "docs" in streams:
             c.execute("SELECT docs_created FROM docs_metrics WHERE member_id=? AND week=? AND year=?", (mid, week, year))
             row = c.fetchone()
             if row and row["docs_created"] >= 3:
@@ -580,7 +595,8 @@ def leaderboard():
         board.append({
             "id": mid,
             "name": m["name"],
-            "stream": stream,
+            "stream": streams[0] if streams else "dev",
+            "streams": streams,
             "avatar_color": m["avatar_color"],
             "total_score": total,
             "weekly_scores": weekly_scores,
@@ -614,8 +630,8 @@ def metrics_dev():
     rules = get_rules(conn)
     week, year = current_week_year(conn)
 
-    c.execute("SELECT * FROM team_members WHERE stream='dev'")
-    members = [dict(r) for r in c.fetchall()]
+    c.execute("SELECT * FROM team_members")
+    members = [m for m in [dict(r) for r in c.fetchall()] if "dev" in parse_streams(m["stream"])]
     weeks = _weeks_range(week)
 
     weekly_chart = []
@@ -679,8 +695,8 @@ def metrics_support():
     rules = get_rules(conn)
     week, year = current_week_year(conn)
 
-    c.execute("SELECT * FROM team_members WHERE stream='support'")
-    members = [dict(r) for r in c.fetchall()]
+    c.execute("SELECT * FROM team_members")
+    members = [m for m in [dict(r) for r in c.fetchall()] if "support" in parse_streams(m["stream"])]
     weeks = _weeks_range(week)
 
     weekly_chart = []
@@ -744,8 +760,8 @@ def metrics_docs():
     rules = get_rules(conn)
     week, year = current_week_year(conn)
 
-    c.execute("SELECT * FROM team_members WHERE stream='docs'")
-    members = [dict(r) for r in c.fetchall()]
+    c.execute("SELECT * FROM team_members")
+    members = [m for m in [dict(r) for r in c.fetchall()] if "docs" in parse_streams(m["stream"])]
     weeks = _weeks_range(week)
 
     weekly_chart = []
@@ -836,21 +852,28 @@ def update_score_rule(rule_id: int, data: ScoreRuleUpdate, password: str = ""):
 def get_team():
     conn = get_db()
     c = conn.cursor()
-    c.execute("SELECT * FROM team_members ORDER BY stream, name")
-    members = [dict(r) for r in c.fetchall()]
+    c.execute("SELECT * FROM team_members ORDER BY name")
+    members = []
+    for r in c.fetchall():
+        m = dict(r)
+        m["streams"] = parse_streams(m["stream"])
+        m["stream"] = m["streams"][0] if m["streams"] else "dev"
+        members.append(m)
     conn.close()
     return members
 
 
 class MemberCreate(BaseModel):
     name: str
-    stream: str
+    streams: Optional[list] = None
+    stream: Optional[str] = None  # backward compat
     avatar_color: Optional[str] = "#00cfff"
 
 
 class MemberUpdate(BaseModel):
     name: Optional[str] = None
-    stream: Optional[str] = None
+    streams: Optional[list] = None
+    stream: Optional[str] = None  # backward compat
     avatar_color: Optional[str] = None
 
 
@@ -860,12 +883,13 @@ def create_member(data: MemberCreate, password: str = ""):
         raise HTTPException(403, "Unauthorized")
     conn = get_db()
     c = conn.cursor()
+    streams = data.streams or ([data.stream] if data.stream else ["dev"])
     c.execute("INSERT INTO team_members (name, stream, avatar_color) VALUES (?,?,?)",
-              (data.name, data.stream, data.avatar_color))
+              (data.name, json_lib.dumps(streams), data.avatar_color))
     mid = c.lastrowid
     conn.commit()
     conn.close()
-    return {"id": mid, "name": data.name, "stream": data.stream, "avatar_color": data.avatar_color}
+    return {"id": mid, "name": data.name, "streams": streams, "stream": streams[0], "avatar_color": data.avatar_color}
 
 
 @app.put("/api/team/{member_id}")
@@ -874,10 +898,16 @@ def update_member(member_id: int, data: MemberUpdate, password: str = ""):
         raise HTTPException(403, "Unauthorized")
     conn = get_db()
     c = conn.cursor()
-    for field in ("name", "stream", "avatar_color"):
-        val = getattr(data, field)
-        if val is not None:
-            c.execute(f"UPDATE team_members SET {field}=? WHERE id=?", (val, member_id))
+    if data.name is not None:
+        c.execute("UPDATE team_members SET name=? WHERE id=?", (data.name, member_id))
+    if data.streams is not None:
+        c.execute("UPDATE team_members SET stream=? WHERE id=?",
+                  (json_lib.dumps(data.streams), member_id))
+    elif data.stream is not None:
+        c.execute("UPDATE team_members SET stream=? WHERE id=?",
+                  (json_lib.dumps([data.stream]), member_id))
+    if data.avatar_color is not None:
+        c.execute("UPDATE team_members SET avatar_color=? WHERE id=?", (data.avatar_color, member_id))
     conn.commit()
     conn.close()
     return {"ok": True}
@@ -897,8 +927,9 @@ def delete_member(member_id: int, password: str = ""):
 
 # ── Engineer profile & weekly tasks ────────────────────────────────────────────
 
-def _member_scores_8w(conn, member_id: int, stream: str, week: int, year: int, rules: list):
+def _member_scores_8w(conn, member_id: int, stream_val, week: int, year: int, rules: list):
     """Returns (weekly_scores list, breakdown_total dict) for the 8 weeks ending at `week`."""
+    streams = parse_streams(stream_val)
     c = conn.cursor()
     weekly_scores = []
     bd_total: dict = {}
@@ -907,27 +938,31 @@ def _member_scores_8w(conn, member_id: int, stream: str, week: int, year: int, r
         if w <= 0:
             w += 52
         sw = 0
-        if stream == "dev":
-            c.execute("SELECT * FROM dev_metrics WHERE member_id=? AND week=? AND year=?", (member_id, w, year))
-            row = c.fetchone()
-            if row:
-                sw, bd = calc_dev(dict(row), rules)
-                for k, v in bd.items():
-                    bd_total[k] = bd_total.get(k, 0) + v
-        elif stream == "support":
-            c.execute("SELECT * FROM support_metrics WHERE member_id=? AND week=? AND year=?", (member_id, w, year))
-            row = c.fetchone()
-            if row:
-                sw, bd = calc_support(dict(row), rules)
-                for k, v in bd.items():
-                    bd_total[k] = bd_total.get(k, 0) + v
-        elif stream == "docs":
-            c.execute("SELECT * FROM docs_metrics WHERE member_id=? AND week=? AND year=?", (member_id, w, year))
-            row = c.fetchone()
-            if row:
-                sw, bd = calc_docs(dict(row), rules)
-                for k, v in bd.items():
-                    bd_total[k] = bd_total.get(k, 0) + v
+        for stream in streams:
+            if stream == "dev":
+                c.execute("SELECT * FROM dev_metrics WHERE member_id=? AND week=? AND year=?", (member_id, w, year))
+                row = c.fetchone()
+                if row:
+                    s2, bd = calc_dev(dict(row), rules)
+                    sw += s2
+                    for k, v in bd.items():
+                        bd_total[k] = bd_total.get(k, 0) + v
+            elif stream == "support":
+                c.execute("SELECT * FROM support_metrics WHERE member_id=? AND week=? AND year=?", (member_id, w, year))
+                row = c.fetchone()
+                if row:
+                    s2, bd = calc_support(dict(row), rules)
+                    sw += s2
+                    for k, v in bd.items():
+                        bd_total[k] = bd_total.get(k, 0) + v
+            elif stream == "docs":
+                c.execute("SELECT * FROM docs_metrics WHERE member_id=? AND week=? AND year=?", (member_id, w, year))
+                row = c.fetchone()
+                if row:
+                    s2, bd = calc_docs(dict(row), rules)
+                    sw += s2
+                    for k, v in bd.items():
+                        bd_total[k] = bd_total.get(k, 0) + v
         weekly_scores.append(sw)
     return weekly_scores, bd_total
 
@@ -958,12 +993,13 @@ def engineer_profile(member_id: int):
     weekly_chart = [{"week": f"W{w}", "score": s} for w, s in zip(weeks_labels, weekly_scores)]
 
     # Badges (same logic as leaderboard)
+    member_streams = parse_streams(member["stream"])
     badges = []
     if len(weekly_scores) >= 3:
         last3 = weekly_scores[-3:]
         if all(v > 0 for v in last3) and last3[-1] >= last3[-2] >= last3[-3]:
             badges.append("fire")
-    if member["stream"] == "support":
+    if "support" in member_streams:
         breach_total = 0
         for wo in range(4):
             w2 = week - 3 + wo
@@ -976,7 +1012,7 @@ def engineer_profile(member_id: int):
                 breach_total += r2["sla_breached"]
         if breach_total == 0:
             badges.append("shield")
-    if member["stream"] == "docs":
+    if "docs" in member_streams:
         c.execute("SELECT docs_created FROM docs_metrics WHERE member_id=? AND week=? AND year=?",
                   (member_id, week, year))
         r2 = c.fetchone()
@@ -997,7 +1033,8 @@ def engineer_profile(member_id: int):
     return {
         "id": member_id,
         "name": member["name"],
-        "stream": member["stream"],
+        "stream": member_streams[0] if member_streams else member["stream"],
+        "streams": member_streams,
         "avatar_color": member["avatar_color"],
         "total_score": total,
         "current_week_score": weekly_scores[-1] if weekly_scores else 0,
@@ -1119,8 +1156,8 @@ def admin_get_metrics(stream: str, week: int, year: int = None, password: str = 
     if year is None:
         _, year = current_week_year(conn)
 
-    c.execute("SELECT * FROM team_members WHERE stream=?", (stream,))
-    members = [dict(r) for r in c.fetchall()]
+    c.execute("SELECT * FROM team_members")
+    members = [m for m in [dict(r) for r in c.fetchall()] if stream in parse_streams(m["stream"])]
 
     result = []
     for m in members:

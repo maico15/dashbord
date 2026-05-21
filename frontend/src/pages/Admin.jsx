@@ -197,6 +197,34 @@ function ConfigSection({ pw }) {
   )
 }
 
+// ── Stream checkboxes ─────────────────────────────────────────────────────────
+
+function StreamCheckboxes({ selected, onChange }) {
+  const toggle = (s) => {
+    if (selected.includes(s)) {
+      const next = selected.filter((x) => x !== s)
+      if (next.length > 0) onChange(next)
+    } else {
+      onChange([...selected, s])
+    }
+  }
+  return (
+    <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
+      {STREAMS.map((s) => (
+        <label key={s} style={{ display: 'flex', alignItems: 'center', gap: 4, cursor: 'pointer', userSelect: 'none' }}>
+          <input
+            type="checkbox"
+            checked={selected.includes(s)}
+            onChange={() => toggle(s)}
+            style={{ accentColor: 'var(--accent1)', cursor: 'pointer' }}
+          />
+          <span className={`tag tag-${s}`} style={{ cursor: 'pointer' }}>{STREAM_LABELS[s]}</span>
+        </label>
+      ))}
+    </div>
+  )
+}
+
 // ── Task editor (used inside TeamSection) ────────────────────────────────────
 
 function TaskEditor({ member, pw, onClose }) {
@@ -210,7 +238,7 @@ function TaskEditor({ member, pw, onClose }) {
   const [year, setYear]       = useState(new Date().getFullYear())
   const [whatDone, setWhatDone] = useState('')
   const [plan, setPlan]       = useState('')
-  const [stream, setStream]   = useState(member.stream)
+  const [stream, setStream]   = useState((member.streams && member.streams[0]) || member.stream || 'dev')
   const [saving, setSaving]   = useState(false)
   const [saved, setSaved]     = useState(false)
 
@@ -314,7 +342,7 @@ function TeamSection({ pw }) {
   const [members, setMembers]   = useState([])
   const [editing, setEditing]   = useState(null)
   const [expandedId, setExpandedId] = useState(null)
-  const [newMember, setNewMember] = useState({ name: '', stream: 'dev', avatar_color: '#00cfff' })
+  const [newMember, setNewMember] = useState({ name: '', streams: ['dev'], avatar_color: '#00cfff' })
 
   const load = () => api.get('/team').then(setMembers)
   useEffect(() => { load() }, [])
@@ -322,7 +350,7 @@ function TeamSection({ pw }) {
   const handleAdd = async () => {
     if (!newMember.name.trim()) return
     await api.post('/team', newMember, pw)
-    setNewMember({ name: '', stream: 'dev', avatar_color: '#00cfff' })
+    setNewMember({ name: '', streams: ['dev'], avatar_color: '#00cfff' })
     load()
   }
 
@@ -335,7 +363,7 @@ function TeamSection({ pw }) {
 
   const handleSaveEdit = async () => {
     await api.put(`/team/${editing.id}`, {
-      name: editing.name, stream: editing.stream, avatar_color: editing.avatar_color,
+      name: editing.name, streams: editing.streams, avatar_color: editing.avatar_color,
     }, pw)
     setEditing(null)
     load()
@@ -357,10 +385,10 @@ function TeamSection({ pw }) {
               <div style={{ display: 'flex', gap: 8, padding: '10px 14px', alignItems: 'center', flexWrap: 'wrap' }}>
                 <input value={editing.name} onChange={(e) => setEditing({ ...editing, name: e.target.value })}
                   style={{ flex: 1, minWidth: 140, background: 'var(--card2)', border: '1px solid var(--border)', borderRadius: 5, color: 'var(--text)', padding: '5px 8px', fontSize: 13 }} />
-                <select value={editing.stream} onChange={(e) => setEditing({ ...editing, stream: e.target.value })}
-                  style={{ background: 'var(--card2)', border: '1px solid var(--border)', borderRadius: 5, color: 'var(--text)', padding: '5px 8px', fontSize: 13 }}>
-                  {STREAMS.map(s => <option key={s} value={s}>{STREAM_LABELS[s]}</option>)}
-                </select>
+                <StreamCheckboxes
+                  selected={editing.streams || [editing.stream]}
+                  onChange={(v) => setEditing({ ...editing, streams: v })}
+                />
                 <input type="color" value={editing.avatar_color} onChange={(e) => setEditing({ ...editing, avatar_color: e.target.value })} />
                 <button className="btn btn-primary" style={{ padding: '5px 12px' }} onClick={handleSaveEdit}>✓</button>
                 <button className="btn btn-ghost"   style={{ padding: '5px 12px' }} onClick={() => setEditing(null)}>✕</button>
@@ -374,12 +402,16 @@ function TeamSection({ pw }) {
                   {m.name.split(' ').slice(0, 2).map(w => w[0]).join('')}
                 </div>
                 <span style={{ flex: 1, fontSize: 14, fontWeight: 500 }}>{m.name}</span>
-                <span className={`tag tag-${m.stream}`}>{STREAM_LABELS[m.stream]}</span>
+                <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+                  {(m.streams || [m.stream]).map(s => (
+                    <span key={s} className={`tag tag-${s}`}>{STREAM_LABELS[s]}</span>
+                  ))}
+                </div>
                 <span style={{ fontSize: 11, color: 'var(--muted)', marginLeft: 4 }}>
                   {expandedId === m.id ? '▲ задачи' : '▼ задачи'}
                 </span>
                 <button className="btn btn-ghost" style={{ padding: '3px 8px', fontSize: 12 }}
-                  onClick={(e) => { e.stopPropagation(); setEditing({ ...m }); setExpandedId(null) }}>✏</button>
+                  onClick={(e) => { e.stopPropagation(); setEditing({ ...m, streams: m.streams || [m.stream] }); setExpandedId(null) }}>✏</button>
                 <button className="btn btn-danger" style={{ padding: '3px 8px', fontSize: 12 }}
                   onClick={(e) => { e.stopPropagation(); handleDelete(m.id) }}>✕</button>
               </div>
@@ -399,10 +431,10 @@ function TeamSection({ pw }) {
             onChange={(e) => setNewMember({ ...newMember, name: e.target.value })}
             style={{ flex: 1, minWidth: 140, background: 'var(--card2)', border: '1px solid var(--border)', borderRadius: 5, color: 'var(--text)', padding: '5px 8px', fontSize: 13 }}
           />
-          <select value={newMember.stream} onChange={(e) => setNewMember({ ...newMember, stream: e.target.value })}
-            style={{ background: 'var(--card2)', border: '1px solid var(--border)', borderRadius: 5, color: 'var(--text)', padding: '5px 8px', fontSize: 13 }}>
-            {STREAMS.map(s => <option key={s} value={s}>{STREAM_LABELS[s]}</option>)}
-          </select>
+          <StreamCheckboxes
+            selected={newMember.streams}
+            onChange={(v) => setNewMember({ ...newMember, streams: v })}
+          />
           <input type="color" value={newMember.avatar_color} onChange={(e) => setNewMember({ ...newMember, avatar_color: e.target.value })} />
           <button className="btn btn-primary" style={{ padding: '5px 14px' }} onClick={handleAdd}>+ Добавить</button>
         </div>

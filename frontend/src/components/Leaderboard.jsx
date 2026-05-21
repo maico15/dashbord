@@ -93,9 +93,13 @@ export default function Leaderboard({ data }) {
                   </div>
                 </td>
                 <td>
-                  <span className={`tag tag-${member.stream}`}>
-                    {STREAM_LABELS[member.stream] || member.stream}
-                  </span>
+                  <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+                    {(member.streams || [member.stream]).map((s) => (
+                      <span key={s} className={`tag tag-${s}`}>
+                        {STREAM_LABELS[s] || s}
+                      </span>
+                    ))}
+                  </div>
                 </td>
                 <td>
                   <span className="lb-score">{member.total_score.toLocaleString()}</span>
