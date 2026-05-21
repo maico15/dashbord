@@ -3,7 +3,7 @@ import { Link } from 'react-router-dom'
 import { api } from '../api/client'
 
 const STREAMS = ['dev', 'support', 'docs']
-const STREAM_LABELS = { dev: 'Разработка', support: 'Суппорт', docs: 'Документация' }
+const STREAM_LABELS = { dev: 'Development', support: 'Support', docs: 'Documentation' }
 
 const METRIC_FIELDS = {
   dev: [
@@ -44,7 +44,7 @@ function Login({ onLogin }) {
       sessionStorage.setItem('admin_pw', pw)
       onLogin(pw)
     } catch {
-      setError('Неверный пароль')
+      setError('Invalid password')
     } finally {
       setLoading(false)
     }
@@ -58,13 +58,13 @@ function Login({ onLogin }) {
         <form onSubmit={handleSubmit}>
           <input
             type="password"
-            placeholder="Пароль"
+            placeholder="Password"
             value={pw}
             onChange={(e) => setPw(e.target.value)}
             autoFocus
           />
           <button type="submit" className="btn btn-primary" style={{ width: '100%' }} disabled={loading}>
-            {loading ? <span className="spinner" /> : 'Войти'}
+            {loading ? <span className="spinner" /> : 'Login'}
           </button>
           {error && <div className="error">{error}</div>}
         </form>
@@ -117,7 +117,7 @@ function ConfigSection({ pw }) {
 
   return (
     <div className="admin-section">
-      <h2>Конфигурация</h2>
+      <h2>Configuration</h2>
       <div className="card">
         <div className="form-row">
           <div className="form-group">
@@ -189,7 +189,7 @@ function ConfigSection({ pw }) {
 
         <div className="flex-end mt-8">
           <button className="btn btn-primary" onClick={handleSave}>
-            {saved ? '✓ Сохранено' : 'Сохранить'}
+            {saved ? '✓ Saved' : 'Save'}
           </button>
         </div>
       </div>
@@ -290,15 +290,15 @@ function TaskEditor({ member, pw, onClose }) {
     }}>
       <div style={{ display: 'flex', gap: 10, marginBottom: 12, alignItems: 'flex-end' }}>
         <div className="form-group" style={{ maxWidth: 100 }}>
-          <label>Неделя</label>
+          <label>Week</label>
           <input type="number" min={1} max={53} value={week} onChange={(e) => setWeek(+e.target.value || 1)} />
         </div>
         <div className="form-group" style={{ maxWidth: 100 }}>
-          <label>Год</label>
+          <label>Year</label>
           <input type="number" value={year} onChange={(e) => setYear(+e.target.value || 2025)} />
         </div>
         <div className="form-group" style={{ maxWidth: 140 }}>
-          <label>Поток</label>
+          <label>Stream</label>
           <select value={stream} onChange={(e) => setStream(e.target.value)}>
             {STREAMS.map(s => <option key={s} value={s}>{STREAM_LABELS[s]}</option>)}
           </select>
@@ -309,19 +309,19 @@ function TaskEditor({ member, pw, onClose }) {
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 10 }}>
         <div>
           <div style={{ fontSize: 11, color: 'var(--accent1)', textTransform: 'uppercase', letterSpacing: '0.07em', marginBottom: 5, fontWeight: 600 }}>
-            ЧТО СДЕЛАНО
+            WHAT WAS DONE
           </div>
           <textarea
-            rows={4} style={inputStyle} placeholder={"Одна задача — одна строка\nФикс бага в авторизации\nCode review #234"}
+            rows={4} style={inputStyle} placeholder={"One task per line\nFixed auth bug\nCode review #234"}
             value={whatDone} onChange={(e) => setWhatDone(e.target.value)}
           />
         </div>
         <div>
           <div style={{ fontSize: 11, color: 'var(--accent2)', textTransform: 'uppercase', letterSpacing: '0.07em', marginBottom: 5, fontWeight: 600 }}>
-            ПЛАН НА СЛЕДУЮЩУЮ НЕДЕЛЮ
+            NEXT WEEK PLAN
           </div>
           <textarea
-            rows={4} style={inputStyle} placeholder={"Одна задача — одна строка\nРефакторинг модуля X\nНаписать тесты"}
+            rows={4} style={inputStyle} placeholder={"One task per line\nRefactor module X\nWrite tests"}
             value={plan} onChange={(e) => setPlan(e.target.value)}
           />
         </div>
@@ -329,7 +329,7 @@ function TaskEditor({ member, pw, onClose }) {
 
       <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
         <button className="btn btn-primary" onClick={handleSave} disabled={saving}>
-          {saving ? <span className="spinner" /> : saved ? '✓ Сохранено' : 'Сохранить'}
+          {saving ? <span className="spinner" /> : saved ? '✓ Saved' : 'Save'}
         </button>
       </div>
     </div>
@@ -355,7 +355,7 @@ function TeamSection({ pw }) {
   }
 
   const handleDelete = async (id) => {
-    if (!confirm('Удалить участника?')) return
+    if (!confirm('Delete member?')) return
     await api.del(`/team/${id}`, pw)
     if (expandedId === id) setExpandedId(null)
     load()
@@ -376,7 +376,7 @@ function TeamSection({ pw }) {
 
   return (
     <div className="admin-section">
-      <h2>Участники команды</h2>
+      <h2>Team Members</h2>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
         {members.map((m) => (
           <div key={m.id} className="card" style={{ padding: 0, overflow: 'hidden' }}>
@@ -408,7 +408,7 @@ function TeamSection({ pw }) {
                   ))}
                 </div>
                 <span style={{ fontSize: 11, color: 'var(--muted)', marginLeft: 4 }}>
-                  {expandedId === m.id ? '▲ задачи' : '▼ задачи'}
+                  {expandedId === m.id ? '▲ tasks' : '▼ tasks'}
                 </span>
                 <button className="btn btn-ghost" style={{ padding: '3px 8px', fontSize: 12 }}
                   onClick={(e) => { e.stopPropagation(); setEditing({ ...m, streams: m.streams || [m.stream] }); setExpandedId(null) }}>✏</button>
@@ -427,7 +427,7 @@ function TeamSection({ pw }) {
         {/* Add new member row */}
         <div className="card" style={{ display: 'flex', gap: 8, padding: '10px 14px', alignItems: 'center', flexWrap: 'wrap' }}>
           <input
-            placeholder="Имя нового участника" value={newMember.name}
+            placeholder="New member name" value={newMember.name}
             onChange={(e) => setNewMember({ ...newMember, name: e.target.value })}
             style={{ flex: 1, minWidth: 140, background: 'var(--card2)', border: '1px solid var(--border)', borderRadius: 5, color: 'var(--text)', padding: '5px 8px', fontSize: 13 }}
           />
@@ -436,7 +436,7 @@ function TeamSection({ pw }) {
             onChange={(v) => setNewMember({ ...newMember, streams: v })}
           />
           <input type="color" value={newMember.avatar_color} onChange={(e) => setNewMember({ ...newMember, avatar_color: e.target.value })} />
-          <button className="btn btn-primary" style={{ padding: '5px 14px' }} onClick={handleAdd}>+ Добавить</button>
+          <button className="btn btn-primary" style={{ padding: '5px 14px' }} onClick={handleAdd}>+ Add</button>
         </div>
       </div>
     </div>
@@ -496,28 +496,28 @@ function MetricsSection({ pw }) {
 
   return (
     <div className="admin-section">
-      <h2>Метрики по неделям</h2>
+      <h2>Weekly Metrics</h2>
       <div className="form-row" style={{ marginBottom: 16 }}>
         <div className="form-group" style={{ maxWidth: 180 }}>
-          <label>Поток</label>
+          <label>Stream</label>
           <select value={stream} onChange={(e) => setStream(e.target.value)}>
             {STREAMS.map((s) => <option key={s} value={s}>{STREAM_LABELS[s]}</option>)}
           </select>
         </div>
         <div className="form-group" style={{ maxWidth: 120 }}>
-          <label>Неделя</label>
+          <label>Week</label>
           <input type="number" min={1} max={53} value={week} onChange={(e) => setWeek(parseInt(e.target.value) || 1)} />
         </div>
       </div>
 
       {rows.length === 0 ? (
-        <div style={{ color: 'var(--muted)', padding: 16 }}>Нет участников в этом потоке</div>
+        <div style={{ color: 'var(--muted)', padding: 16 }}>No members in this stream</div>
       ) : (
         <div className="card" style={{ padding: 0, overflow: 'auto' }}>
           <table className="admin-table">
             <thead>
               <tr>
-                <th>Участник</th>
+                <th>Member</th>
                 {fields.map((f) => <th key={f.key}>{f.label}</th>)}
                 <th></th>
               </tr>
@@ -595,7 +595,7 @@ function RulesSection({ pw }) {
 
   return (
     <div className="admin-section">
-      <h2>Правила начисления очков</h2>
+      <h2>Score Rules</h2>
       {STREAMS.map((s) => (
         <div key={s} style={{ marginBottom: 20 }}>
           <div style={{ fontSize: 12, color: 'var(--muted)', marginBottom: 8, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
@@ -605,8 +605,8 @@ function RulesSection({ pw }) {
             <table className="admin-table">
               <thead>
                 <tr>
-                  <th>Правило</th>
-                  <th style={{ width: 120 }}>Очки</th>
+                  <th>Rule</th>
+                  <th style={{ width: 120 }}>Points</th>
                   <th style={{ width: 80 }}></th>
                 </tr>
               </thead>
@@ -659,23 +659,23 @@ function SecuritySection({ pw, onPasswordChange }) {
   const handleSave = async () => {
     setStatus(null)
     if (!currentPw || !newPw || !confirmPw) {
-      return setStatus({ ok: false, msg: 'Заполните все поля' })
+      return setStatus({ ok: false, msg: 'Fill in all fields' })
     }
     if (newPw !== confirmPw) {
-      return setStatus({ ok: false, msg: 'Пароли не совпадают' })
+      return setStatus({ ok: false, msg: 'Passwords do not match' })
     }
     if (newPw.length < 4) {
-      return setStatus({ ok: false, msg: 'Минимум 4 символа' })
+      return setStatus({ ok: false, msg: 'Minimum 4 characters' })
     }
     setLoading(true)
     try {
       await api.post('/admin/change-password', { current_password: currentPw, new_password: newPw })
       sessionStorage.setItem('admin_pw', newPw)
       onPasswordChange(newPw)
-      setStatus({ ok: true, msg: 'Пароль успешно изменён' })
+      setStatus({ ok: true, msg: 'Password changed successfully' })
       setCurrentPw(''); setNewPw(''); setConfirmPw('')
     } catch (e) {
-      const msg = e.message.includes('Неверный') ? 'Неверный текущий пароль' : e.message
+      const msg = e.message.includes('Incorrect') ? 'Incorrect current password' : e.message
       setStatus({ ok: false, msg })
     } finally {
       setLoading(false)
@@ -684,18 +684,18 @@ function SecuritySection({ pw, onPasswordChange }) {
 
   return (
     <div className="admin-section">
-      <h2>Безопасность</h2>
+      <h2>Security</h2>
       <div className="card" style={{ maxWidth: 400 }}>
         <div className="form-group" style={{ marginBottom: 12 }}>
-          <label>Текущий пароль</label>
+          <label>Current password</label>
           <input type="password" value={currentPw} onChange={(e) => setCurrentPw(e.target.value)} autoComplete="current-password" />
         </div>
         <div className="form-group" style={{ marginBottom: 12 }}>
-          <label>Новый пароль</label>
+          <label>New password</label>
           <input type="password" value={newPw} onChange={(e) => setNewPw(e.target.value)} autoComplete="new-password" />
         </div>
         <div className="form-group" style={{ marginBottom: 16 }}>
-          <label>Подтвердите новый пароль</label>
+          <label>Confirm new password</label>
           <input
             type="password" value={confirmPw}
             onChange={(e) => setConfirmPw(e.target.value)}
@@ -713,7 +713,7 @@ function SecuritySection({ pw, onPasswordChange }) {
         )}
         <div className="flex-end">
           <button className="btn btn-primary" onClick={handleSave} disabled={loading}>
-            {loading ? <span className="spinner" /> : 'Сохранить'}
+            {loading ? <span className="spinner" /> : 'Save'}
           </button>
         </div>
       </div>
@@ -750,11 +750,11 @@ export default function Admin() {
   if (!authed) return <Login onLogin={handleLogin} />
 
   const SECTIONS = [
-    { key: 'config',   label: 'Конфигурация' },
-    { key: 'team',     label: 'Команда' },
-    { key: 'metrics',  label: 'Метрики' },
-    { key: 'rules',    label: 'Правила' },
-    { key: 'security', label: 'Безопасность' },
+    { key: 'config',   label: 'Configuration' },
+    { key: 'team',     label: 'Team' },
+    { key: 'metrics',  label: 'Metrics' },
+    { key: 'rules',    label: 'Rules' },
+    { key: 'security', label: 'Security' },
   ]
 
   return (
@@ -766,7 +766,7 @@ export default function Admin() {
         <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
           <Link to="/" className="topbar-admin-link">← Dashboard</Link>
           <button className="btn btn-ghost" style={{ fontSize: 12, padding: '4px 10px' }} onClick={handleLogout}>
-            Выйти
+            Logout
           </button>
         </div>
       </div>

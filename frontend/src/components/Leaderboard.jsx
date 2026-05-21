@@ -57,14 +57,14 @@ export default function Leaderboard({ data }) {
 
   return (
     <div className="leaderboard">
-      <div className="section-title">Leaderboard · 8 недель</div>
+      <div className="section-title">Leaderboard · 8 weeks</div>
       <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
         <table className="lb-table">
           <thead>
             <tr>
               <th style={{ width: 40 }}>#</th>
-              <th>Инженер</th>
-              <th>Поток</th>
+              <th>Engineer</th>
+              <th>Stream</th>
               <th>Score</th>
               <th>Breakdown</th>
               <th>Badges</th>
@@ -77,7 +77,7 @@ export default function Leaderboard({ data }) {
                 key={member.id}
                 style={{ cursor: 'pointer' }}
                 onClick={() => navigate(`/engineer/${member.id}`)}
-                title="Открыть профиль"
+                title="Open profile"
               >
                 <td>
                   <span className={`lb-rank ${RANK_CLS[i] || ''}`}>

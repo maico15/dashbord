@@ -1258,9 +1258,9 @@ class ChangePasswordRequest(BaseModel):
 def change_password(data: ChangePasswordRequest):
     global ADMIN_PASSWORD
     if data.current_password != ADMIN_PASSWORD:
-        raise HTTPException(403, "Неверный текущий пароль")
+        raise HTTPException(403, "Incorrect current password")
     if len(data.new_password) < 4:
-        raise HTTPException(400, "Пароль должен быть не менее 4 символов")
+        raise HTTPException(400, "Password must be at least 4 characters")
     ADMIN_PASSWORD = data.new_password
     conn = get_db()
     c = conn.cursor()

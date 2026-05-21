@@ -8,9 +8,9 @@ import Leaderboard from '../components/Leaderboard'
 import AIUsageTab from './AIUsageTab'
 
 const TABS = [
-  { key: 'dev', label: 'Разработка' },
-  { key: 'support', label: 'Суппорт' },
-  { key: 'docs', label: 'Документация' },
+  { key: 'dev', label: 'Development' },
+  { key: 'support', label: 'Support' },
+  { key: 'docs', label: 'Documentation' },
   { key: 'ai', label: '⬡ AI Usage' },
 ]
 
@@ -20,15 +20,15 @@ function DevTab({ data }) {
   return (
     <>
       <div className="metric-grid">
-        <MetricCard label="PRs merged" value={totals.prs_merged} sub="за неделю" accent="accent1" />
-        <MetricCard label="Tickets closed" value={totals.tickets_closed} sub="за неделю" accent="accent2" />
+        <MetricCard label="PRs merged" value={totals.prs_merged} sub="this week" accent="accent1" />
+        <MetricCard label="Tickets closed" value={totals.tickets_closed} sub="this week" accent="accent2" />
         <MetricCard
           label="Avg cycle time"
           value={`${totals.avg_cycle_time}d`}
-          sub={totals.avg_cycle_time < 2 ? '✓ под целью' : '⚠ выше 2д'}
+          sub={totals.avg_cycle_time < 2 ? '✓ below target' : '⚠ above 2d'}
           accent={totals.avg_cycle_time < 2 ? 'success' : 'warning'}
         />
-        <MetricCard label="Features / week" value={totals.features_completed} sub="завершено" accent="accent1" />
+        <MetricCard label="Features / week" value={totals.features_completed} sub="completed" accent="accent1" />
         <MetricCard
           label="Deploy freq"
           value={`${totals.deploy_frequency}x`}
@@ -46,7 +46,7 @@ function DevTab({ data }) {
             color="var(--accent1)"
           />
           <BottleneckBars
-            title="Cycle time (дней)"
+            title="Cycle time (days)"
             rows={bottlenecks.map((b) => ({ name: b.name, value: b.cycle_time_days, unit: 'd' }))}
             color="var(--accent2)"
           />
@@ -62,18 +62,18 @@ function SupportTab({ data }) {
   return (
     <>
       <div className="metric-grid">
-        <MetricCard label="Incidents opened" value={totals.incidents_opened} sub="за неделю" accent="warning" />
-        <MetricCard label="Incidents resolved" value={totals.incidents_resolved} sub="за неделю" accent="success" />
+        <MetricCard label="Incidents opened" value={totals.incidents_opened} sub="this week" accent="warning" />
+        <MetricCard label="Incidents resolved" value={totals.incidents_resolved} sub="this week" accent="success" />
         <MetricCard
           label="Avg resolution"
           value={`${totals.avg_resolution_hours}h`}
-          sub={totals.avg_resolution_hours < 2 ? '✓ в пределах SLA' : '⚠ выше 2ч'}
+          sub={totals.avg_resolution_hours < 2 ? '✓ within SLA' : '⚠ above 2h'}
           accent={totals.avg_resolution_hours < 2 ? 'success' : 'danger'}
         />
         <MetricCard
           label="SLA %"
           value={`${totals.sla_percentage}%`}
-          sub={`${totals.sla_breached} нарушений`}
+          sub={`${totals.sla_breached} breaches`}
           accent={totals.sla_percentage >= 90 ? 'success' : 'danger'}
         />
       </div>
@@ -103,12 +103,12 @@ function DocsTab({ data }) {
   return (
     <>
       <div className="metric-grid">
-        <MetricCard label="Docs created" value={totals.docs_created} sub="за неделю" accent="warning" />
-        <MetricCard label="Docs updated" value={totals.docs_updated} sub="за неделю" accent="accent2" />
+        <MetricCard label="Docs created" value={totals.docs_created} sub="this week" accent="warning" />
+        <MetricCard label="Docs updated" value={totals.docs_updated} sub="this week" accent="accent2" />
         <MetricCard
           label="Coverage"
           value={`${totals.coverage_percentage}%`}
-          sub={`${totals.projects_covered} / ${totals.projects_total} проектов`}
+          sub={`${totals.projects_covered} / ${totals.projects_total} projects`}
           accent={totals.coverage_percentage >= 80 ? 'success' : 'warning'}
         />
       </div>

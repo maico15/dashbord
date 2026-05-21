@@ -31,7 +31,7 @@ export default function TopBar({ teamName, week, year, totalScore }) {
           <span>⬡</span> {teamName || 'Engineering Squad'}
         </div>
         <div className="topbar-week">
-          Неделя {week} · {year}
+          Week {week} · {year}
         </div>
       </div>
 

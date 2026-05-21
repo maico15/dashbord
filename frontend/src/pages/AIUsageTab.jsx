@@ -57,7 +57,7 @@ function TokensLine({ data }) {
   return (
     <div className="card">
       <div className="section-title" style={{ margin: '0 0 14px' }}>
-        Tokens per day · 30 дней
+        Tokens per day · 30 days
       </div>
       <div className="chart-wrap">
         <ResponsiveContainer width="100%" height="100%">
@@ -134,14 +134,14 @@ function LeverageTable({ scores }) {
 
   return (
     <div style={{ marginTop: 28 }}>
-      <div className="section-title">AI Leverage Score · задачи / 1K токенов</div>
+      <div className="section-title">AI Leverage Score · tasks / 1K tokens</div>
       <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
         <table className="lb-table">
           <thead>
             <tr>
               <th>#</th>
-              <th>Инженер</th>
-              <th>Поток</th>
+              <th>Engineer</th>
+              <th>Stream</th>
               <th>Tokens used</th>
               <th>Tasks done</th>
               <th style={{ width: 200 }}>Leverage score</th>
@@ -260,7 +260,7 @@ export default function AIUsageTab({ data }) {
           <span style={{ color: AI_COLOR }}>⬡</span>
           {api_error
             ? `API error: ${api_error} — showing mock data.`
-            : 'Showing mock data. Add your Anthropic Admin API key in /admin → Конфигурация to see live usage.'}
+            : 'Showing mock data. Add your Anthropic Admin API key in /admin → Configuration to see live usage.'}
         </div>
       )}
 

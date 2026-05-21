@@ -32,7 +32,7 @@ export default function XPChart({ data, dataKey = 'score', color = '#00cfff', na
   return (
     <div className="card">
       <div className="section-title" style={{ margin: '0 0 14px' }}>
-        Weekly XP · 8 недель
+        Weekly XP · 8 weeks
       </div>
       <div className="chart-wrap">
         <ResponsiveContainer width="100%" height="100%">

@@ -32,7 +32,7 @@ const BADGE_INFO = {
   scribe: { label: 'Scribe',    cls: 'badge-scribe', icon: '✍' },
 }
 
-const STREAM_LABEL = { dev: 'Разработка', support: 'Суппорт', docs: 'Документация' }
+const STREAM_LABEL = { dev: 'Development', support: 'Support', docs: 'Documentation' }
 const STREAM_COLOR = { dev: 'var(--accent1)', support: 'var(--success)', docs: 'var(--warning)' }
 
 const BD_LABELS = {
@@ -102,7 +102,7 @@ function ProfileCard({ profile }) {
       {/* Score */}
       <div className="card" style={{ textAlign: 'center', padding: '16px' }}>
         <div style={{ fontSize: 11, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 4 }}>
-          Total XP · 8 недель
+          Total XP · 8 weeks
         </div>
         <div style={{
           fontSize: 40, fontWeight: 800,
@@ -114,8 +114,8 @@ function ProfileCard({ profile }) {
         </div>
         <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 2 }}>
           {profile.current_week_score > 0
-            ? `+${profile.current_week_score.toLocaleString()} эта неделя`
-            : 'Нет данных за эту неделю'}
+            ? `+${profile.current_week_score.toLocaleString()} this week`
+            : 'No data for this week'}
         </div>
       </div>
 
@@ -171,7 +171,7 @@ function ProfileCard({ profile }) {
       {/* Mini XP chart */}
       <div className="card" style={{ padding: '14px 16px' }}>
         <div style={{ fontSize: 11, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 10 }}>
-          XP за 8 недель
+          XP last 8 weeks
         </div>
         <div style={{ height: 100 }}>
           <ResponsiveContainer width="100%" height="100%">
@@ -215,7 +215,7 @@ function WeekSelector({ week, year, onChange }) {
     <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
       <button onClick={prev} className="btn btn-ghost" style={{ padding: '4px 12px', fontSize: 16 }}>←</button>
       <span style={{ fontWeight: 600, fontSize: 15, minWidth: 110, textAlign: 'center' }}>
-        Неделя {week} · {year}
+        Week {week} · {year}
       </span>
       <button onClick={next} className="btn btn-ghost" style={{ padding: '4px 12px', fontSize: 16 }}>→</button>
     </div>
@@ -291,7 +291,7 @@ function WeeklyTasksPanel({ engineerId, stream, initialWeek, initialYear }) {
         <WeekSelector week={week} year={year} onChange={handleWeekChange} />
         {tasks && (
           <span style={{ fontSize: 11, color: 'var(--muted)' }}>
-            Поток: <span className={`tag ${STREAM_PILL[tasks.stream]}`}>{STREAM_SHORT[tasks.stream]}</span>
+            Stream: <span className={`tag ${STREAM_PILL[tasks.stream]}`}>{STREAM_SHORT[tasks.stream]}</span>
           </span>
         )}
       </div>
@@ -310,9 +310,9 @@ function WeeklyTasksPanel({ engineerId, stream, initialWeek, initialYear }) {
           borderRadius: 12, gap: 10,
         }}>
           <div style={{ fontSize: 32 }}>📋</div>
-          <div style={{ fontSize: 15, color: 'var(--muted)', fontWeight: 500 }}>Данные не внесены</div>
+          <div style={{ fontSize: 15, color: 'var(--muted)', fontWeight: 500 }}>No data entered</div>
           <div style={{ fontSize: 12, color: 'var(--muted)', opacity: 0.7 }}>
-            Для недели {week} · {year} задачи ещё не добавлены
+            No tasks have been added for week {week} · {year}
           </div>
         </div>
       )}
@@ -321,7 +321,7 @@ function WeeklyTasksPanel({ engineerId, stream, initialWeek, initialYear }) {
         <>
           <div className="card" style={{ padding: '20px 24px' }}>
             <TaskList
-              title="Что сделано"
+              title="What was done"
               items={tasks.what_was_done || []}
               stream={tasks.stream}
               accent={streamColor}
@@ -330,7 +330,7 @@ function WeeklyTasksPanel({ engineerId, stream, initialWeek, initialYear }) {
 
           <div className="card" style={{ padding: '20px 24px' }}>
             <TaskList
-              title="План на следующую неделю"
+              title="Next week plan"
               items={tasks.next_week || []}
               stream={tasks.stream}
               accent="var(--accent2)"
@@ -361,7 +361,7 @@ export default function EngineerProfile() {
       <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '100vh', gap: 16 }}>
         <div style={{ fontSize: 32 }}>⚠️</div>
         <div style={{ color: 'var(--danger)' }}>{error}</div>
-        <button className="btn btn-ghost" onClick={() => navigate('/')}>← Назад</button>
+        <button className="btn btn-ghost" onClick={() => navigate('/')}>← Back</button>
       </div>
     )
   }
@@ -387,10 +387,10 @@ export default function EngineerProfile() {
             ← Dashboard
           </button>
           <div style={{ width: 1, height: 20, background: 'var(--border)' }} />
-          <span style={{ fontSize: 14, color: 'var(--muted)' }}>Профиль инженера</span>
+          <span style={{ fontSize: 14, color: 'var(--muted)' }}>Engineer profile</span>
         </div>
         <div style={{ fontSize: 13, color: 'var(--muted)' }}>
-          Неделя {profile.current_week} · {profile.current_year}
+          Week {profile.current_week} · {profile.current_year}
         </div>
       </div>
 
