@@ -34,7 +34,12 @@ def _load_password():
 @asynccontextmanager
 async def lifespan(app):
     init_db()
-    seed_data()
+    # Only seed if no engineers exist yet
+    conn = get_db()
+    count = conn.execute("SELECT COUNT(*) FROM team_members").fetchone()[0]
+    conn.close()
+    if count == 0:
+        seed_data()
     _load_password()
     yield
 
