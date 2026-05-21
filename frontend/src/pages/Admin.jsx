@@ -615,6 +615,80 @@ function RulesSection({ pw }) {
   )
 }
 
+// ── Security section ──────────────────────────────────────────────────────────
+
+function SecuritySection({ pw, onPasswordChange }) {
+  const [currentPw,  setCurrentPw]  = useState('')
+  const [newPw,      setNewPw]      = useState('')
+  const [confirmPw,  setConfirmPw]  = useState('')
+  const [status,     setStatus]     = useState(null)
+  const [loading,    setLoading]    = useState(false)
+
+  const handleSave = async () => {
+    setStatus(null)
+    if (!currentPw || !newPw || !confirmPw) {
+      return setStatus({ ok: false, msg: 'Заполните все поля' })
+    }
+    if (newPw !== confirmPw) {
+      return setStatus({ ok: false, msg: 'Пароли не совпадают' })
+    }
+    if (newPw.length < 4) {
+      return setStatus({ ok: false, msg: 'Минимум 4 символа' })
+    }
+    setLoading(true)
+    try {
+      await api.post('/admin/change-password', { current_password: currentPw, new_password: newPw })
+      sessionStorage.setItem('admin_pw', newPw)
+      onPasswordChange(newPw)
+      setStatus({ ok: true, msg: 'Пароль успешно изменён' })
+      setCurrentPw(''); setNewPw(''); setConfirmPw('')
+    } catch (e) {
+      const msg = e.message.includes('Неверный') ? 'Неверный текущий пароль' : e.message
+      setStatus({ ok: false, msg })
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  return (
+    <div className="admin-section">
+      <h2>Безопасность</h2>
+      <div className="card" style={{ maxWidth: 400 }}>
+        <div className="form-group" style={{ marginBottom: 12 }}>
+          <label>Текущий пароль</label>
+          <input type="password" value={currentPw} onChange={(e) => setCurrentPw(e.target.value)} autoComplete="current-password" />
+        </div>
+        <div className="form-group" style={{ marginBottom: 12 }}>
+          <label>Новый пароль</label>
+          <input type="password" value={newPw} onChange={(e) => setNewPw(e.target.value)} autoComplete="new-password" />
+        </div>
+        <div className="form-group" style={{ marginBottom: 16 }}>
+          <label>Подтвердите новый пароль</label>
+          <input
+            type="password" value={confirmPw}
+            onChange={(e) => setConfirmPw(e.target.value)}
+            onKeyDown={(e) => e.key === 'Enter' && handleSave()}
+            autoComplete="new-password"
+          />
+        </div>
+        {status && (
+          <div style={{
+            fontSize: 13, marginBottom: 12,
+            color: status.ok ? 'var(--success)' : 'var(--danger)',
+          }}>
+            {status.ok ? '✓ ' : '✕ '}{status.msg}
+          </div>
+        )}
+        <div className="flex-end">
+          <button className="btn btn-primary" onClick={handleSave} disabled={loading}>
+            {loading ? <span className="spinner" /> : 'Сохранить'}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 // ── Main admin page ───────────────────────────────────────────────────────────
 
 export default function Admin() {
@@ -644,10 +718,11 @@ export default function Admin() {
   if (!authed) return <Login onLogin={handleLogin} />
 
   const SECTIONS = [
-    { key: 'config', label: 'Конфигурация' },
-    { key: 'team', label: 'Команда' },
-    { key: 'metrics', label: 'Метрики' },
-    { key: 'rules', label: 'Правила' },
+    { key: 'config',   label: 'Конфигурация' },
+    { key: 'team',     label: 'Команда' },
+    { key: 'metrics',  label: 'Метрики' },
+    { key: 'rules',    label: 'Правила' },
+    { key: 'security', label: 'Безопасность' },
   ]
 
   return (
@@ -678,10 +753,11 @@ export default function Admin() {
         </div>
 
         <div style={{ marginTop: 24 }}>
-          {section === 'config' && <ConfigSection pw={pw} />}
-          {section === 'team' && <TeamSection pw={pw} />}
-          {section === 'metrics' && <MetricsSection pw={pw} />}
-          {section === 'rules' && <RulesSection pw={pw} />}
+          {section === 'config'   && <ConfigSection pw={pw} />}
+          {section === 'team'     && <TeamSection pw={pw} />}
+          {section === 'metrics'  && <MetricsSection pw={pw} />}
+          {section === 'rules'    && <RulesSection pw={pw} />}
+          {section === 'security' && <SecuritySection pw={pw} onPasswordChange={setPw} />}
         </div>
       </div>
     </div>

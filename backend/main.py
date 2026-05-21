@@ -15,10 +15,27 @@ DB_PATH = "dashboard.db"
 ADMIN_PASSWORD = "admin123"
 
 
+def _load_password():
+    """Override ADMIN_PASSWORD from config if a custom one was saved."""
+    global ADMIN_PASSWORD
+    conn = get_db()
+    c = conn.cursor()
+    try:
+        c.execute("SELECT value FROM config WHERE key='admin_password'")
+        row = c.fetchone()
+        if row and row["value"]:
+            ADMIN_PASSWORD = row["value"]
+    except Exception:
+        pass
+    finally:
+        conn.close()
+
+
 @asynccontextmanager
 async def lifespan(app):
     init_db()
     seed_data()
+    _load_password()
     yield
 
 
@@ -1193,6 +1210,28 @@ def verify_admin(password: str = ""):
     if password == ADMIN_PASSWORD:
         return {"ok": True}
     raise HTTPException(403, "Invalid password")
+
+
+class ChangePasswordRequest(BaseModel):
+    current_password: str
+    new_password: str
+
+
+@app.post("/api/admin/change-password")
+def change_password(data: ChangePasswordRequest):
+    global ADMIN_PASSWORD
+    if data.current_password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Неверный текущий пароль")
+    if len(data.new_password) < 4:
+        raise HTTPException(400, "Пароль должен быть не менее 4 символов")
+    ADMIN_PASSWORD = data.new_password
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("INSERT OR REPLACE INTO config (key, value) VALUES ('admin_password', ?)",
+              (data.new_password,))
+    conn.commit()
+    conn.close()
+    return {"ok": True}
 
 
 if __name__ == "__main__":
