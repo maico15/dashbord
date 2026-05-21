@@ -1,7 +1,10 @@
-const BASE = '/api'
+const BASE = import.meta.env.VITE_API_URL
+  ? `${import.meta.env.VITE_API_URL}/api`
+  : '/api'
 
 async function req(method, path, body, password) {
-  const url = new URL(`${window.location.origin}${BASE}${path}`)
+  const base = BASE.startsWith('http') ? BASE : `${window.location.origin}${BASE}`
+  const url = new URL(`${base}${path}`)
   if (password) url.searchParams.set('password', password)
 
   const opts = {
