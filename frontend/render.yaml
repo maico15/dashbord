@@ -1,0 +1,9 @@
+services:
+  - type: web
+    name: engineering-dashboard-frontend
+    env: node
+    buildCommand: npm install && npx vite build
+    startCommand: npx serve dist -p $PORT
+    envVars:
+      - key: VITE_API_URL
+        value: PLACEHOLDER
