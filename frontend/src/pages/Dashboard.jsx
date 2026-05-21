@@ -20,20 +20,25 @@ function DevTab({ data }) {
   return (
     <>
       <div className="metric-grid">
-        <MetricCard label="PRs merged" value={totals.prs_merged} sub="this week" accent="accent1" />
-        <MetricCard label="Tickets closed" value={totals.tickets_closed} sub="this week" accent="accent2" />
+        <MetricCard label="PRs merged" value={totals.prs_merged} sub="this week" accent="accent1"
+          tooltip="Pull requests merged this week. Each PR earns XP based on the points configured in Admin → Rules." />
+        <MetricCard label="Tickets closed" value={totals.tickets_closed} sub="this week" accent="accent2"
+          tooltip="Jira / Linear tickets resolved this week. Counts toward the dev XP score for each engineer." />
         <MetricCard
           label="Avg cycle time"
           value={`${totals.avg_cycle_time}d`}
           sub={totals.avg_cycle_time < 2 ? '✓ below target' : '⚠ above 2d'}
           accent={totals.avg_cycle_time < 2 ? 'success' : 'warning'}
+          tooltip="Average time from PR open to merge, in days. Target is under 2 days. Lower is better."
         />
-        <MetricCard label="Features / week" value={totals.features_completed} sub="completed" accent="accent1" />
+        <MetricCard label="Features / week" value={totals.features_completed} sub="completed" accent="accent1"
+          tooltip="Completed feature tasks delivered this week across all engineers in the dev stream." />
         <MetricCard
           label="Deploy freq"
           value={`${totals.deploy_frequency}x`}
           sub={`${totals.deploys} deploys total`}
           accent="accent2"
+          tooltip="How many times the team deployed to production this week. Calculated as total deploys ÷ active engineers."
         />
       </div>
 
@@ -62,19 +67,23 @@ function SupportTab({ data }) {
   return (
     <>
       <div className="metric-grid">
-        <MetricCard label="Incidents opened" value={totals.incidents_opened} sub="this week" accent="warning" />
-        <MetricCard label="Incidents resolved" value={totals.incidents_resolved} sub="this week" accent="success" />
+        <MetricCard label="Incidents opened" value={totals.incidents_opened} sub="this week" accent="warning"
+          tooltip="New support incidents reported this week. Tracked per engineer in the support stream." />
+        <MetricCard label="Incidents resolved" value={totals.incidents_resolved} sub="this week" accent="success"
+          tooltip="Incidents closed or resolved this week. Each resolved incident earns XP per the Rules table." />
         <MetricCard
           label="Avg resolution"
           value={`${totals.avg_resolution_hours}h`}
           sub={totals.avg_resolution_hours < 2 ? '✓ within SLA' : '⚠ above 2h'}
           accent={totals.avg_resolution_hours < 2 ? 'success' : 'danger'}
+          tooltip="Average time to resolve an incident, in hours. SLA target is under 2 hours. Lower is better."
         />
         <MetricCard
           label="SLA %"
           value={`${totals.sla_percentage}%`}
           sub={`${totals.sla_breached} breaches`}
           accent={totals.sla_percentage >= 90 ? 'success' : 'danger'}
+          tooltip="Percentage of incidents resolved within the SLA time window. Target is 90% or above. Breaches reduce XP."
         />
       </div>
 
@@ -103,13 +112,16 @@ function DocsTab({ data }) {
   return (
     <>
       <div className="metric-grid">
-        <MetricCard label="Docs created" value={totals.docs_created} sub="this week" accent="warning" />
-        <MetricCard label="Docs updated" value={totals.docs_updated} sub="this week" accent="accent2" />
+        <MetricCard label="Docs created" value={totals.docs_created} sub="this week" accent="warning"
+          tooltip="New documentation pages written this week. Each doc created earns XP per the Rules table." />
+        <MetricCard label="Docs updated" value={totals.docs_updated} sub="this week" accent="accent2"
+          tooltip="Existing documentation pages revised or improved this week. Keeps docs fresh and accurate." />
         <MetricCard
           label="Coverage"
           value={`${totals.coverage_percentage}%`}
           sub={`${totals.projects_covered} / ${totals.projects_total} projects`}
           accent={totals.coverage_percentage >= 80 ? 'success' : 'warning'}
+          tooltip="Percentage of active projects that have at least one documentation page. Target is 80%+."
         />
       </div>
 
