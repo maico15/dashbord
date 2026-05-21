@@ -347,7 +347,7 @@ def _mock_ai_usage(conn) -> dict:
     for m in members:
         tok = rng.randint(25_000, 280_000)
         tokens_per_user.append({
-            "name": m["name"].split()[0],
+            "name": m["name"],
             "full_name": m["name"],
             "member_id": m["id"],
             "stream": m["stream"],
@@ -664,7 +664,7 @@ def metrics_dev():
         if row:
             row = dict(row)
             bottlenecks.append({
-                "name": m["name"].split()[0],
+                "name": m["name"],
                 "prs_merged": row["prs_merged"],
                 "tickets_closed": row["tickets_closed"],
                 "cycle_time_days": row["cycle_time_days"],
@@ -728,7 +728,7 @@ def metrics_support():
         if row:
             row = dict(row)
             bottlenecks.append({
-                "name": m["name"].split()[0],
+                "name": m["name"],
                 "incidents_resolved": row["incidents_resolved"],
                 "avg_resolution_hours": row["avg_resolution_hours"],
                 "sla_breached": row["sla_breached"],
@@ -792,7 +792,7 @@ def metrics_docs():
         if row:
             row = dict(row)
             bottlenecks.append({
-                "name": m["name"].split()[0],
+                "name": m["name"],
                 "docs_created": row["docs_created"],
                 "docs_updated": row["docs_updated"],
                 "projects_covered": row["projects_covered"],
