@@ -362,12 +362,25 @@ def _mock_ai_usage(conn) -> dict:
         })
     tokens_per_user.sort(key=lambda x: x["tokens"], reverse=True)
 
+    # 8 weeks of per-engineer weekly token data
+    weeks_data = []
+    for w in range(7, -1, -1):
+        week_dt = end - timedelta(weeks=w)
+        week_label = f"W{week_dt.isocalendar()[1]}"
+        row: dict = {"week": week_label, "team": 0}
+        for m in members:
+            tok = rng.randint(8_000, 55_000)
+            row[m["name"]] = tok
+            row["team"] += tok
+        weeks_data.append(row)
+
     total = sum(d["tokens"] for d in tokens_per_day)
     return {
         "total_tokens": total,
         "total_cost_usd": round(total * 0.000003, 2),
         "tokens_per_day": tokens_per_day,
         "tokens_per_user": tokens_per_user,
+        "tokens_per_week": weeks_data,
         "source": "mock",
     }
 
@@ -405,11 +418,31 @@ def _live_ai_usage(admin_key: str, conn) -> dict:
         })
     tokens_per_user.sort(key=lambda x: x["tokens"], reverse=True)
 
+    # Derive weekly data from daily totals + proportional user distribution
+    week_map: dict = {}
+    for d in tokens_per_day:
+        try:
+            dt_obj = datetime.strptime(d["date"], "%Y-%m-%d")
+            wk = f"W{dt_obj.isocalendar()[1]}"
+            week_map[wk] = week_map.get(wk, 0) + d["tokens"]
+        except Exception:
+            pass
+    total_user_tok = sum(u["tokens"] for u in tokens_per_user)
+    tokens_per_week = []
+    for wk in sorted(week_map.keys()):
+        team = week_map[wk]
+        row: dict = {"week": wk, "team": team}
+        for u in tokens_per_user:
+            share = u["tokens"] / max(total_user_tok, 1)
+            row[u["name"]] = round(team * share)
+        tokens_per_week.append(row)
+
     return {
         "total_tokens": total_tokens,
         "total_cost_usd": round(total_tokens * 0.000003, 2),
         "tokens_per_day": tokens_per_day,
         "tokens_per_user": tokens_per_user,
+        "tokens_per_week": tokens_per_week,
         "source": "api",
     }
 
