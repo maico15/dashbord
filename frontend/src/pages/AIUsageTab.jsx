@@ -10,6 +10,7 @@ import {
   Tooltip,
 } from 'chart.js'
 import BottleneckBars from '../components/BottleneckBars'
+import { useTheme } from '../hooks/useTheme'
 
 ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, Filler, Tooltip)
 
@@ -39,6 +40,15 @@ function AICard({ label, value, sub, color = AI_COLOR }) {
 
 function TokensConsumptionChart({ tokensPerWeek, tokensPerUser }) {
   const [active, setActive] = useState(new Set(['team']))
+  const theme = useTheme()
+  const isDark = theme === 'dark'
+
+  const gridColor   = isDark ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.08)'
+  const tickColor   = isDark ? 'rgba(255,255,255,0.35)' : 'rgba(13,19,64,0.5)'
+  const tipBg       = isDark ? '#111c3a' : '#ffffff'
+  const tipBorder   = isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.12)'
+  const tipTitle    = isDark ? 'rgba(255,255,255,0.45)' : 'rgba(13,19,64,0.5)'
+  const tipBody     = isDark ? '#e2e8f0' : '#0d1340'
 
   function toggle(key) {
     setActive(prev => {
@@ -92,11 +102,11 @@ function TokensConsumptionChart({ tokensPerWeek, tokensPerUser }) {
     plugins: {
       legend: { display: false },
       tooltip: {
-        backgroundColor: '#111c3a',
-        borderColor: 'rgba(255,255,255,0.1)',
+        backgroundColor: tipBg,
+        borderColor: tipBorder,
         borderWidth: 1,
-        titleColor: 'rgba(255,255,255,0.45)',
-        bodyColor: '#e2e8f0',
+        titleColor: tipTitle,
+        bodyColor: tipBody,
         padding: 10,
         callbacks: {
           label: ctx => ` ${ctx.dataset.label}: ${ctx.parsed.y}K`,
@@ -105,18 +115,14 @@ function TokensConsumptionChart({ tokensPerWeek, tokensPerUser }) {
     },
     scales: {
       x: {
-        grid: { color: 'rgba(255,255,255,0.04)' },
+        grid: { color: gridColor },
         border: { display: false },
-        ticks: { color: 'rgba(255,255,255,0.35)', font: { size: 11 } },
+        ticks: { color: tickColor, font: { size: 11 } },
       },
       y: {
-        grid: { color: 'rgba(255,255,255,0.04)' },
+        grid: { color: gridColor },
         border: { display: false },
-        ticks: {
-          color: 'rgba(255,255,255,0.35)',
-          font: { size: 11 },
-          callback: v => `${v}K`,
-        },
+        ticks: { color: tickColor, font: { size: 11 }, callback: v => `${v}K` },
       },
     },
   }

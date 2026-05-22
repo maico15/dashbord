@@ -26,12 +26,12 @@ export default function MetricCard({ label, value, sub, accent = 'accent1', tool
           bottom: 'calc(100% + 10px)',
           left: '50%',
           transform: 'translateX(-50%)',
-          background: '#0d1630',
-          border: '1px solid #00cfff',
+          background: 'var(--card2)',
+          border: '1px solid var(--accent1)',
           borderRadius: 8,
           padding: '8px 12px',
           fontSize: 12,
-          color: '#c8d8f0',
+          color: 'var(--text)',
           maxWidth: 280,
           width: 'max-content',
           zIndex: 100,
@@ -51,7 +51,7 @@ export default function MetricCard({ label, value, sub, accent = 'accent1', tool
             height: 0,
             borderLeft: '6px solid transparent',
             borderRight: '6px solid transparent',
-            borderTop: '6px solid #00cfff',
+            borderTop: '6px solid var(--accent1)',
           }} />
         </div>
       )}

@@ -1,7 +1,30 @@
+/* ── Light theme (default :root) ─────────────────────── */
 :root {
-  --base: #080d1f;
-  --card: #0d1630;
-  --card2: #111c3a;
+  --base: #f0f4ff;
+  --card: #ffffff;
+  --card2: #f3f6ff;
+  --border: #d0d8ef;
+  --accent1: #0099cc;
+  --accent2: #7b61ff;
+  --ai: #a855f7;
+  --success: #00a060;
+  --danger: #d02040;
+  --warning: #c08000;
+  --text: #0d1340;
+  --muted: #5a6a8a;
+  --accent1-bg: rgba(0,153,204,0.08);
+  --accent1-border: rgba(0,153,204,0.25);
+  --success-bg: rgba(0,160,96,0.1);
+  --spinner-track: rgba(0,0,0,0.12);
+  --row-hover: rgba(0,0,0,0.025);
+}
+
+/* ── Dark theme override ─────────────────────────────── */
+[data-theme="dark"] {
+  --base: #06091a;
+  --card: #0d1117;
+  --card2: #111c38;
+  --border: #1a2550;
   --accent1: #00cfff;
   --accent2: #7b61ff;
   --ai: #a855f7;
@@ -10,7 +33,22 @@
   --warning: #ffd700;
   --text: #e2e8f0;
   --muted: #6b7a99;
-  --border: rgba(255, 255, 255, 0.07);
+  --accent1-bg: rgba(0,207,255,0.08);
+  --accent1-border: rgba(0,207,255,0.2);
+  --success-bg: rgba(0,255,157,0.12);
+  --spinner-track: rgba(255,255,255,0.2);
+  --row-hover: rgba(255,255,255,0.02);
+}
+
+/* ── Smooth theme transitions ────────────────────────── */
+body,
+.topbar, .card, .metric-card, .login-card,
+.tab-btn, .btn, .topbar-admin-link, .topbar-week,
+.lb-table th, .lb-table td,
+.admin-table th, .admin-table td,
+input, select, textarea,
+.badge, .tag, .bbar-track {
+  transition: background-color 0.2s ease, color 0.2s ease, border-color 0.2s ease;
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -46,11 +84,13 @@ body {
 .topbar-week {
   font-size: 12px;
   color: var(--muted);
-  background: rgba(0,207,255,0.08);
-  border: 1px solid rgba(0,207,255,0.2);
+  background: var(--accent1-bg);
+  border: 1px solid var(--accent1-border);
   padding: 3px 10px;
   border-radius: 20px;
 }
+
+.topbar-right { display: flex; align-items: center; gap: 10px; }
 
 .topbar-score {
   display: flex;
@@ -76,9 +116,24 @@ body {
   padding: 4px 10px;
   border: 1px solid var(--border);
   border-radius: 6px;
-  transition: color 0.2s, border-color 0.2s;
 }
 .topbar-admin-link:hover { color: var(--accent1); border-color: var(--accent1); }
+
+.theme-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: none;
+  cursor: pointer;
+  color: var(--muted);
+  padding: 0;
+  font-family: inherit;
+}
+.theme-toggle:hover { color: var(--accent1); border-color: var(--accent1); }
 
 /* ── Tabs ───────────────────────────────────────────── */
 .tabs {
@@ -97,7 +152,6 @@ body {
   cursor: pointer;
   border-bottom: 2px solid transparent;
   margin-bottom: -1px;
-  transition: color 0.2s, border-color 0.2s;
   font-family: inherit;
 }
 .tab-btn:hover { color: var(--text); }
@@ -120,9 +174,8 @@ body {
   border: 1px solid var(--border);
   border-radius: 12px;
   padding: 18px 20px;
-  transition: border-color 0.2s, transform 0.15s;
 }
-.metric-card:hover { border-color: rgba(0,207,255,0.25); transform: translateY(-1px); }
+.metric-card:hover { border-color: var(--accent1-border); transform: translateY(-1px); }
 
 .metric-card .label {
   font-size: 11px;
@@ -203,7 +256,7 @@ body {
   font-size: 14px;
 }
 .lb-table tr:last-child td { border-bottom: none; }
-.lb-table tr:hover td { background: rgba(255,255,255,0.02); }
+.lb-table tr:hover td { background: var(--row-hover); }
 
 .lb-rank {
   font-size: 13px;
@@ -224,7 +277,7 @@ body {
   justify-content: center;
   font-weight: 700;
   font-size: 13px;
-  color: var(--base);
+  color: #080d1f;
   flex-shrink: 0;
 }
 
@@ -256,7 +309,7 @@ body {
 }
 .badge-mvp { background: rgba(255,215,0,0.15); color: var(--warning); border: 1px solid rgba(255,215,0,0.3); }
 .badge-fire { background: rgba(255,107,107,0.15); color: var(--danger); border: 1px solid rgba(255,107,107,0.3); }
-.badge-shield { background: rgba(0,207,255,0.15); color: var(--accent1); border: 1px solid rgba(0,207,255,0.3); }
+.badge-shield { background: rgba(0,153,204,0.15); color: var(--accent1); border: 1px solid rgba(0,153,204,0.3); }
 .badge-scribe { background: rgba(123,97,255,0.15); color: var(--accent2); border: 1px solid rgba(123,97,255,0.3); }
 
 /* ── Chart container ────────────────────────────────── */
@@ -283,7 +336,6 @@ body {
   font-size: 13px;
   font-family: inherit;
   outline: none;
-  transition: border-color 0.2s;
 }
 .form-group input:focus, .form-group select:focus { border-color: var(--accent1); }
 
@@ -295,11 +347,11 @@ body {
   font-weight: 600;
   font-family: inherit;
   cursor: pointer;
-  transition: opacity 0.2s, transform 0.1s;
+  transition: opacity 0.2s, transform 0.1s, background-color 0.2s, color 0.2s, border-color 0.2s;
 }
 .btn:hover { opacity: 0.85; transform: translateY(-1px); }
 .btn:active { transform: translateY(0); }
-.btn-primary { background: var(--accent1); color: var(--base); }
+.btn-primary { background: var(--accent1); color: #080d1f; }
 .btn-danger { background: var(--danger); color: #fff; }
 .btn-ghost { background: var(--card2); color: var(--text); border: 1px solid var(--border); }
 
@@ -341,7 +393,6 @@ body {
   font-family: inherit;
   outline: none;
   margin-bottom: 12px;
-  transition: border-color 0.2s;
 }
 .login-card input:focus { border-color: var(--accent1); }
 .login-card .error { font-size: 12px; color: var(--danger); margin-top: 8px; }
@@ -349,7 +400,7 @@ body {
 .spinner {
   display: inline-block;
   width: 14px; height: 14px;
-  border: 2px solid rgba(255,255,255,0.2);
+  border: 2px solid var(--spinner-track);
   border-top-color: var(--accent1);
   border-radius: 50%;
   animation: spin 0.6s linear infinite;
@@ -364,9 +415,9 @@ body {
   font-weight: 600;
   letter-spacing: 0.04em;
 }
-.tag-dev { background: rgba(0,207,255,0.12); color: var(--accent1); }
-.tag-support { background: rgba(0,255,157,0.12); color: var(--success); }
-.tag-docs { background: rgba(255,215,0,0.12); color: var(--warning); }
+.tag-dev { background: var(--accent1-bg); color: var(--accent1); }
+.tag-support { background: var(--success-bg); color: var(--success); }
+.tag-docs { background: rgba(192,128,0,0.1); color: var(--warning); }
 
 .mt-8 { margin-top: 8px; }
 .mt-16 { margin-top: 16px; }
