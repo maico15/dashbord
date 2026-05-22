@@ -109,10 +109,11 @@ body {
 /* ── Metric cards ───────────────────────────────────── */
 .metric-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  grid-template-columns: repeat(3, 1fr);
   gap: 14px;
   margin: 24px 0;
 }
+@media (max-width: 700px) { .metric-grid { grid-template-columns: 1fr; } }
 
 .metric-card {
   background: var(--card);

@@ -28,11 +28,11 @@ const CustomTooltip = ({ active, payload, label }) => {
   )
 }
 
-export default function XPChart({ data, dataKey = 'score', color = '#00cfff', name = 'XP' }) {
+export default function XPChart({ data, dataKey = 'score', color = '#00cfff', name = 'XP', title }) {
   return (
-    <div className="card">
+    <div className="card" style={{ marginTop: 20 }}>
       <div className="section-title" style={{ margin: '0 0 14px' }}>
-        Weekly XP · 8 weeks
+        {title || 'Weekly XP · 8 weeks'}
       </div>
       <div className="chart-wrap">
         <ResponsiveContainer width="100%" height="100%">

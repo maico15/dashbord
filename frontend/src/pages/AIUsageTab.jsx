@@ -1,13 +1,11 @@
 import {
-  LineChart, Line, BarChart, Bar,
+  LineChart, Line,
   XAxis, YAxis, CartesianGrid, Tooltip,
   ResponsiveContainer,
 } from 'recharts'
+import BottleneckBars from '../components/BottleneckBars'
 
 const AI_COLOR = '#a855f7'
-const AI_DIM   = 'rgba(168,85,247,0.15)'
-
-// ── Helpers ───────────────────────────────────────────────────────────────────
 
 function fmt(n) {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
@@ -15,11 +13,15 @@ function fmt(n) {
   return String(n)
 }
 
-const STREAM_LABEL = { dev: 'Dev', support: 'Support', docs: 'Docs' }
-const TREND_ICON   = { up: '↑', down: '↓', stable: '→' }
-const TREND_COLOR  = { up: 'var(--success)', down: 'var(--danger)', stable: 'var(--muted)' }
-
-// ── Shared tooltip ────────────────────────────────────────────────────────────
+function AICard({ label, value, sub, color = AI_COLOR }) {
+  return (
+    <div className="metric-card" style={{ borderColor: `${color}22` }}>
+      <div className="label">{label}</div>
+      <div className="value" style={{ color, fontSize: 26 }}>{value ?? '—'}</div>
+      {sub && <div className="sub">{sub}</div>}
+    </div>
+  )
+}
 
 const ChartTip = ({ active, payload, label }) => {
   if (!active || !payload?.length) return null
@@ -38,24 +40,9 @@ const ChartTip = ({ active, payload, label }) => {
   )
 }
 
-// ── Top cards ─────────────────────────────────────────────────────────────────
-
-function AICard({ label, value, sub, color = AI_COLOR }) {
-  return (
-    <div className="metric-card" style={{ borderColor: `${color}22` }}>
-      <div className="label">{label}</div>
-      <div className="value" style={{ color, fontSize: 26 }}>{value ?? '—'}</div>
-      {sub && <div className="sub">{sub}</div>}
-    </div>
-  )
-}
-
-// ── Tokens per day (line chart) ───────────────────────────────────────────────
-
 function TokensLine({ data }) {
-  const slim = data.filter((_, i) => i % 3 === 0 || i === data.length - 1)
   return (
-    <div className="card">
+    <div className="card" style={{ marginTop: 20 }}>
       <div className="section-title" style={{ margin: '0 0 14px' }}>
         Tokens per day · 30 days
       </div>
@@ -94,135 +81,6 @@ function TokensLine({ data }) {
   )
 }
 
-// ── Tokens per engineer (bar chart) ──────────────────────────────────────────
-
-function TokensBar({ data }) {
-  const chartData = data.map((u) => ({ name: u.name, tokens: u.tokens }))
-  return (
-    <div className="card">
-      <div className="section-title" style={{ margin: '0 0 14px' }}>
-        Tokens per engineer
-      </div>
-      <div className="chart-wrap">
-        <ResponsiveContainer width="100%" height="100%">
-          <BarChart data={chartData} margin={{ top: 8, right: 8, left: -20, bottom: 0 }}>
-            <CartesianGrid stroke="rgba(255,255,255,0.04)" vertical={false} />
-            <XAxis
-              dataKey="name"
-              tick={{ fill: 'var(--muted)', fontSize: 11 }}
-              axisLine={false} tickLine={false}
-            />
-            <YAxis
-              tickFormatter={fmt}
-              tick={{ fill: 'var(--muted)', fontSize: 11 }}
-              axisLine={false} tickLine={false}
-            />
-            <Tooltip content={<ChartTip />} />
-            <Bar dataKey="tokens" name="Tokens" fill={AI_COLOR} opacity={0.85} radius={[4, 4, 0, 0]} />
-          </BarChart>
-        </ResponsiveContainer>
-      </div>
-    </div>
-  )
-}
-
-// ── Leverage score table ──────────────────────────────────────────────────────
-
-function LeverageTable({ scores }) {
-  if (!scores?.length) return null
-  const maxLev = Math.max(...scores.map((s) => s.leverage_score), 0.001)
-
-  return (
-    <div style={{ marginTop: 28 }}>
-      <div className="section-title">AI Leverage Score · tasks / 1K tokens</div>
-      <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
-        <table className="lb-table">
-          <thead>
-            <tr>
-              <th>#</th>
-              <th>Engineer</th>
-              <th>Stream</th>
-              <th>Tokens used</th>
-              <th>Tasks done</th>
-              <th style={{ width: 200 }}>Leverage score</th>
-              <th>Trend</th>
-            </tr>
-          </thead>
-          <tbody>
-            {scores.map((s, i) => (
-              <tr key={s.id}>
-                <td style={{ color: 'var(--muted)', fontSize: 13 }}>#{i + 1}</td>
-                <td>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                    <div style={{
-                      width: 28, height: 28, borderRadius: '50%',
-                      background: s.avatar_color, display: 'flex',
-                      alignItems: 'center', justifyContent: 'center',
-                      fontSize: 11, fontWeight: 700, color: '#080d1f',
-                      flexShrink: 0,
-                    }}>
-                      {s.name.split(' ').slice(0, 2).map((w) => w[0]).join('')}
-                    </div>
-                    <span style={{ fontWeight: 500, fontSize: 14 }}>{s.name}</span>
-                  </div>
-                </td>
-                <td>
-                  <span className={`tag tag-${s.stream}`}>
-                    {STREAM_LABEL[s.stream] || s.stream}
-                  </span>
-                </td>
-                <td style={{ fontSize: 13, color: AI_COLOR, fontWeight: 600 }}>
-                  {fmt(s.tokens_used)}
-                </td>
-                <td style={{ fontSize: 13 }}>{s.tasks_completed}</td>
-                <td>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                    <div style={{
-                      flex: 1, height: 6, background: 'var(--card2)',
-                      borderRadius: 3, overflow: 'hidden',
-                    }}>
-                      <div style={{
-                        width: `${(s.leverage_score / maxLev) * 100}%`,
-                        height: '100%',
-                        background: s.leverage_score > maxLev * 0.6
-                          ? 'var(--success)'
-                          : s.leverage_score > maxLev * 0.3
-                          ? AI_COLOR
-                          : 'var(--danger)',
-                        borderRadius: 3,
-                        transition: 'width 0.6s ease',
-                      }} />
-                    </div>
-                    <span style={{ fontSize: 12, color: 'var(--muted)', minWidth: 36, textAlign: 'right' }}>
-                      {s.leverage_score.toFixed(2)}
-                    </span>
-                  </div>
-                </td>
-                <td>
-                  <span style={{
-                    fontSize: 13, fontWeight: 700,
-                    color: TREND_COLOR[s.trend] || 'var(--muted)',
-                  }}>
-                    {TREND_ICON[s.trend] || '→'}
-                  </span>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-      <div style={{ marginTop: 10, fontSize: 11, color: 'var(--muted)' }}>
-        Leverage = tasks completed ÷ (tokens used / 1K). Higher = more efficient AI use.
-        {scores[0]?.tokens_used && scores[0].tokens_used < 30000
-          ? ' Mock data shown — add Anthropic Admin API key in /admin to see live data.'
-          : ''}
-      </div>
-    </div>
-  )
-}
-
-// ── Main component ────────────────────────────────────────────────────────────
-
 export default function AIUsageTab({ data }) {
   if (!data) {
     return (
@@ -235,12 +93,17 @@ export default function AIUsageTab({ data }) {
   const { total_tokens, total_cost_usd, tokens_per_user, tokens_per_day, leverage_scores, source, api_error } = data
 
   const mostActive = tokens_per_user?.[0]
-  const avgPerTask = leverage_scores?.length
-    ? Math.round(
-        tokens_per_user.reduce((s, u) => s + u.tokens, 0) /
-        Math.max(leverage_scores.reduce((s, l) => s + l.tasks_completed, 0), 1)
-      )
-    : 0
+
+  const tokensRows = (tokens_per_user || []).map((u) => ({
+    name: u.name,
+    value: Math.round(u.tokens / 1000),
+    unit: 'K',
+  }))
+
+  const leverageRows = (leverage_scores || []).map((s) => ({
+    name: s.name,
+    value: Math.round(s.leverage_score * 100) / 100,
+  }))
 
   return (
     <>
@@ -265,37 +128,25 @@ export default function AIUsageTab({ data }) {
       )}
 
       <div className="metric-grid" style={{ marginTop: 16 }}>
-        <AICard
-          label="Total tokens / 30d"
-          value={fmt(total_tokens)}
-          sub="input + output"
-        />
-        <AICard
-          label="Total cost / 30d"
-          value={`$${total_cost_usd?.toFixed(2)}`}
-          sub="≈ $0.000003 avg/token"
-          color="#a855f7"
-        />
-        <AICard
-          label="Most active"
-          value={mostActive?.name ?? '—'}
-          sub={mostActive ? `${fmt(mostActive.tokens)} tokens` : ''}
-          color="#c084fc"
-        />
-        <AICard
-          label="Avg tokens / task"
-          value={fmt(avgPerTask)}
-          sub="across all engineers"
-          color="#7c3aed"
-        />
+        <AICard label="Total tokens / 30d" value={fmt(total_tokens)} sub="input + output" />
+        <AICard label="Total cost / 30d" value={`$${total_cost_usd?.toFixed(2)}`} sub="≈ $0.000003 avg/token" color="#a855f7" />
+        <AICard label="Most active" value={mostActive?.name ?? '—'} sub={mostActive ? `${fmt(mostActive.tokens)} tokens` : ''} color="#c084fc" />
       </div>
+
+      <TokensLine data={tokens_per_day || []} />
 
       <div className="two-col" style={{ marginTop: 20 }}>
-        <TokensLine data={tokens_per_day || []} />
-        <TokensBar  data={tokens_per_user || []} />
+        <BottleneckBars
+          title="Tokens per engineer"
+          rows={tokensRows}
+          color={AI_COLOR}
+        />
+        <BottleneckBars
+          title="AI leverage score · tasks / 1K tokens"
+          rows={leverageRows}
+          color="var(--success)"
+        />
       </div>
-
-      <LeverageTable scores={leverage_scores} />
     </>
   )
 }

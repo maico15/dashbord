@@ -31,31 +31,21 @@ function DevTab({ data }) {
           accent={totals.avg_cycle_time < 2 ? 'success' : 'warning'}
           tooltip="Average time from PR open to merge, in days. Target is under 2 days. Lower is better."
         />
-        <MetricCard label="Features / week" value={totals.features_completed} sub="completed" accent="accent1"
-          tooltip="Completed feature tasks delivered this week across all engineers in the dev stream." />
-        <MetricCard
-          label="Deploy freq"
-          value={`${totals.deploy_frequency}x`}
-          sub={`${totals.deploys} deploys total`}
-          accent="accent2"
-          tooltip="How many times the team deployed to production this week. Calculated as total deploys ÷ active engineers."
-        />
       </div>
 
-      <div className="two-col">
-        <XPChart data={weekly_chart} color="#00cfff" name="XP" />
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-          <BottleneckBars
-            title="PRs merged"
-            rows={bottlenecks.map((b) => ({ name: b.name, value: b.prs_merged }))}
-            color="var(--accent1)"
-          />
-          <BottleneckBars
-            title="Cycle time (days)"
-            rows={bottlenecks.map((b) => ({ name: b.name, value: b.cycle_time_days, unit: 'd' }))}
-            color="var(--accent2)"
-          />
-        </div>
+      <XPChart data={weekly_chart} color="#00cfff" name="XP" title="Weekly XP · Development" />
+
+      <div className="two-col" style={{ marginTop: 20 }}>
+        <BottleneckBars
+          title="PRs merged per engineer"
+          rows={bottlenecks.map((b) => ({ name: b.name, value: b.prs_merged }))}
+          color="var(--accent1)"
+        />
+        <BottleneckBars
+          title="Tickets closed per engineer"
+          rows={bottlenecks.map((b) => ({ name: b.name, value: b.tickets_closed }))}
+          color="var(--accent2)"
+        />
       </div>
     </>
   )
@@ -72,13 +62,6 @@ function SupportTab({ data }) {
         <MetricCard label="Incidents resolved" value={totals.incidents_resolved} sub="this week" accent="success"
           tooltip="Incidents closed or resolved this week. Each resolved incident earns XP per the Rules table." />
         <MetricCard
-          label="Avg resolution"
-          value={`${totals.avg_resolution_hours}h`}
-          sub={totals.avg_resolution_hours < 2 ? '✓ within SLA' : '⚠ above 2h'}
-          accent={totals.avg_resolution_hours < 2 ? 'success' : 'danger'}
-          tooltip="Average time to resolve an incident, in hours. SLA target is under 2 hours. Lower is better."
-        />
-        <MetricCard
           label="SLA %"
           value={`${totals.sla_percentage}%`}
           sub={`${totals.sla_breached} breaches`}
@@ -87,20 +70,19 @@ function SupportTab({ data }) {
         />
       </div>
 
-      <div className="two-col">
-        <XPChart data={weekly_chart} color="#00ff9d" name="XP" />
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-          <BottleneckBars
-            title="Resolved per engineer"
-            rows={bottlenecks.map((b) => ({ name: b.name, value: b.incidents_resolved }))}
-            color="var(--success)"
-          />
-          <BottleneckBars
-            title="SLA breaches"
-            rows={bottlenecks.map((b) => ({ name: b.name, value: b.sla_breached }))}
-            color="var(--danger)"
-          />
-        </div>
+      <XPChart data={weekly_chart} color="#00ff9d" name="XP" title="Weekly XP · Support" />
+
+      <div className="two-col" style={{ marginTop: 20 }}>
+        <BottleneckBars
+          title="Incidents resolved per engineer"
+          rows={bottlenecks.map((b) => ({ name: b.name, value: b.incidents_resolved }))}
+          color="var(--success)"
+        />
+        <BottleneckBars
+          title="Avg resolution time per engineer"
+          rows={bottlenecks.map((b) => ({ name: b.name, value: b.avg_resolution_hours, unit: 'h' }))}
+          color="var(--accent1)"
+        />
       </div>
     </>
   )
@@ -125,20 +107,19 @@ function DocsTab({ data }) {
         />
       </div>
 
-      <div className="two-col">
-        <XPChart data={weekly_chart} color="#ffd700" name="XP" />
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-          <BottleneckBars
-            title="Docs created per engineer"
-            rows={bottlenecks.map((b) => ({ name: b.name, value: b.docs_created }))}
-            color="var(--warning)"
-          />
-          <BottleneckBars
-            title="Docs updated"
-            rows={bottlenecks.map((b) => ({ name: b.name, value: b.docs_updated }))}
-            color="var(--accent2)"
-          />
-        </div>
+      <XPChart data={weekly_chart} color="#ffd700" name="XP" title="Weekly XP · Documentation" />
+
+      <div className="two-col" style={{ marginTop: 20 }}>
+        <BottleneckBars
+          title="Docs created per engineer"
+          rows={bottlenecks.map((b) => ({ name: b.name, value: b.docs_created }))}
+          color="var(--warning)"
+        />
+        <BottleneckBars
+          title="Docs updated per engineer"
+          rows={bottlenecks.map((b) => ({ name: b.name, value: b.docs_updated }))}
+          color="var(--accent2)"
+        />
       </div>
     </>
   )
@@ -207,7 +188,7 @@ export default function Dashboard() {
         {activeTab === 'docs'    && <DocsTab data={tabData.docs} />}
         {activeTab === 'ai'      && <AIUsageTab data={tabData.ai} />}
 
-        {activeTab !== 'ai' && <Leaderboard data={leaderboard} />}
+        <Leaderboard data={leaderboard} />
       </div>
     </>
   )
