@@ -721,6 +721,207 @@ function SecuritySection({ pw, onPasswordChange }) {
   )
 }
 
+// ── Integrations section ─────────────────────────────────────────────────────
+
+function IntegrationsSection({ pw }) {
+  const [jiraDomain,   setJiraDomain]   = useState('')
+  const [jiraEmail,    setJiraEmail]    = useState('')
+  const [jiraToken,    setJiraToken]    = useState('')
+  const [projectKeys,  setProjectKeys]  = useState('')
+  const [usernameMap,  setUsernameMap]  = useState([])
+  const [newRow,       setNewRow]       = useState({ jira_email: '', engineer_name: '' })
+  const [saved,        setSaved]        = useState(false)
+  const [syncing,      setSyncing]      = useState(false)
+  const [syncResult,   setSyncResult]   = useState(null)
+  const [lastSync,     setLastSync]     = useState(null)
+
+  const loadStatus = () => {
+    api.get(`/sync/jira/status?password=${encodeURIComponent(pw)}`)
+      .then(setLastSync)
+      .catch(() => {})
+  }
+
+  useEffect(() => {
+    api.get('/config').then((c) => {
+      setJiraDomain(c.jira_domain || '')
+      setJiraEmail(c.jira_email || '')
+      setJiraToken(c.jira_api_token || '')
+      try {
+        setProjectKeys(JSON.parse(c.jira_project_keys || '[]').join(', '))
+      } catch { setProjectKeys('') }
+      try {
+        setUsernameMap(
+          Object.entries(JSON.parse(c.jira_username_map || '{}')).map(
+            ([jira_email, engineer_name]) => ({ jira_email, engineer_name })
+          )
+        )
+      } catch { setUsernameMap([]) }
+    })
+    loadStatus()
+  }, [])
+
+  const handleSave = async () => {
+    const mapObj = {}
+    usernameMap.forEach(({ jira_email, engineer_name }) => {
+      if (jira_email.trim() && engineer_name.trim()) mapObj[jira_email.trim()] = engineer_name.trim()
+    })
+    const keys = projectKeys.split(',').map(k => k.trim()).filter(Boolean)
+    await api.put('/config', {
+      jira_domain:      jiraDomain,
+      jira_email:       jiraEmail,
+      jira_api_token:   jiraToken,
+      jira_project_keys: JSON.stringify(keys),
+      jira_username_map: JSON.stringify(mapObj),
+    }, pw)
+    setSaved(true)
+    setTimeout(() => setSaved(false), 2000)
+  }
+
+  const handleSync = async () => {
+    setSyncing(true)
+    setSyncResult(null)
+    try {
+      const res = await api.post(`/sync/jira?password=${encodeURIComponent(pw)}`, {})
+      setSyncResult({ ok: true, msg: `Synced ${res.records_updated} record(s)` })
+      loadStatus()
+    } catch (e) {
+      let msg = e.message
+      try { msg = JSON.parse(msg).detail || msg } catch {}
+      setSyncResult({ ok: false, msg })
+    } finally {
+      setSyncing(false)
+    }
+  }
+
+  const addRow = () => {
+    if (!newRow.jira_email.trim() || !newRow.engineer_name.trim()) return
+    setUsernameMap(prev => [...prev, { ...newRow }])
+    setNewRow({ jira_email: '', engineer_name: '' })
+  }
+
+  const removeRow = (idx) => setUsernameMap(prev => prev.filter((_, i) => i !== idx))
+
+  const updateRow = (idx, field, val) =>
+    setUsernameMap(prev => prev.map((r, i) => i === idx ? { ...r, [field]: val } : r))
+
+  const statusDot = lastSync?.status === 'success'
+    ? 'var(--success)'
+    : lastSync?.status === 'error'
+      ? 'var(--danger)'
+      : 'var(--muted)'
+
+  const inputStyle = {
+    flex: 1, background: 'var(--card2)', border: '1px solid var(--border)',
+    borderRadius: 5, color: 'var(--text)', padding: '5px 8px', fontSize: 13,
+  }
+
+  return (
+    <div className="admin-section">
+      <h2>Integrations</h2>
+
+      <div style={{ fontSize: 11, color: 'var(--accent1)', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 10, fontWeight: 600 }}>
+        Jira Cloud
+      </div>
+
+      <div className="card">
+        <div className="form-row">
+          <div className="form-group">
+            <label>Jira Domain</label>
+            <input value={jiraDomain} onChange={e => setJiraDomain(e.target.value)} placeholder="yourcompany.atlassian.net" />
+          </div>
+          <div className="form-group">
+            <label>Jira Email</label>
+            <input type="email" value={jiraEmail} onChange={e => setJiraEmail(e.target.value)} placeholder="admin@yourcompany.com" />
+          </div>
+        </div>
+        <div className="form-row">
+          <div className="form-group">
+            <label>Jira API Token</label>
+            <input type="password" value={jiraToken} onChange={e => setJiraToken(e.target.value)} placeholder="ATATT3..." />
+          </div>
+          <div className="form-group">
+            <label>Project Keys (comma-separated)</label>
+            <input value={projectKeys} onChange={e => setProjectKeys(e.target.value)} placeholder="DEV, SUPPORT, DOCS" />
+          </div>
+        </div>
+
+        <div style={{ margin: '16px 0 8px', fontSize: 12, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+          Jira Email → Engineer Name Mapping
+        </div>
+
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 10 }}>
+          {usernameMap.map((row, idx) => (
+            <div key={idx} style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+              <input
+                value={row.jira_email}
+                onChange={e => updateRow(idx, 'jira_email', e.target.value)}
+                placeholder="jira-email@company.com"
+                style={inputStyle}
+              />
+              <span style={{ color: 'var(--muted)', fontSize: 13, flexShrink: 0 }}>→</span>
+              <input
+                value={row.engineer_name}
+                onChange={e => updateRow(idx, 'engineer_name', e.target.value)}
+                placeholder="Engineer Name"
+                style={inputStyle}
+              />
+              <button className="btn btn-danger" style={{ padding: '3px 8px', fontSize: 12, flexShrink: 0 }} onClick={() => removeRow(idx)}>✕</button>
+            </div>
+          ))}
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            <input
+              value={newRow.jira_email}
+              onChange={e => setNewRow(p => ({ ...p, jira_email: e.target.value }))}
+              placeholder="jira-email@company.com"
+              style={inputStyle}
+              onKeyDown={e => e.key === 'Enter' && addRow()}
+            />
+            <span style={{ color: 'var(--muted)', fontSize: 13, flexShrink: 0 }}>→</span>
+            <input
+              value={newRow.engineer_name}
+              onChange={e => setNewRow(p => ({ ...p, engineer_name: e.target.value }))}
+              placeholder="Engineer Name"
+              style={inputStyle}
+              onKeyDown={e => e.key === 'Enter' && addRow()}
+            />
+            <button className="btn btn-primary" style={{ padding: '3px 12px', fontSize: 12, flexShrink: 0 }} onClick={addRow}>+ Add</button>
+          </div>
+        </div>
+
+        <div style={{ borderTop: '1px solid var(--border)', paddingTop: 14, display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 12 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+            <button
+              className="btn"
+              style={{ background: 'rgba(0,207,255,0.1)', color: 'var(--accent1)', border: '1px solid rgba(0,207,255,0.25)', padding: '6px 14px' }}
+              onClick={handleSync}
+              disabled={syncing}
+            >
+              {syncing ? <span className="spinner" /> : '⟳ Sync Now'}
+            </button>
+            {syncResult && (
+              <span style={{ fontSize: 12, color: syncResult.ok ? 'var(--success)' : 'var(--danger)' }}>
+                {syncResult.ok ? '✓ ' : '✕ '}{syncResult.msg}
+              </span>
+            )}
+          </div>
+
+          {lastSync && lastSync.status !== 'never' && (
+            <div style={{ fontSize: 12, color: 'var(--muted)', display: 'flex', alignItems: 'center', gap: 6 }}>
+              <span style={{ width: 7, height: 7, borderRadius: '50%', background: statusDot, display: 'inline-block', flexShrink: 0 }} />
+              Last sync: {new Date(lastSync.timestamp).toLocaleString()} · {lastSync.records_updated} record(s)
+              {lastSync.status === 'error' && (
+                <span style={{ color: 'var(--danger)', marginLeft: 4 }}>— {lastSync.error}</span>
+              )}
+            </div>
+          )}
+
+          <button className="btn btn-primary" onClick={handleSave}>{saved ? '✓ Saved' : 'Save'}</button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 // ── Main admin page ───────────────────────────────────────────────────────────
 
 export default function Admin() {
@@ -750,11 +951,12 @@ export default function Admin() {
   if (!authed) return <Login onLogin={handleLogin} />
 
   const SECTIONS = [
-    { key: 'config',   label: 'Configuration' },
-    { key: 'team',     label: 'Team' },
-    { key: 'metrics',  label: 'Metrics' },
-    { key: 'rules',    label: 'Rules' },
-    { key: 'security', label: 'Security' },
+    { key: 'config',        label: 'Configuration' },
+    { key: 'team',          label: 'Team' },
+    { key: 'metrics',       label: 'Metrics' },
+    { key: 'rules',         label: 'Rules' },
+    { key: 'integrations',  label: 'Integrations' },
+    { key: 'security',      label: 'Security' },
   ]
 
   return (
@@ -785,11 +987,12 @@ export default function Admin() {
         </div>
 
         <div style={{ marginTop: 24 }}>
-          {section === 'config'   && <ConfigSection pw={pw} />}
-          {section === 'team'     && <TeamSection pw={pw} />}
-          {section === 'metrics'  && <MetricsSection pw={pw} />}
-          {section === 'rules'    && <RulesSection pw={pw} />}
-          {section === 'security' && <SecuritySection pw={pw} onPasswordChange={setPw} />}
+          {section === 'config'       && <ConfigSection pw={pw} />}
+          {section === 'team'         && <TeamSection pw={pw} />}
+          {section === 'metrics'      && <MetricsSection pw={pw} />}
+          {section === 'rules'        && <RulesSection pw={pw} />}
+          {section === 'integrations' && <IntegrationsSection pw={pw} />}
+          {section === 'security'     && <SecuritySection pw={pw} onPasswordChange={setPw} />}
         </div>
       </div>
     </div>

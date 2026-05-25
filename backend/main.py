@@ -7,9 +7,12 @@ import sqlite3
 import random
 import json as json_lib
 import time as time_lib
+import base64
 import urllib.request
 import urllib.error
+import urllib.parse
 from datetime import datetime, timedelta
+from apscheduler.schedulers.background import BackgroundScheduler
 
 DB_PATH = "dashboard.db"
 ADMIN_PASSWORD = "admin123"
@@ -31,6 +34,9 @@ def _load_password():
         conn.close()
 
 
+scheduler = BackgroundScheduler(timezone="UTC")
+
+
 @asynccontextmanager
 async def lifespan(app):
     init_db()
@@ -41,7 +47,10 @@ async def lifespan(app):
     if count == 0:
         seed_data()
     _load_password()
+    scheduler.add_job(_run_jira_sync, 'cron', hour=2, minute=0, id='jira_daily_sync', replace_existing=True)
+    scheduler.start()
     yield
+    scheduler.shutdown(wait=False)
 
 
 app = FastAPI(title="Engineering Dashboard API", lifespan=lifespan)
@@ -141,8 +150,22 @@ def init_db():
             created_at TEXT NOT NULL DEFAULT (datetime('now')),
             UNIQUE(engineer_id, week_number, year)
         );
+
+        CREATE TABLE IF NOT EXISTS sync_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            service TEXT NOT NULL DEFAULT 'jira',
+            timestamp TEXT NOT NULL,
+            status TEXT NOT NULL,
+            records_updated INTEGER DEFAULT 0,
+            error TEXT DEFAULT NULL
+        );
     """)
     conn.commit()
+    try:
+        conn.execute("ALTER TABLE dev_metrics ADD COLUMN blocked_count INTEGER DEFAULT 0")
+        conn.commit()
+    except Exception:
+        pass
     conn.close()
 
 
@@ -230,6 +253,11 @@ def seed_data():
     cfg = [
         ("github_token", ""),
         ("jira_token", ""),
+        ("jira_domain", ""),
+        ("jira_email", ""),
+        ("jira_api_token", ""),
+        ("jira_project_keys", "[]"),
+        ("jira_username_map", "{}"),
         ("anthropic_admin_key", ""),
         ("ai_auto_sync", "0"),
         ("team_name", "Engineering Squad"),
@@ -535,6 +563,228 @@ def _get_or_fetch_ai_usage(conn, force: bool = False) -> dict:
     )
     conn.commit()
     return result
+
+
+# ── Jira integration ─────────────────────────────────────────────────────────
+
+def _jira_request(path: str, domain: str, email: str, token: str, params: dict = None) -> dict:
+    creds = base64.b64encode(f"{email}:{token}".encode()).decode()
+    url = f"https://{domain}/rest/api/3{path}"
+    if params:
+        url += "?" + urllib.parse.urlencode(params)
+    req = urllib.request.Request(url, headers={
+        "Authorization": f"Basic {creds}",
+        "Accept": "application/json",
+    })
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        return json_lib.loads(resp.read())
+
+
+def _jira_search(jql: str, fields: str, domain: str, email: str, token: str, max_results: int = 100) -> list:
+    result = _jira_request("/search", domain, email, token, {
+        "jql": jql,
+        "fields": fields,
+        "maxResults": max_results,
+    })
+    return result.get("issues", [])
+
+
+def _do_jira_sync(conn) -> int:
+    c = conn.cursor()
+    c.execute(
+        "SELECT key, value FROM config WHERE key IN "
+        "('jira_domain','jira_email','jira_api_token','jira_project_keys','jira_username_map')"
+    )
+    cfg = {r["key"]: r["value"] for r in c.fetchall()}
+
+    domain = (cfg.get("jira_domain") or "").strip()
+    auth_email = (cfg.get("jira_email") or "").strip()
+    token = (cfg.get("jira_api_token") or "").strip()
+
+    if not domain or not auth_email or not token:
+        raise ValueError("Jira credentials not configured")
+
+    try:
+        project_keys = json_lib.loads(cfg.get("jira_project_keys") or "[]")
+    except Exception:
+        project_keys = []
+    try:
+        username_map = json_lib.loads(cfg.get("jira_username_map") or "{}")
+    except Exception:
+        username_map = {}
+
+    if not project_keys:
+        raise ValueError("No Jira project keys configured")
+    if not username_map:
+        raise ValueError("No Jira username mapping configured")
+
+    week, year = current_week_year(conn)
+    projects_jql = ", ".join(project_keys)
+    records_updated = 0
+
+    for jira_email, engineer_name in username_map.items():
+        c.execute("SELECT id FROM team_members WHERE name=?", (engineer_name,))
+        row = c.fetchone()
+        if not row:
+            continue
+        member_id = row["id"]
+
+        # A + B: tickets closed this week and avg cycle time
+        try:
+            jql_closed = (
+                f'project in ({projects_jql}) AND status changed to Done '
+                f'DURING (startOfWeek(), endOfWeek()) AND assignee = "{jira_email}"'
+            )
+            issues = _jira_search(jql_closed, "created,resolutiondate,summary", domain, auth_email, token)
+            tickets_closed = len(issues)
+
+            cycle_times = []
+            for issue in issues:
+                flds = issue.get("fields", {})
+                c_str = (flds.get("created") or "")[:19]
+                r_str = (flds.get("resolutiondate") or "")[:19]
+                if c_str and r_str:
+                    try:
+                        diff = (
+                            datetime.fromisoformat(r_str) - datetime.fromisoformat(c_str)
+                        ).total_seconds() / 86400
+                        if diff >= 0:
+                            cycle_times.append(diff)
+                    except Exception:
+                        pass
+            avg_cycle = round(sum(cycle_times) / len(cycle_times), 2) if cycle_times else 0.0
+        except urllib.error.HTTPError as e:
+            if e.code == 401:
+                raise ValueError("Invalid Jira credentials (401)")
+            if e.code == 404:
+                raise ValueError("Jira project not found (404)")
+            tickets_closed, avg_cycle = 0, 0.0
+        except Exception:
+            tickets_closed, avg_cycle = 0, 0.0
+
+        # D: blocked tickets count
+        try:
+            jql_blocked = (
+                f'project in ({projects_jql}) AND assignee = "{jira_email}" '
+                f'AND labels = "blocked" AND status != Done'
+            )
+            blocked_count = len(_jira_search(jql_blocked, "summary", domain, auth_email, token, 50))
+        except Exception:
+            blocked_count = 0
+
+        # Upsert dev_metrics (preserve other fields like prs_merged)
+        c.execute(
+            "SELECT id FROM dev_metrics WHERE member_id=? AND week=? AND year=?",
+            (member_id, week, year),
+        )
+        if c.fetchone():
+            c.execute(
+                "UPDATE dev_metrics SET tickets_closed=?, cycle_time_days=?, blocked_count=? "
+                "WHERE member_id=? AND week=? AND year=?",
+                (tickets_closed, avg_cycle, blocked_count, member_id, week, year),
+            )
+        else:
+            c.execute(
+                "INSERT INTO dev_metrics (member_id, week, year, tickets_closed, cycle_time_days, blocked_count) "
+                "VALUES (?,?,?,?,?,?)",
+                (member_id, week, year, tickets_closed, avg_cycle, blocked_count),
+            )
+        records_updated += 1
+
+        # C: in-progress tickets → weekly_tasks
+        try:
+            jql_progress = (
+                f'assignee = "{jira_email}" AND status in ("In Progress", "In Review") '
+                f'ORDER BY updated DESC'
+            )
+            in_progress = [
+                i.get("fields", {}).get("summary") or i.get("key", "")
+                for i in _jira_search(jql_progress, "summary", domain, auth_email, token, 20)
+            ]
+        except Exception:
+            in_progress = []
+
+        if in_progress:
+            c.execute(
+                "SELECT id FROM weekly_tasks WHERE engineer_id=? AND week_number=? AND year=?",
+                (member_id, week, year),
+            )
+            if c.fetchone():
+                c.execute(
+                    "UPDATE weekly_tasks SET what_was_done=? "
+                    "WHERE engineer_id=? AND week_number=? AND year=?",
+                    (json_lib.dumps(in_progress, ensure_ascii=False), member_id, week, year),
+                )
+            else:
+                c.execute(
+                    "INSERT INTO weekly_tasks (engineer_id, week_number, year, what_was_done, next_week, stream) "
+                    "VALUES (?,?,?,?,?,?)",
+                    (
+                        member_id, week, year,
+                        json_lib.dumps(in_progress, ensure_ascii=False),
+                        json_lib.dumps([], ensure_ascii=False),
+                        "dev",
+                    ),
+                )
+
+    conn.commit()
+    return records_updated
+
+
+def _run_jira_sync() -> dict:
+    conn = get_db()
+    try:
+        records = _do_jira_sync(conn)
+        conn.execute(
+            "INSERT INTO sync_log (service, timestamp, status, records_updated) VALUES (?,?,?,?)",
+            ("jira", datetime.utcnow().isoformat(), "success", records),
+        )
+        conn.commit()
+        return {"status": "success", "records_updated": records}
+    except Exception as exc:
+        try:
+            conn.execute(
+                "INSERT INTO sync_log (service, timestamp, status, records_updated, error) "
+                "VALUES (?,?,?,?,?)",
+                ("jira", datetime.utcnow().isoformat(), "error", 0, str(exc)),
+            )
+            conn.commit()
+        except Exception:
+            pass
+        return {"status": "error", "error": str(exc)}
+    finally:
+        conn.close()
+
+
+# ── Jira sync endpoints ───────────────────────────────────────────────────────
+
+@app.post("/api/sync/jira")
+def sync_jira(password: str = ""):
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    result = _run_jira_sync()
+    if result.get("status") == "error":
+        err = result.get("error", "Sync failed")
+        if "401" in err or "credentials" in err.lower():
+            raise HTTPException(401, err)
+        if "404" in err or "not found" in err.lower():
+            raise HTTPException(404, err)
+        raise HTTPException(500, err)
+    return result
+
+
+@app.get("/api/sync/jira/status")
+def jira_sync_status(password: str = ""):
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT * FROM sync_log WHERE service='jira' ORDER BY id DESC LIMIT 1")
+    row = c.fetchone()
+    conn.close()
+    if not row:
+        return {"status": "never", "timestamp": None, "records_updated": 0, "error": None}
+    return dict(row)
 
 
 # ── Public routes ──────────────────────────────────────────────────────────────
@@ -1163,6 +1413,11 @@ def get_config():
 class ConfigUpdate(BaseModel):
     github_token: Optional[str] = None
     jira_token: Optional[str] = None
+    jira_domain: Optional[str] = None
+    jira_email: Optional[str] = None
+    jira_api_token: Optional[str] = None
+    jira_project_keys: Optional[str] = None
+    jira_username_map: Optional[str] = None
     anthropic_admin_key: Optional[str] = None
     ai_auto_sync: Optional[str] = None
     team_name: Optional[str] = None
