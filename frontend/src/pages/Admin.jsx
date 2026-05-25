@@ -721,6 +721,219 @@ function SecuritySection({ pw, onPasswordChange }) {
   )
 }
 
+// ── Reports admin section ────────────────────────────────────────────────────
+
+function ReportsAdminSection({ pw }) {
+  const [date,     setDate]     = useState(() => new Date().toISOString().split('T')[0])
+  const [items,    setItems]    = useState([])
+  const [loading,  setLoading]  = useState(false)
+  const [editing,  setEditing]  = useState({})   // {engineerId: {completed,invisible_work,next_tasks,delayed_risks}}
+  const [saving,   setSaving]   = useState({})
+  const [syncing,  setSyncing]  = useState(false)
+  const [syncMsg,  setSyncMsg]  = useState(null)
+  const [lastSync, setLastSync] = useState(null)
+
+  const load = () => {
+    setLoading(true)
+    api.get(`/reports?date=${date}`)
+      .then(d => { setItems(d); setLoading(false) })
+      .catch(() => setLoading(false))
+  }
+
+  useEffect(() => { load() }, [date])
+
+  useEffect(() => {
+    api.get(`/sync/slack-reports/status?password=${encodeURIComponent(pw)}`)
+      .then(setLastSync).catch(() => {})
+  }, [])
+
+  const startEdit = (item) => {
+    const r = item.report
+    setEditing(prev => ({
+      ...prev,
+      [item.engineer.id]: {
+        completed:      (r?.completed      || []).join('\n'),
+        invisible_work: (r?.invisible_work || []).join('\n'),
+        next_tasks:     (r?.next_tasks     || []).join('\n'),
+        delayed_risks:  (r?.delayed_risks  || []).join('\n'),
+      }
+    }))
+  }
+
+  const cancelEdit = (eid) => setEditing(prev => { const n = { ...prev }; delete n[eid]; return n })
+
+  const parseLine = s => s.split('\n').map(l => l.trim()).filter(Boolean)
+
+  const handleSave = async (item) => {
+    const eid = item.engineer.id
+    setSaving(prev => ({ ...prev, [eid]: true }))
+    const draft = editing[eid]
+    const payload = {
+      completed:      parseLine(draft.completed),
+      invisible_work: parseLine(draft.invisible_work),
+      next_tasks:     parseLine(draft.next_tasks),
+      delayed_risks:  parseLine(draft.delayed_risks),
+    }
+    try {
+      if (item.report) {
+        await api.put(`/reports/${item.report.id}`, payload, pw)
+      } else {
+        await api.post('/reports/manual', {
+          engineer_id: eid, report_date: date, ...payload, source: 'manual',
+        }, pw)
+      }
+      cancelEdit(eid)
+      load()
+    } finally {
+      setSaving(prev => ({ ...prev, [eid]: false }))
+    }
+  }
+
+  const handleDelete = async (report) => {
+    if (!confirm('Delete this report?')) return
+    await api.del(`/reports/${report.id}`, pw)
+    load()
+  }
+
+  const handleSync = async () => {
+    setSyncing(true)
+    setSyncMsg(null)
+    try {
+      const res = await api.post(`/sync/slack-reports?password=${encodeURIComponent(pw)}`, {})
+      setSyncMsg({ ok: true, msg: `Synced ${res.records_updated} report(s)` })
+      load()
+      const status = await api.get(`/sync/slack-reports/status?password=${encodeURIComponent(pw)}`)
+      setLastSync(status)
+    } catch (e) {
+      let msg = e.message; try { msg = JSON.parse(msg).detail || msg } catch {}
+      setSyncMsg({ ok: false, msg })
+    } finally {
+      setSyncing(false)
+    }
+  }
+
+  const taStyle = {
+    width: '100%', background: 'var(--card2)', border: '1px solid var(--border)',
+    borderRadius: 5, color: 'var(--text)', padding: '6px 8px',
+    fontSize: 12, fontFamily: 'inherit', resize: 'vertical', outline: 'none',
+  }
+
+  return (
+    <div className="admin-section">
+      <h2>Daily Reports</h2>
+
+      {/* Slack sync status bar */}
+      <div className="card" style={{ marginBottom: 16, display: 'flex', alignItems: 'center', gap: 14, flexWrap: 'wrap' }}>
+        <span style={{ fontSize: 12, color: 'var(--muted)' }}>Channel: <code style={{ color: 'var(--accent1)' }}>C08NK2SD5CK</code></span>
+        <button
+          className="btn"
+          style={{ background: 'rgba(74,21,75,0.2)', color: '#e879f9', border: '1px solid rgba(232,121,249,0.3)', padding: '5px 12px', fontSize: 12 }}
+          onClick={handleSync}
+          disabled={syncing}
+        >
+          {syncing ? <span className="spinner" /> : '⟳ Sync from Slack'}
+        </button>
+        {syncMsg && (
+          <span style={{ fontSize: 12, color: syncMsg.ok ? 'var(--success)' : 'var(--danger)' }}>
+            {syncMsg.ok ? '✓ ' : '✕ '}{syncMsg.msg}
+          </span>
+        )}
+        {lastSync && lastSync.status !== 'never' && (
+          <span style={{ fontSize: 12, color: 'var(--muted)', marginLeft: 'auto' }}>
+            Last sync: {new Date(lastSync.timestamp).toLocaleString()} · {lastSync.records_updated} records
+          </span>
+        )}
+      </div>
+
+      {/* Date selector */}
+      <div style={{ marginBottom: 16, display: 'flex', alignItems: 'center', gap: 10 }}>
+        <label style={{ fontSize: 13, color: 'var(--muted)' }}>Date</label>
+        <input
+          type="date" value={date}
+          onChange={e => e.target.value && setDate(e.target.value)}
+          style={{ background: 'var(--card)', border: '1px solid var(--border)', borderRadius: 6, color: 'var(--text)', padding: '5px 10px', fontSize: 13 }}
+        />
+        <button className="btn btn-ghost" style={{ padding: '5px 10px', fontSize: 12 }}
+          onClick={() => setDate(new Date().toISOString().split('T')[0])}>Today</button>
+      </div>
+
+      {loading ? (
+        <div className="spinner" style={{ display: 'block', margin: '20px auto' }} />
+      ) : (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          {items.map(item => {
+            const eid = item.engineer.id
+            const draft = editing[eid]
+            const r = item.report
+            return (
+              <div key={eid} className="card" style={{ padding: 0, overflow: 'hidden' }}>
+                {/* Row header */}
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 14px', borderBottom: draft ? '1px solid var(--border)' : 'none' }}>
+                  <div style={{ width: 26, height: 26, borderRadius: '50%', background: item.engineer.avatar_color, flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 10, fontWeight: 700, color: '#080d1f' }}>
+                    {item.engineer.name.split(' ').slice(0,2).map(w=>w[0]).join('')}
+                  </div>
+                  <span style={{ flex: 1, fontWeight: 500, fontSize: 14 }}>{item.engineer.name}</span>
+                  {r ? (
+                    <span style={{ fontSize: 11, padding: '2px 8px', borderRadius: 10, background: 'rgba(0,255,157,0.1)', color: 'var(--success)', border: '1px solid rgba(0,255,157,0.25)' }}>
+                      Submitted · {r.source}
+                    </span>
+                  ) : (
+                    <span style={{ fontSize: 11, padding: '2px 8px', borderRadius: 10, background: 'rgba(255,80,80,0.1)', color: 'var(--danger)', border: '1px solid rgba(255,80,80,0.2)' }}>
+                      Missing
+                    </span>
+                  )}
+                  {!draft && (
+                    <button className="btn btn-ghost" style={{ padding: '3px 8px', fontSize: 12 }} onClick={() => startEdit(item)}>
+                      {r ? '✏ Edit' : '+ Add'}
+                    </button>
+                  )}
+                  {r && !draft && (
+                    <button className="btn btn-danger" style={{ padding: '3px 8px', fontSize: 12 }} onClick={() => handleDelete(r)}>✕</button>
+                  )}
+                </div>
+
+                {/* Inline edit form */}
+                {draft && (
+                  <div style={{ padding: '12px 14px', display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+                    {[
+                      { key: 'completed',      label: 'Completed',       color: 'var(--success)' },
+                      { key: 'invisible_work', label: 'Invisible Work',  color: '#60a5fa' },
+                      { key: 'next_tasks',     label: 'Next',            color: 'var(--accent1)' },
+                      { key: 'delayed_risks',  label: 'Delayed / Risks', color: 'var(--danger)' },
+                    ].map(s => (
+                      <div key={s.key}>
+                        <div style={{ fontSize: 11, fontWeight: 600, color: s.color, marginBottom: 4, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+                          {s.label}
+                        </div>
+                        <textarea
+                          rows={3}
+                          style={taStyle}
+                          placeholder="One item per line"
+                          value={draft[s.key]}
+                          onChange={e => setEditing(prev => ({
+                            ...prev,
+                            [eid]: { ...prev[eid], [s.key]: e.target.value }
+                          }))}
+                        />
+                      </div>
+                    ))}
+                    <div style={{ gridColumn: '1/-1', display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+                      <button className="btn btn-ghost" style={{ padding: '5px 12px' }} onClick={() => cancelEdit(eid)}>Cancel</button>
+                      <button className="btn btn-primary" style={{ padding: '5px 14px' }} onClick={() => handleSave(item)} disabled={saving[eid]}>
+                        {saving[eid] ? <span className="spinner" /> : 'Save'}
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )
+          })}
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ── Integrations section ─────────────────────────────────────────────────────
 
 function IntegrationsSection({ pw }) {
@@ -734,6 +947,12 @@ function IntegrationsSection({ pw }) {
   const [syncing,      setSyncing]      = useState(false)
   const [syncResult,   setSyncResult]   = useState(null)
   const [lastSync,     setLastSync]     = useState(null)
+  const [slackToken,   setSlackToken]   = useState('')
+  const [slackChannel, setSlackChannel] = useState('C08NK2SD5CK')
+  const [slackSyncResult, setSlackSyncResult] = useState(null)
+  const [slackTesting, setSlackTesting] = useState(false)
+  const [slackTestResult, setSlackTestResult] = useState(null)
+  const [slackLastSync, setSlackLastSync] = useState(null)
 
   const loadStatus = () => {
     api.get(`/sync/jira/status?password=${encodeURIComponent(pw)}`)
@@ -756,8 +975,12 @@ function IntegrationsSection({ pw }) {
           )
         )
       } catch { setUsernameMap([]) }
+      setSlackToken(c.slack_bot_token || '')
+      setSlackChannel(c.slack_reports_channel_id || 'C08NK2SD5CK')
     })
     loadStatus()
+    api.get(`/sync/slack-reports/status?password=${encodeURIComponent(pw)}`)
+      .then(setSlackLastSync).catch(() => {})
   }, [])
 
   const handleSave = async () => {
@@ -772,6 +995,8 @@ function IntegrationsSection({ pw }) {
       jira_api_token:   jiraToken,
       jira_project_keys: JSON.stringify(keys),
       jira_username_map: JSON.stringify(mapObj),
+      slack_bot_token: slackToken,
+      slack_reports_channel_id: slackChannel,
     }, pw)
     setSaved(true)
     setTimeout(() => setSaved(false), 2000)
@@ -787,6 +1012,36 @@ function IntegrationsSection({ pw }) {
     } catch (e) {
       let msg = e.message
       try { msg = JSON.parse(msg).detail || msg } catch {}
+      setSyncResult({ ok: false, msg })
+    } finally {
+      setSyncing(false)
+    }
+  }
+
+  const handleSlackTest = async () => {
+    setSlackTesting(true)
+    setSlackTestResult(null)
+    try {
+      const res = await api.post(`/sync/slack-reports/test?password=${encodeURIComponent(pw)}`, {})
+      setSlackTestResult({ ok: true, msg: `Connected as ${res.user} in ${res.team}` })
+    } catch (e) {
+      let msg = e.message; try { msg = JSON.parse(msg).detail || msg } catch {}
+      setSlackTestResult({ ok: false, msg })
+    } finally {
+      setSlackTesting(false)
+    }
+  }
+
+  const handleSlackSync = async () => {
+    setSyncing(true)
+    setSyncResult(null)
+    try {
+      const res = await api.post(`/sync/slack-reports?password=${encodeURIComponent(pw)}`, {})
+      setSyncResult({ ok: true, msg: `Synced ${res.records_updated} report(s) from Slack` })
+      const status = await api.get(`/sync/slack-reports/status?password=${encodeURIComponent(pw)}`)
+      setSlackLastSync(status)
+    } catch (e) {
+      let msg = e.message; try { msg = JSON.parse(msg).detail || msg } catch {}
       setSyncResult({ ok: false, msg })
     } finally {
       setSyncing(false)
@@ -918,6 +1173,57 @@ function IntegrationsSection({ pw }) {
           <button className="btn btn-primary" onClick={handleSave}>{saved ? '✓ Saved' : 'Save'}</button>
         </div>
       </div>
+
+      <div style={{ fontSize: 11, color: '#e879f9', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 10, marginTop: 24, fontWeight: 600 }}>
+        Slack
+      </div>
+
+      <div className="card">
+        <div className="form-row">
+          <div className="form-group">
+            <label>Slack Bot Token</label>
+            <input type="password" value={slackToken} onChange={e => setSlackToken(e.target.value)} placeholder="xoxb-..." />
+          </div>
+          <div className="form-group" style={{ maxWidth: 200 }}>
+            <label>Reports Channel ID</label>
+            <input value={slackChannel} onChange={e => setSlackChannel(e.target.value)} placeholder="C08NK2SD5CK" />
+          </div>
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', marginTop: 4 }}>
+          <button
+            className="btn"
+            style={{ background: 'rgba(74,21,75,0.2)', color: '#e879f9', border: '1px solid rgba(232,121,249,0.3)', padding: '6px 14px' }}
+            onClick={handleSlackTest}
+            disabled={slackTesting}
+          >
+            {slackTesting ? <span className="spinner" /> : '✓ Test Connection'}
+          </button>
+          <button
+            className="btn"
+            style={{ background: 'rgba(74,21,75,0.2)', color: '#e879f9', border: '1px solid rgba(232,121,249,0.3)', padding: '6px 14px' }}
+            onClick={handleSlackSync}
+            disabled={syncing}
+          >
+            {syncing ? <span className="spinner" /> : '⟳ Sync Reports Now'}
+          </button>
+          {slackTestResult && (
+            <span style={{ fontSize: 12, color: slackTestResult.ok ? 'var(--success)' : 'var(--danger)' }}>
+              {slackTestResult.ok ? '✓ ' : '✕ '}{slackTestResult.msg}
+            </span>
+          )}
+          {syncResult && (
+            <span style={{ fontSize: 12, color: syncResult.ok ? 'var(--success)' : 'var(--danger)' }}>
+              {syncResult.ok ? '✓ ' : '✕ '}{syncResult.msg}
+            </span>
+          )}
+        </div>
+        {slackLastSync && slackLastSync.status !== 'never' && (
+          <div style={{ marginTop: 10, fontSize: 12, color: 'var(--muted)' }}>
+            Last sync: {new Date(slackLastSync.timestamp).toLocaleString()} · {slackLastSync.records_updated} record(s)
+            {slackLastSync.status === 'error' && <span style={{ color: 'var(--danger)', marginLeft: 6 }}>— {slackLastSync.error}</span>}
+          </div>
+        )}
+      </div>
     </div>
   )
 }
@@ -956,6 +1262,7 @@ export default function Admin() {
     { key: 'metrics',       label: 'Metrics' },
     { key: 'rules',         label: 'Rules' },
     { key: 'integrations',  label: 'Integrations' },
+    { key: 'reports',       label: 'Reports' },
     { key: 'security',      label: 'Security' },
   ]
 
@@ -992,6 +1299,7 @@ export default function Admin() {
           {section === 'metrics'      && <MetricsSection pw={pw} />}
           {section === 'rules'        && <RulesSection pw={pw} />}
           {section === 'integrations' && <IntegrationsSection pw={pw} />}
+          {section === 'reports'      && <ReportsAdminSection pw={pw} />}
           {section === 'security'     && <SecuritySection pw={pw} onPasswordChange={setPw} />}
         </div>
       </div>

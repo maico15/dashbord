@@ -48,6 +48,7 @@ async def lifespan(app):
         seed_data()
     _load_password()
     scheduler.add_job(_run_jira_sync, 'cron', hour=2, minute=0, id='jira_daily_sync', replace_existing=True)
+    scheduler.add_job(_run_slack_reports_sync, 'cron', hour=20, minute=0, id='slack_reports_sync', replace_existing=True)
     scheduler.start()
     yield
     scheduler.shutdown(wait=False)
@@ -159,6 +160,20 @@ def init_db():
             records_updated INTEGER DEFAULT 0,
             error TEXT DEFAULT NULL
         );
+
+        CREATE TABLE IF NOT EXISTS daily_reports (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            engineer_id INTEGER REFERENCES team_members(id) ON DELETE CASCADE,
+            report_date TEXT NOT NULL,
+            raw_text TEXT DEFAULT '',
+            completed TEXT NOT NULL DEFAULT '[]',
+            invisible_work TEXT NOT NULL DEFAULT '[]',
+            next_tasks TEXT NOT NULL DEFAULT '[]',
+            delayed_risks TEXT NOT NULL DEFAULT '[]',
+            source TEXT NOT NULL DEFAULT 'manual',
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            UNIQUE(engineer_id, report_date)
+        );
     """)
     conn.commit()
     try:
@@ -258,6 +273,8 @@ def seed_data():
         ("jira_api_token", ""),
         ("jira_project_keys", "[]"),
         ("jira_username_map", "{}"),
+        ("slack_bot_token", ""),
+        ("slack_reports_channel_id", "C08NK2SD5CK"),
         ("anthropic_admin_key", ""),
         ("ai_auto_sync", "0"),
         ("team_name", "Engineering Squad"),
@@ -756,6 +773,164 @@ def _run_jira_sync() -> dict:
         conn.close()
 
 
+# ── Report parser ─────────────────────────────────────────────────────────────
+
+def _parse_dash_items(text: str) -> list:
+    import re
+    if not text.strip():
+        return []
+    parts = re.split(r'\s*[—–]\s*', text)
+    return [p.strip() for p in parts if p.strip()]
+
+
+def parse_daily_report(text: str) -> dict:
+    import re
+    result = {"name": None, "date": None, "completed": [], "invisible_work": [], "next_tasks": [], "delayed_risks": []}
+    lines = [l.strip() for l in text.split('\n')]
+    for line in lines[:3]:
+        m = re.match(r'daily\s+report\s*[—–\-]+\s*(.+?)\s*\|\s*(.+)', line, re.IGNORECASE)
+        if m:
+            result["name"] = m.group(1).strip()
+            result["date"] = m.group(2).strip()
+            break
+    SECTION_RE = [
+        ("completed",      re.compile(r'^completed\s*:?(.*)', re.IGNORECASE)),
+        ("invisible_work", re.compile(r'^invisible\s+work\s*:?(.*)', re.IGNORECASE)),
+        ("next_tasks",     re.compile(r'^next\s*:?(.*)', re.IGNORECASE)),
+        ("delayed_risks",  re.compile(r'^delayed\s*/?\s*risks?\s*:?(.*)', re.IGNORECASE)),
+    ]
+    current = None
+    for line in lines[1:]:
+        if not line:
+            continue
+        matched = False
+        for key, pattern in SECTION_RE:
+            m = pattern.match(line)
+            if m:
+                current = key
+                rest = m.group(1).strip().lstrip(':').strip()
+                if rest:
+                    result[current].extend(_parse_dash_items(rest))
+                matched = True
+                break
+        if not matched and current:
+            result[current].extend(_parse_dash_items(line))
+    return result
+
+
+# ── Slack integration ─────────────────────────────────────────────────────────
+
+def _slack_request(method: str, token: str, params: dict = None) -> dict:
+    url = f"https://slack.com/api/{method}"
+    if params:
+        url += "?" + urllib.parse.urlencode(params)
+    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        data = json_lib.loads(resp.read())
+    if not data.get("ok"):
+        raise ValueError(f"Slack error: {data.get('error', 'unknown')}")
+    return data
+
+
+def _do_slack_reports_sync(conn) -> int:
+    c = conn.cursor()
+    c.execute(
+        "SELECT key, value FROM config WHERE key IN ('slack_bot_token','slack_reports_channel_id')"
+    )
+    cfg = {r["key"]: r["value"] for r in c.fetchall()}
+    token = (cfg.get("slack_bot_token") or "").strip()
+    channel = (cfg.get("slack_reports_channel_id") or "C08NK2SD5CK").strip()
+    if not token:
+        raise ValueError("Slack bot token not configured")
+
+    today = datetime.utcnow().date()
+    oldest = str(int(datetime(today.year, today.month, today.day, 0, 0, 0).timestamp()))
+
+    data = _slack_request("conversations.history", token, {
+        "channel": channel, "oldest": oldest, "limit": 100,
+    })
+    messages = data.get("messages", [])
+
+    c.execute("SELECT id, name FROM team_members")
+    members = {r["name"]: r["id"] for r in c.fetchall()}
+
+    saved = 0
+    for msg in messages:
+        text = msg.get("text", "")
+        if "Daily Report" not in text:
+            continue
+        parsed = parse_daily_report(text)
+        if not parsed.get("name"):
+            continue
+        engineer_id = None
+        for mname, mid in members.items():
+            if parsed["name"].lower() in mname.lower() or mname.lower() in parsed["name"].lower():
+                engineer_id = mid
+                break
+        if not engineer_id:
+            continue
+        report_date = str(today)
+        c.execute(
+            "SELECT id FROM daily_reports WHERE engineer_id=? AND report_date=?",
+            (engineer_id, report_date)
+        )
+        if c.fetchone():
+            c.execute(
+                "UPDATE daily_reports SET raw_text=?, completed=?, invisible_work=?, "
+                "next_tasks=?, delayed_risks=?, source='slack' "
+                "WHERE engineer_id=? AND report_date=?",
+                (
+                    text,
+                    json_lib.dumps(parsed["completed"], ensure_ascii=False),
+                    json_lib.dumps(parsed["invisible_work"], ensure_ascii=False),
+                    json_lib.dumps(parsed["next_tasks"], ensure_ascii=False),
+                    json_lib.dumps(parsed["delayed_risks"], ensure_ascii=False),
+                    engineer_id, report_date,
+                ),
+            )
+        else:
+            c.execute(
+                "INSERT INTO daily_reports (engineer_id, report_date, raw_text, completed, "
+                "invisible_work, next_tasks, delayed_risks, source) VALUES (?,?,?,?,?,?,?,?)",
+                (
+                    engineer_id, report_date, text,
+                    json_lib.dumps(parsed["completed"], ensure_ascii=False),
+                    json_lib.dumps(parsed["invisible_work"], ensure_ascii=False),
+                    json_lib.dumps(parsed["next_tasks"], ensure_ascii=False),
+                    json_lib.dumps(parsed["delayed_risks"], ensure_ascii=False),
+                    "slack",
+                ),
+            )
+        saved += 1
+
+    conn.commit()
+    return saved
+
+
+def _run_slack_reports_sync() -> dict:
+    conn = get_db()
+    try:
+        records = _do_slack_reports_sync(conn)
+        conn.execute(
+            "INSERT INTO sync_log (service, timestamp, status, records_updated) VALUES (?,?,?,?)",
+            ("slack_reports", datetime.utcnow().isoformat(), "success", records),
+        )
+        conn.commit()
+        return {"status": "success", "records_updated": records}
+    except Exception as exc:
+        try:
+            conn.execute(
+                "INSERT INTO sync_log (service, timestamp, status, records_updated, error) VALUES (?,?,?,?,?)",
+                ("slack_reports", datetime.utcnow().isoformat(), "error", 0, str(exc)),
+            )
+            conn.commit()
+        except Exception:
+            pass
+        return {"status": "error", "error": str(exc)}
+    finally:
+        conn.close()
+
+
 # ── Jira sync endpoints ───────────────────────────────────────────────────────
 
 @app.post("/api/sync/jira")
@@ -1114,6 +1289,25 @@ def get_score_rules():
     return rules
 
 
+class ReportCreate(BaseModel):
+    engineer_id: int
+    report_date: str
+    completed: list = []
+    invisible_work: list = []
+    next_tasks: list = []
+    delayed_risks: list = []
+    raw_text: str = ""
+    source: str = "manual"
+
+
+class ReportUpdate(BaseModel):
+    completed: Optional[list] = None
+    invisible_work: Optional[list] = None
+    next_tasks: Optional[list] = None
+    delayed_risks: Optional[list] = None
+    raw_text: Optional[str] = None
+
+
 class ScoreRuleUpdate(BaseModel):
     label: Optional[str] = None
     points: Optional[int] = None
@@ -1418,6 +1612,8 @@ class ConfigUpdate(BaseModel):
     jira_api_token: Optional[str] = None
     jira_project_keys: Optional[str] = None
     jira_username_map: Optional[str] = None
+    slack_bot_token: Optional[str] = None
+    slack_reports_channel_id: Optional[str] = None
     anthropic_admin_key: Optional[str] = None
     ai_auto_sync: Optional[str] = None
     team_name: Optional[str] = None
@@ -1533,6 +1729,198 @@ def sync_ai_usage(password: str = ""):
     finally:
         conn.close()
     return result
+
+
+# ── Daily reports endpoints ───────────────────────────────────────────────────
+
+def _deserialize_report(row: dict) -> dict:
+    for k in ("completed", "invisible_work", "next_tasks", "delayed_risks"):
+        try:
+            row[k] = json_lib.loads(row[k])
+        except Exception:
+            row[k] = []
+    return row
+
+
+@app.get("/api/reports")
+def get_reports(date: str = None):
+    conn = get_db()
+    c = conn.cursor()
+    if not date:
+        date = datetime.utcnow().strftime("%Y-%m-%d")
+    c.execute("SELECT * FROM team_members ORDER BY name")
+    members = [dict(r) for r in c.fetchall()]
+    result = []
+    for m in members:
+        c.execute(
+            "SELECT * FROM daily_reports WHERE engineer_id=? AND report_date=?",
+            (m["id"], date),
+        )
+        row = c.fetchone()
+        report = _deserialize_report(dict(row)) if row else None
+        result.append({
+            "engineer": {
+                "id": m["id"], "name": m["name"],
+                "avatar_color": m["avatar_color"], "stream": m["stream"],
+            },
+            "report": report,
+        })
+    conn.close()
+    return result
+
+
+@app.get("/api/reports/engineer/{engineer_id}")
+def get_engineer_reports(engineer_id: int, from_date: str = None, to_date: str = None):
+    conn = get_db()
+    c = conn.cursor()
+    query = "SELECT * FROM daily_reports WHERE engineer_id=?"
+    params: list = [engineer_id]
+    if from_date:
+        query += " AND report_date >= ?"
+        params.append(from_date)
+    if to_date:
+        query += " AND report_date <= ?"
+        params.append(to_date)
+    query += " ORDER BY report_date DESC"
+    c.execute(query, params)
+    rows = [_deserialize_report(dict(r)) for r in c.fetchall()]
+    conn.close()
+    return rows
+
+
+@app.post("/api/reports/manual")
+def create_report(data: ReportCreate, password: str = ""):
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    conn = get_db()
+    c = conn.cursor()
+    c.execute(
+        "SELECT id FROM daily_reports WHERE engineer_id=? AND report_date=?",
+        (data.engineer_id, data.report_date),
+    )
+    existing = c.fetchone()
+    if existing:
+        c.execute(
+            "UPDATE daily_reports SET raw_text=?, completed=?, invisible_work=?, "
+            "next_tasks=?, delayed_risks=?, source=? WHERE id=?",
+            (
+                data.raw_text,
+                json_lib.dumps(data.completed, ensure_ascii=False),
+                json_lib.dumps(data.invisible_work, ensure_ascii=False),
+                json_lib.dumps(data.next_tasks, ensure_ascii=False),
+                json_lib.dumps(data.delayed_risks, ensure_ascii=False),
+                data.source, existing["id"],
+            ),
+        )
+        report_id = existing["id"]
+    else:
+        c.execute(
+            "INSERT INTO daily_reports (engineer_id, report_date, raw_text, completed, "
+            "invisible_work, next_tasks, delayed_risks, source) VALUES (?,?,?,?,?,?,?,?)",
+            (
+                data.engineer_id, data.report_date, data.raw_text,
+                json_lib.dumps(data.completed, ensure_ascii=False),
+                json_lib.dumps(data.invisible_work, ensure_ascii=False),
+                json_lib.dumps(data.next_tasks, ensure_ascii=False),
+                json_lib.dumps(data.delayed_risks, ensure_ascii=False),
+                data.source,
+            ),
+        )
+        report_id = c.lastrowid
+    conn.commit()
+    conn.close()
+    return {"id": report_id, "ok": True}
+
+
+@app.put("/api/reports/{report_id}")
+def update_report(report_id: int, data: ReportUpdate, password: str = ""):
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT id FROM daily_reports WHERE id=?", (report_id,))
+    if not c.fetchone():
+        conn.close()
+        raise HTTPException(404, "Report not found")
+    sets, params = [], []
+    if data.completed is not None:
+        sets.append("completed=?")
+        params.append(json_lib.dumps(data.completed, ensure_ascii=False))
+    if data.invisible_work is not None:
+        sets.append("invisible_work=?")
+        params.append(json_lib.dumps(data.invisible_work, ensure_ascii=False))
+    if data.next_tasks is not None:
+        sets.append("next_tasks=?")
+        params.append(json_lib.dumps(data.next_tasks, ensure_ascii=False))
+    if data.delayed_risks is not None:
+        sets.append("delayed_risks=?")
+        params.append(json_lib.dumps(data.delayed_risks, ensure_ascii=False))
+    if data.raw_text is not None:
+        sets.append("raw_text=?")
+        params.append(data.raw_text)
+    if sets:
+        params.append(report_id)
+        c.execute(f"UPDATE daily_reports SET {', '.join(sets)} WHERE id=?", params)
+        conn.commit()
+    conn.close()
+    return {"ok": True}
+
+
+@app.delete("/api/reports/{report_id}")
+def delete_report(report_id: int, password: str = ""):
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("DELETE FROM daily_reports WHERE id=?", (report_id,))
+    conn.commit()
+    conn.close()
+    return {"ok": True}
+
+
+@app.post("/api/sync/slack-reports")
+def sync_slack_reports(password: str = ""):
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    result = _run_slack_reports_sync()
+    if result.get("status") == "error":
+        raise HTTPException(500, result.get("error", "Sync failed"))
+    return result
+
+
+@app.get("/api/sync/slack-reports/status")
+def slack_reports_status(password: str = ""):
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    conn = get_db()
+    c = conn.cursor()
+    c.execute(
+        "SELECT * FROM sync_log WHERE service='slack_reports' ORDER BY id DESC LIMIT 1"
+    )
+    row = c.fetchone()
+    conn.close()
+    if not row:
+        return {"status": "never", "timestamp": None, "records_updated": 0, "error": None}
+    return dict(row)
+
+
+@app.post("/api/sync/slack-reports/test")
+def test_slack_connection(password: str = ""):
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT value FROM config WHERE key='slack_bot_token'")
+    row = c.fetchone()
+    conn.close()
+    token = ((row["value"] if row else "") or "").strip()
+    if not token:
+        raise HTTPException(400, "Slack bot token not configured")
+    try:
+        result = _slack_request("auth.test", token)
+        return {"ok": True, "team": result.get("team"), "user": result.get("user")}
+    except Exception as e:
+        raise HTTPException(400, str(e))
 
 
 @app.post("/api/admin/verify")

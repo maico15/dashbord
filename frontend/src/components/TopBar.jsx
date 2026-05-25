@@ -76,6 +76,9 @@ export default function TopBar({ teamName, week, year, totalScore }) {
         >
           {theme === 'dark' ? <SunIcon /> : <MoonIcon />}
         </button>
+        <Link to="/reports" className="topbar-admin-link">
+          Reports
+        </Link>
         <Link to="/admin" className="topbar-admin-link">
           Admin ↗
         </Link>
