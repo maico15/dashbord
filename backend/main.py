@@ -3,7 +3,6 @@ from fastapi import FastAPI, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional, Dict, Any
-import sqlite3
 import random
 import json as json_lib
 import time as time_lib
@@ -13,8 +12,8 @@ import urllib.error
 import urllib.parse
 from datetime import datetime, timedelta
 from apscheduler.schedulers.background import BackgroundScheduler
+from database import get_db, IS_POSTGRES
 
-DB_PATH = "dashboard.db"
 ADMIN_PASSWORD = "admin123"
 
 
@@ -64,12 +63,6 @@ app.add_middleware(
 )
 
 
-def get_db():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
-
-
 def init_db():
     conn = get_db()
     conn.executescript("""
@@ -92,6 +85,7 @@ def init_db():
             cycle_time_days REAL DEFAULT 0.0,
             features_completed INTEGER DEFAULT 0,
             deploys INTEGER DEFAULT 0,
+            blocked_count INTEGER DEFAULT 0,
             UNIQUE(member_id, week, year)
         );
 
@@ -176,11 +170,14 @@ def init_db():
         );
     """)
     conn.commit()
-    try:
-        conn.execute("ALTER TABLE dev_metrics ADD COLUMN blocked_count INTEGER DEFAULT 0")
-        conn.commit()
-    except Exception:
-        pass
+    # Add blocked_count for existing SQLite databases that pre-date this column
+    if not IS_POSTGRES:
+        c = conn.cursor()
+        c.execute("PRAGMA table_info(dev_metrics)")
+        cols = [row["name"] for row in c.fetchall()]
+        if "blocked_count" not in cols:
+            conn.execute("ALTER TABLE dev_metrics ADD COLUMN blocked_count INTEGER DEFAULT 0")
+            conn.commit()
     conn.close()
 
 
