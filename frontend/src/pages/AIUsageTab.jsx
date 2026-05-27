@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { Line } from 'react-chartjs-2'
 import {
   Chart as ChartJS,
@@ -11,16 +11,11 @@ import {
 } from 'chart.js'
 import BottleneckBars from '../components/BottleneckBars'
 import { useTheme } from '../hooks/useTheme'
+import { api } from '../api/client'
 
 ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, Filler, Tooltip)
 
 const AI_COLOR = '#a855f7'
-
-const ENGINEERS = [
-  { name: 'Andrey Brunetkin',   initials: 'AB', color: '#00cfff' },
-  { name: 'Andrey Pogrebnyak',  initials: 'AP', color: '#7b61ff' },
-  { name: 'Evgeniy Vinogradov', initials: 'EV', color: '#00c87a' },
-]
 
 function fmt(n) {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
@@ -38,7 +33,7 @@ function AICard({ label, value, sub, color = AI_COLOR }) {
   )
 }
 
-function TokensConsumptionChart({ tokensPerWeek, tokensPerUser }) {
+function TokensConsumptionChart({ tokensPerWeek, tokensPerUser, engineers }) {
   const [active, setActive] = useState(new Set(['team']))
   const theme = useTheme()
   const isDark = theme === 'dark'
@@ -242,6 +237,18 @@ function TokensConsumptionChart({ tokensPerWeek, tokensPerUser }) {
 }
 
 export default function AIUsageTab({ data }) {
+  const [engineers, setEngineers] = useState([])
+
+  useEffect(() => {
+    api.get('/team')
+      .then(members => setEngineers(members.map(m => ({
+        name: m.name,
+        initials: m.name.split(' ').map(w => w[0]).join('').toUpperCase(),
+        color: m.avatar_color,
+      }))))
+      .catch(() => {})
+  }, [])
+
   if (!data) {
     return (
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 60 }}>
@@ -260,7 +267,7 @@ export default function AIUsageTab({ data }) {
   const latestWeek = tokens_per_week?.[tokens_per_week.length - 1]
   let topThisWeek = { name: '—', tokens: 0, pct: 0 }
   if (latestWeek) {
-    for (const e of ENGINEERS) {
+    for (const e of engineers) {
       const tok = latestWeek[e.name] || 0
       if (tok > topThisWeek.tokens) topThisWeek = { name: e.name, tokens: tok, pct: 0 }
     }
@@ -302,7 +309,7 @@ export default function AIUsageTab({ data }) {
         </div>
       )}
 
-      <TokensConsumptionChart tokensPerWeek={tokens_per_week} tokensPerUser={tokens_per_user} />
+      <TokensConsumptionChart tokensPerWeek={tokens_per_week} tokensPerUser={tokens_per_user} engineers={engineers} />
 
       <div className="metric-grid" style={{ marginTop: 20 }}>
         <AICard

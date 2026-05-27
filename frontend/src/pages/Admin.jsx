@@ -606,17 +606,13 @@ function TeamSection({ pw }) {
 
 function MetricsSection({ pw }) {
   const [stream, setStream] = useState('dev')
-  const [week, setWeek] = useState(new Date().getDay() > 0 ? Math.ceil(new Date() / 604800000 - 1970 * 52.18) % 53 || 1 : 1)
+  const [week, setWeek] = useState(1)
   const [rows, setRows] = useState([])
   const [edits, setEdits] = useState({})
   const [saving, setSaving] = useState({})
 
-  // Simpler week calc
   useEffect(() => {
-    const d = new Date()
-    const startOfYear = new Date(d.getFullYear(), 0, 1)
-    const w = Math.ceil(((d - startOfYear) / 86400000 + startOfYear.getDay() + 1) / 7)
-    setWeek(w || 1)
+    api.get('/overview').then(d => setWeek(d.week || 1)).catch(() => {})
   }, [])
 
   const loadMetrics = () => {
