@@ -1278,17 +1278,26 @@ def _do_github_sync(conn) -> tuple:
     for repo in repos:
         # Support "owner/repo" for personal/cross-org repos; bare name uses org
         owner_repo = repo if "/" in repo else f"{org}/{repo}"
-        url = f"https://api.github.com/repos/{owner_repo}/pulls?state=closed&per_page=100"
-        try:
-            pulls = gh_get(url)
-        except ValueError as e:
-            if "404" in str(e):
-                raise ValueError(f"404 Not Found — repository {owner_repo} not found")
-            raise
-        if not isinstance(pulls, list):
+        pulls = []
+        page = 1
+        while True:
+            url = f"https://api.github.com/repos/{owner_repo}/pulls?state=closed&per_page=100&page={page}"
+            try:
+                page_data = gh_get(url)
+            except ValueError as e:
+                if "404" in str(e):
+                    raise ValueError(f"404 Not Found — repository {owner_repo} not found")
+                raise
+            if not isinstance(page_data, list):
+                break
+            pulls.extend(page_data)
+            if len(page_data) < 100:
+                break
+            page += 1
+        if not pulls:
             continue
 
-        print(f"[GitHub sync] {owner_repo}: fetched {len(pulls)} closed PR(s)")
+        print(f"[GitHub sync] {owner_repo}: fetched {len(pulls)} closed PR(s) ({page} page(s))")
         for pr in pulls:
             merged_at = pr.get("merged_at")
             if not merged_at:
