@@ -2481,6 +2481,40 @@ def create_report(data: ReportCreate, password: str = ""):
     return {"id": report_id, "ok": True}
 
 
+@app.post("/api/reports/bulk")
+def create_reports_bulk(data: List[ReportCreate], password: str = ""):
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    conn = get_db()
+    c = conn.cursor()
+    inserted = 0
+    skipped = 0
+    for report in data:
+        c.execute(
+            "SELECT id FROM daily_reports WHERE engineer_id=? AND report_date=?",
+            (report.engineer_id, report.report_date),
+        )
+        if c.fetchone():
+            skipped += 1
+            continue
+        c.execute(
+            "INSERT INTO daily_reports (engineer_id, report_date, raw_text, completed, "
+            "invisible_work, next_tasks, delayed_risks, source) VALUES (?,?,?,?,?,?,?,?)",
+            (
+                report.engineer_id, report.report_date, report.raw_text,
+                json_lib.dumps(report.completed, ensure_ascii=False),
+                json_lib.dumps(report.invisible_work, ensure_ascii=False),
+                json_lib.dumps(report.next_tasks, ensure_ascii=False),
+                json_lib.dumps(report.delayed_risks, ensure_ascii=False),
+                report.source,
+            ),
+        )
+        inserted += 1
+    conn.commit()
+    conn.close()
+    return {"ok": True, "inserted": inserted, "skipped": skipped}
+
+
 @app.put("/api/reports/{report_id}")
 def update_report(report_id: int, data: ReportUpdate, password: str = ""):
     if password != ADMIN_PASSWORD:
