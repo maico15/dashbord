@@ -2,7 +2,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 import random
 import json as json_lib
 import time as time_lib
@@ -46,8 +46,9 @@ async def lifespan(app):
     if count == 0:
         seed_data()
     _load_password()
-    scheduler.add_job(_run_jira_sync, 'cron', hour=2, minute=0, id='jira_daily_sync', replace_existing=True)
-    scheduler.add_job(_run_slack_reports_sync, 'cron', hour=20, minute=0, id='slack_reports_sync', replace_existing=True)
+    scheduler.add_job(_run_jira_sync,        'cron', hour=2,  minute=0,  id='jira_daily_sync',    replace_existing=True)
+    scheduler.add_job(_run_slack_reports_sync,'cron', hour=20, minute=0,  id='slack_reports_sync', replace_existing=True)
+    scheduler.add_job(_run_ai_usage_sync,    'cron', hour=2,  minute=30, id='ai_usage_daily_sync', replace_existing=True)
     scheduler.start()
     yield
     scheduler.shutdown(wait=False)
@@ -154,6 +155,28 @@ def init_db():
             records_updated INTEGER DEFAULT 0,
             error TEXT DEFAULT NULL,
             message TEXT DEFAULT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS api_key_mapping (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            engineer_id INTEGER REFERENCES team_members(id) ON DELETE CASCADE,
+            anthropic_key_id TEXT NOT NULL UNIQUE,
+            key_name TEXT DEFAULT '',
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+
+        CREATE TABLE IF NOT EXISTS ai_usage (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            engineer_id INTEGER REFERENCES team_members(id) ON DELETE CASCADE,
+            date TEXT NOT NULL,
+            week_number INTEGER NOT NULL,
+            year INTEGER NOT NULL,
+            input_tokens INTEGER DEFAULT 0,
+            output_tokens INTEGER DEFAULT 0,
+            total_tokens INTEGER DEFAULT 0,
+            cost_usd REAL DEFAULT 0,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            UNIQUE(engineer_id, date)
         );
 
         CREATE TABLE IF NOT EXISTS daily_reports (
@@ -267,7 +290,7 @@ def seed_data():
         ("github_token", ""),
         ("github_org", "homealliance"),
         ("github_repos", "apollo,callcenter-admin,crm-apollo,techapp,callcenter-server,callcenter-flex"),
-        ("github_username_map", "{}"),
+        ("github_username_map", '{"DroonPog":"Andrey Pogrebnyak","KlimMalgin":"Andrey Brunetkin"}'),
         ("jira_token", ""),
         ("jira_domain", ""),
         ("jira_email", ""),
@@ -567,19 +590,37 @@ def _get_or_fetch_ai_usage(conn, force: bool = False) -> dict:
         c.execute("SELECT data, cached_at FROM ai_usage_cache WHERE key='main'")
         row = c.fetchone()
         if row and (time_lib.time() - row["cached_at"]) < AI_CACHE_TTL:
-            return json_lib.loads(row["data"])
+            cached = json_lib.loads(row["data"])
+            # Always refresh last_synced from live table
+            c.execute("SELECT timestamp FROM sync_log WHERE service='ai_usage' ORDER BY id DESC LIMIT 1")
+            sr = c.fetchone()
+            cached["last_synced"] = sr["timestamp"] if sr else None
+            return cached
 
     c.execute("SELECT value FROM config WHERE key='anthropic_admin_key'")
     row = c.fetchone()
     admin_key = (row["value"] if row else "") or ""
 
+    # Check if we have DB-synced data and prefer it when available
+    c.execute("SELECT COUNT(*) as n FROM ai_usage")
+    has_db_data = c.fetchone()["n"] > 0
+
     try:
-        result = _live_ai_usage(admin_key, conn) if admin_key else _mock_ai_usage(conn)
+        if has_db_data:
+            result = _db_ai_usage(conn)
+        elif admin_key:
+            result = _live_ai_usage(admin_key, conn)
+        else:
+            result = _mock_ai_usage(conn)
     except Exception as exc:
         result = _mock_ai_usage(conn)
         result["api_error"] = str(exc)
 
     result["leverage_scores"] = _compute_leverage(conn, result["tokens_per_user"])
+
+    c.execute("SELECT timestamp FROM sync_log WHERE service='ai_usage' ORDER BY id DESC LIMIT 1")
+    sr = c.fetchone()
+    result["last_synced"] = sr["timestamp"] if sr else None
 
     c.execute(
         "INSERT OR REPLACE INTO ai_usage_cache (key, data, cached_at) VALUES (?,?,?)",
@@ -587,6 +628,195 @@ def _get_or_fetch_ai_usage(conn, force: bool = False) -> dict:
     )
     conn.commit()
     return result
+
+
+def _db_ai_usage(conn) -> dict:
+    """Build AI usage response from the ai_usage table (after a real sync)."""
+    c = conn.cursor()
+    end = datetime.utcnow()
+    start = end - timedelta(days=30)
+    start_str = start.strftime("%Y-%m-%d")
+
+    c.execute("""
+        SELECT m.id, m.name, m.stream,
+               SUM(u.input_tokens)  AS input_tokens,
+               SUM(u.output_tokens) AS output_tokens,
+               SUM(u.total_tokens)  AS total_tokens
+        FROM team_members m
+        LEFT JOIN ai_usage u ON u.engineer_id = m.id AND u.date >= ?
+        GROUP BY m.id
+        ORDER BY total_tokens DESC
+    """, (start_str,))
+    rows = [dict(r) for r in c.fetchall()]
+
+    tokens_per_user = [{
+        "name": r["name"], "full_name": r["name"],
+        "member_id": r["id"], "stream": r["stream"],
+        "tokens": r["total_tokens"] or 0,
+        "input_tokens": r["input_tokens"] or 0,
+        "output_tokens": r["output_tokens"] or 0,
+    } for r in rows]
+
+    # Daily totals for the period
+    c.execute("""
+        SELECT date, SUM(total_tokens) AS tokens
+        FROM ai_usage WHERE date >= ?
+        GROUP BY date ORDER BY date
+    """, (start_str,))
+    tokens_per_day = [{"date": r["date"], "tokens": r["tokens"]} for r in c.fetchall()]
+
+    # Weekly totals per engineer (last 8 weeks)
+    week_map: dict = {}
+    for d in tokens_per_day:
+        try:
+            dt_obj = datetime.strptime(d["date"], "%Y-%m-%d")
+            wk = f"W{dt_obj.isocalendar()[1]}"
+            week_map[wk] = week_map.get(wk, 0) + d["tokens"]
+        except Exception:
+            pass
+
+    week, year = current_week_year(conn)
+    tokens_per_week = []
+    for i in range(7, -1, -1):
+        w = week - i
+        y = year
+        if w <= 0:
+            y -= 1
+            w += 52
+        label = f"W{w}"
+        row: dict = {"week": label, "team": 0}
+        c.execute("""
+            SELECT m.name, SUM(u.total_tokens) AS tokens
+            FROM ai_usage u JOIN team_members m ON m.id = u.engineer_id
+            WHERE u.week_number=? AND u.year=?
+            GROUP BY m.id
+        """, (w, y))
+        for r in c.fetchall():
+            row[r["name"]] = r["tokens"]
+            row["team"] += r["tokens"]
+        tokens_per_week.append(row)
+
+    total = sum(u["tokens"] for u in tokens_per_user)
+    return {
+        "total_tokens": total,
+        "total_cost_usd": round(total / 1000 * 0.003, 2),
+        "tokens_per_day": tokens_per_day,
+        "tokens_per_user": tokens_per_user,
+        "tokens_per_week": tokens_per_week,
+        "source": "db",
+    }
+
+
+def _do_ai_usage_sync(conn) -> tuple:
+    c = conn.cursor()
+    c.execute("SELECT value FROM config WHERE key='anthropic_admin_key'")
+    row = c.fetchone()
+    admin_key = (row["value"] if row else "").strip()
+    if not admin_key:
+        raise ValueError("Anthropic Admin API key not configured")
+
+    c.execute("SELECT anthropic_key_id, engineer_id FROM api_key_mapping")
+    key_map = {r["anthropic_key_id"]: r["engineer_id"] for r in c.fetchall()}
+
+    end_dt = datetime.utcnow()
+    start_dt = end_dt - timedelta(days=30)
+    qs = f"?start_date={start_dt.strftime('%Y-%m-%d')}&end_date={end_dt.strftime('%Y-%m-%d')}"
+
+    # Fetch all pages
+    all_items: list = []
+    last_id = None
+    while True:
+        url = f"/v1/usage{qs}"
+        if last_id:
+            url += f"&starting_after={last_id}"
+        data = _anthropic_get(url, admin_key)
+        items = data.get("data", [])
+        all_items.extend(items)
+        if not data.get("has_more") or not items:
+            break
+        last_id = items[-1].get("id") or items[-1].get("api_key_id")
+        if not last_id:
+            break
+
+    # Aggregate by (api_key_id, date)
+    agg: dict = {}
+    for item in all_items:
+        key_id = item.get("api_key_id", "")
+        date_str = (
+            item.get("date") or item.get("timestamp") or item.get("created_at") or ""
+        )[:10]
+        if not key_id or not date_str:
+            continue
+        k = (key_id, date_str)
+        if k not in agg:
+            agg[k] = {"input_tokens": 0, "output_tokens": 0}
+        agg[k]["input_tokens"]  += item.get("input_tokens", 0)
+        agg[k]["output_tokens"] += item.get("output_tokens", 0)
+
+    records = 0
+    for (key_id, date_str), tok in agg.items():
+        engineer_id = key_map.get(key_id)
+        if not engineer_id:
+            continue
+        try:
+            dt = datetime.strptime(date_str, "%Y-%m-%d")
+            iso = dt.isocalendar()
+            week_num, yr = iso[1], iso[0]
+        except Exception:
+            continue
+        input_tok  = tok["input_tokens"]
+        output_tok = tok["output_tokens"]
+        total_tok  = input_tok + output_tok
+        cost       = round(total_tok / 1000 * 0.003, 6)
+
+        c.execute(
+            "SELECT id FROM ai_usage WHERE engineer_id=? AND date=?",
+            (engineer_id, date_str),
+        )
+        if c.fetchone():
+            c.execute(
+                "UPDATE ai_usage SET input_tokens=?, output_tokens=?, total_tokens=?, "
+                "cost_usd=?, week_number=?, year=? WHERE engineer_id=? AND date=?",
+                (input_tok, output_tok, total_tok, cost, week_num, yr, engineer_id, date_str),
+            )
+        else:
+            c.execute(
+                "INSERT INTO ai_usage (engineer_id, date, week_number, year, "
+                "input_tokens, output_tokens, total_tokens, cost_usd) VALUES (?,?,?,?,?,?,?,?)",
+                (engineer_id, date_str, week_num, yr, input_tok, output_tok, total_tok, cost),
+            )
+        records += 1
+
+    conn.commit()
+    return records, f"Synced {records} usage record(s) from Anthropic Admin API"
+
+
+def _run_ai_usage_sync() -> dict:
+    conn = get_db()
+    try:
+        records, msg = _do_ai_usage_sync(conn)
+        conn.execute(
+            "INSERT INTO sync_log (service, timestamp, status, records_updated, message) VALUES (?,?,?,?,?)",
+            ("ai_usage", datetime.utcnow().isoformat(), "success", records, msg),
+        )
+        conn.commit()
+        # Invalidate cache so next GET rebuilds from DB
+        conn.execute("DELETE FROM ai_usage_cache WHERE key='main'")
+        conn.commit()
+        return {"status": "success", "records_updated": records, "message": msg}
+    except Exception as exc:
+        err = str(exc)
+        try:
+            conn.execute(
+                "INSERT INTO sync_log (service, timestamp, status, records_updated, error, message) VALUES (?,?,?,?,?,?)",
+                ("ai_usage", datetime.utcnow().isoformat(), "error", 0, err, err),
+            )
+            conn.commit()
+        except Exception:
+            pass
+        return {"status": "error", "error": err, "message": err}
+    finally:
+        conn.close()
 
 
 # ── Jira integration ─────────────────────────────────────────────────────────
@@ -1888,8 +2118,48 @@ def admin_update_metrics(stream: str, week: int, member_id: int, data: MetricUpd
 # ── AI Usage routes ────────────────────────────────────────────────────────────
 
 @app.get("/api/ai-usage")
-def get_ai_usage():
+def get_ai_usage(week: int = None, year: int = None):
     conn = get_db()
+    c = conn.cursor()
+
+    if week and year:
+        c.execute("""
+            SELECT m.id, m.name, m.stream, m.avatar_color,
+                   COALESCE(SUM(u.input_tokens),  0) AS input_tokens,
+                   COALESCE(SUM(u.output_tokens), 0) AS output_tokens,
+                   COALESCE(SUM(u.total_tokens),  0) AS total_tokens,
+                   COALESCE(SUM(u.cost_usd),      0) AS cost_usd
+            FROM team_members m
+            LEFT JOIN ai_usage u ON u.engineer_id = m.id
+                                 AND u.week_number=? AND u.year=?
+            GROUP BY m.id ORDER BY total_tokens DESC
+        """, (week, year))
+        rows = [dict(r) for r in c.fetchall()]
+        has_data = any(r["total_tokens"] > 0 for r in rows)
+
+        if has_data:
+            tokens_per_user = [{
+                "name": r["name"], "full_name": r["name"],
+                "member_id": r["id"], "stream": r["stream"],
+                "tokens": r["total_tokens"],
+                "input_tokens": r["input_tokens"],
+                "output_tokens": r["output_tokens"],
+            } for r in rows]
+            total = sum(r["total_tokens"] for r in rows)
+            c.execute("SELECT timestamp FROM sync_log WHERE service='ai_usage' ORDER BY id DESC LIMIT 1")
+            sr = c.fetchone()
+            result = {
+                "total_tokens": total,
+                "total_cost_usd": round(total / 1000 * 0.003, 2),
+                "tokens_per_user": tokens_per_user,
+                "source": "db",
+                "week": week, "year": year,
+                "last_synced": sr["timestamp"] if sr else None,
+            }
+            result["leverage_scores"] = _compute_leverage(conn, tokens_per_user)
+            conn.close()
+            return result
+
     try:
         result = _get_or_fetch_ai_usage(conn)
     finally:
@@ -1897,16 +2167,121 @@ def get_ai_usage():
     return result
 
 
+@app.get("/api/ai-usage/history")
+def get_ai_usage_history(weeks: int = 8):
+    conn = get_db()
+    c = conn.cursor()
+    week, year = current_week_year(conn)
+
+    result = []
+    for i in range(weeks - 1, -1, -1):
+        w, y = week - i, year
+        if w <= 0:
+            y -= 1
+            w += 52
+        row: dict = {"week": f"W{w}", "team": 0}
+        c.execute("""
+            SELECT m.name, SUM(u.total_tokens) AS tokens
+            FROM ai_usage u JOIN team_members m ON m.id = u.engineer_id
+            WHERE u.week_number=? AND u.year=?
+            GROUP BY m.id
+        """, (w, y))
+        for r in c.fetchall():
+            row[r["name"]] = r["tokens"]
+            row["team"] += r["tokens"]
+        result.append(row)
+
+    conn.close()
+    return result
+
+
 @app.post("/api/ai-usage/sync")
 def sync_ai_usage(password: str = ""):
     if password != ADMIN_PASSWORD:
         raise HTTPException(403, "Unauthorized")
-    conn = get_db()
-    try:
-        result = _get_or_fetch_ai_usage(conn, force=True)
-    finally:
-        conn.close()
+    result = _run_ai_usage_sync()
+    if result.get("status") == "error":
+        raise HTTPException(500, result.get("error", "Sync failed"))
     return result
+
+
+@app.get("/api/ai-usage/test")
+def test_ai_connection(password: str = ""):
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT value FROM config WHERE key='anthropic_admin_key'")
+    row = c.fetchone()
+    conn.close()
+    admin_key = (row["value"] if row else "").strip()
+    if not admin_key:
+        raise HTTPException(400, "Anthropic Admin API key not configured")
+    try:
+        today = datetime.utcnow().strftime("%Y-%m-%d")
+        _anthropic_get(f"/v1/usage?start_date={today}&end_date={today}", admin_key)
+        return {"ok": True, "message": "Connection successful"}
+    except urllib.error.HTTPError as e:
+        raise HTTPException(e.code, f"Anthropic API error {e.code}")
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
+@app.get("/api/sync/ai-usage/status")
+def ai_usage_sync_status(password: str = ""):
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT * FROM sync_log WHERE service='ai_usage' ORDER BY id DESC LIMIT 1")
+    row = c.fetchone()
+    conn.close()
+    if not row:
+        return {"status": "never", "timestamp": None, "records_updated": 0, "error": None}
+    return dict(row)
+
+
+class KeyMappingIn(BaseModel):
+    engineer_id: int
+    anthropic_key_id: str
+    key_name: Optional[str] = ""
+
+
+@app.get("/api/ai-key-mappings")
+def get_key_mappings(password: str = ""):
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("""
+        SELECT m.id, m.anthropic_key_id, m.key_name, m.engineer_id,
+               t.name AS engineer_name
+        FROM api_key_mapping m
+        LEFT JOIN team_members t ON t.id = m.engineer_id
+        ORDER BY m.engineer_id, m.id
+    """)
+    rows = [dict(r) for r in c.fetchall()]
+    conn.close()
+    return rows
+
+
+@app.put("/api/ai-key-mappings")
+def save_key_mappings(data: List[KeyMappingIn], password: str = ""):
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("DELETE FROM api_key_mapping")
+    for item in data:
+        if not (item.anthropic_key_id or "").strip():
+            continue
+        c.execute(
+            "INSERT OR IGNORE INTO api_key_mapping (engineer_id, anthropic_key_id, key_name) VALUES (?,?,?)",
+            (item.engineer_id, item.anthropic_key_id.strip(), item.key_name or ""),
+        )
+    conn.commit()
+    conn.close()
+    return {"ok": True}
 
 
 # ── Daily reports endpoints ───────────────────────────────────────────────────

@@ -202,10 +202,14 @@ function ConfigSection({ pw }) {
 
   useEffect(() => {
     api.get('/config').then(setCfg)
+    api.get(`/sync/ai-usage/status?password=${encodeURIComponent(pw)}`).then(setAiLastSync).catch(() => {})
   }, [])
 
   const [syncing, setSyncing] = useState(false)
   const [syncMsg, setSyncMsg] = useState('')
+  const [aiTesting, setAiTesting] = useState(false)
+  const [aiTestResult, setAiTestResult] = useState(null)
+  const [aiLastSync, setAiLastSync] = useState(null)
 
   const handleSave = async () => {
     await api.put(`/config`, {
@@ -231,6 +235,20 @@ function ConfigSection({ pw }) {
       setSyncMsg(`Error: ${e.message}`)
     } finally {
       setSyncing(false)
+    }
+  }
+
+  const handleTestConnection = async () => {
+    setAiTesting(true)
+    setAiTestResult(null)
+    try {
+      const res = await api.get(`/ai-usage/test?password=${encodeURIComponent(pw)}`)
+      setAiTestResult({ ok: true, msg: res.message || 'Connected successfully' })
+    } catch (e) {
+      let msg = e.message; try { msg = JSON.parse(msg).detail || msg } catch {}
+      setAiTestResult({ ok: false, msg })
+    } finally {
+      setAiTesting(false)
     }
   }
 
@@ -290,7 +308,15 @@ function ConfigSection({ pw }) {
               </select>
             </div>
           </div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginTop: 4 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginTop: 4, flexWrap: 'wrap' }}>
+            <button
+              className="btn"
+              style={{ background: 'rgba(168,85,247,0.15)', color: 'var(--ai)', border: '1px solid rgba(168,85,247,0.3)', padding: '6px 14px' }}
+              onClick={handleTestConnection}
+              disabled={aiTesting}
+            >
+              {aiTesting ? <span className="spinner" /> : '✓ Test Connection'}
+            </button>
             <button
               className="btn"
               style={{ background: 'rgba(168,85,247,0.15)', color: 'var(--ai)', border: '1px solid rgba(168,85,247,0.3)', padding: '6px 14px' }}
@@ -299,12 +325,25 @@ function ConfigSection({ pw }) {
             >
               {syncing ? <span className="spinner" /> : '⟳ Sync now'}
             </button>
+            {aiTestResult && (
+              <span style={{ fontSize: 12, color: aiTestResult.ok ? 'var(--success)' : 'var(--danger)' }}>
+                {aiTestResult.ok ? '✓ ' : '✕ '}{aiTestResult.msg}
+              </span>
+            )}
             {syncMsg && (
               <span style={{ fontSize: 12, color: syncMsg.startsWith('Error') ? 'var(--danger)' : 'var(--success)' }}>
                 {syncMsg}
               </span>
             )}
           </div>
+          {aiLastSync && aiLastSync.status !== 'never' && (
+            <div style={{ marginTop: 6, fontSize: 12, color: 'var(--muted)' }}>
+              Last synced: {new Date(aiLastSync.timestamp).toLocaleString()}
+              {aiLastSync.status === 'error' && (
+                <span style={{ color: 'var(--danger)', marginLeft: 6 }}>— {aiLastSync.error}</span>
+              )}
+            </div>
+          )}
         </div>
 
         <div className="flex-end mt-8">
@@ -1078,9 +1117,9 @@ function IntegrationsSection({ pw }) {
   const [githubOrg,         setGithubOrg]         = useState('homealliance')
   const [githubRepos,       setGithubRepos]        = useState('apollo,callcenter-admin,crm-apollo,techapp,callcenter-server,callcenter-flex')
   const [githubUsernameMap, setGithubUsernameMap]  = useState([
-    { github_username: '', engineer_name: '' },
-    { github_username: '', engineer_name: '' },
-    { github_username: '', engineer_name: '' },
+    { github_username: 'DroonPog',   engineer_name: 'Andrey Pogrebnyak' },
+    { github_username: 'KlimMalgin', engineer_name: 'Andrey Brunetkin' },
+    { github_username: '',           engineer_name: 'Evgeniy Vinogradov' },
   ])
   const [githubNewRow,     setGithubNewRow]      = useState({ github_username: '', engineer_name: '' })
   const [githubSyncing,    setGithubSyncing]     = useState(false)
@@ -1538,6 +1577,143 @@ function IntegrationsSection({ pw }) {
   )
 }
 
+// ── AI Keys section ───────────────────────────────────────────────────────────
+
+function AIKeysSection({ pw }) {
+  const [engineers, setEngineers] = useState([])
+  const [mappings, setMappings] = useState([])
+  const [saving, setSaving] = useState(false)
+  const [saved, setSaved] = useState(false)
+
+  const load = () => {
+    Promise.all([
+      api.get('/team'),
+      api.get(`/ai-key-mappings?password=${encodeURIComponent(pw)}`),
+    ]).then(([team, maps]) => {
+      setEngineers(team)
+      const rows = team.map(m => {
+        const existing = maps.find(x => x.engineer_id === m.id)
+        return {
+          engineer_id: m.id,
+          engineer_name: m.name,
+          anthropic_key_id: existing?.anthropic_key_id || '',
+          key_name: existing?.key_name || '',
+        }
+      })
+      maps.forEach(x => {
+        if (!rows.find(r => r.engineer_id === x.engineer_id)) {
+          rows.push({
+            engineer_id: x.engineer_id,
+            engineer_name: team.find(m => m.id === x.engineer_id)?.name || `Engineer ${x.engineer_id}`,
+            anthropic_key_id: x.anthropic_key_id,
+            key_name: x.key_name || '',
+          })
+        }
+      })
+      setMappings(rows)
+    }).catch(() => {
+      api.get('/team').then(team => {
+        setEngineers(team)
+        setMappings(team.map(m => ({ engineer_id: m.id, engineer_name: m.name, anthropic_key_id: '', key_name: '' })))
+      })
+    })
+  }
+
+  useEffect(() => { load() }, [])
+
+  const updateRow = (idx, updates) =>
+    setMappings(prev => prev.map((r, i) => i === idx ? { ...r, ...updates } : r))
+
+  const removeRow = (idx) => setMappings(prev => prev.filter((_, i) => i !== idx))
+
+  const addRow = () => {
+    const first = engineers[0]
+    if (first) setMappings(prev => [...prev, { engineer_id: first.id, engineer_name: first.name, anthropic_key_id: '', key_name: '' }])
+  }
+
+  const handleSave = async () => {
+    setSaving(true)
+    try {
+      const payload = mappings
+        .filter(r => r.anthropic_key_id.trim())
+        .map(r => ({ engineer_id: r.engineer_id, anthropic_key_id: r.anthropic_key_id.trim(), key_name: r.key_name || '' }))
+      await api.put(`/ai-key-mappings`, payload, pw)
+      setSaved(true)
+      setTimeout(() => setSaved(false), 2000)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const inputSt = {
+    background: 'var(--card2)', border: '1px solid var(--border)',
+    borderRadius: 5, color: 'var(--text)', padding: '5px 8px', fontSize: 13, width: '100%',
+  }
+
+  return (
+    <div className="admin-section">
+      <h2>AI Key Mapping</h2>
+      <div className="card">
+        <div style={{ fontSize: 12, color: 'var(--muted)', marginBottom: 14 }}>
+          Map each engineer's Anthropic API Key ID for per-engineer usage attribution.
+          Engineers can find their Key ID at{' '}
+          <code style={{ color: 'var(--ai)', fontSize: 11 }}>console.anthropic.com/settings/keys</code>.
+        </div>
+
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 10 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1.5fr 1fr 32px', gap: 8, paddingBottom: 6, borderBottom: '1px solid var(--border)' }}>
+            <span style={{ fontSize: 11, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>Engineer</span>
+            <span style={{ fontSize: 11, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>Key ID</span>
+            <span style={{ fontSize: 11, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>Key Name</span>
+            <span />
+          </div>
+
+          {mappings.map((row, idx) => (
+            <div key={idx} style={{ display: 'grid', gridTemplateColumns: '1fr 1.5fr 1fr 32px', gap: 8, alignItems: 'center' }}>
+              <select
+                value={row.engineer_id}
+                onChange={e => {
+                  const id = parseInt(e.target.value)
+                  const eng = engineers.find(m => m.id === id)
+                  updateRow(idx, { engineer_id: id, engineer_name: eng?.name || '' })
+                }}
+                style={inputSt}
+              >
+                {engineers.map(m => <option key={m.id} value={m.id}>{m.name}</option>)}
+              </select>
+              <input
+                value={row.anthropic_key_id}
+                onChange={e => updateRow(idx, { anthropic_key_id: e.target.value })}
+                placeholder="apikey_01..."
+                style={{ ...inputSt, fontFamily: 'monospace', fontSize: 12 }}
+              />
+              <input
+                value={row.key_name}
+                onChange={e => updateRow(idx, { key_name: e.target.value })}
+                placeholder="e.g. Andrey's key"
+                style={inputSt}
+              />
+              <button className="btn btn-danger" style={{ padding: '3px 8px', fontSize: 12 }} onClick={() => removeRow(idx)}>✕</button>
+            </div>
+          ))}
+        </div>
+
+        <button
+          className="btn btn-ghost"
+          style={{ fontSize: 12, padding: '4px 12px', marginBottom: 14 }}
+          onClick={addRow}
+        >+ Add mapping</button>
+
+        <div className="flex-end">
+          <button className="btn btn-primary" onClick={handleSave} disabled={saving}>
+            {saving ? <span className="spinner" /> : saved ? '✓ Saved' : 'Save'}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 // ── Main admin page ───────────────────────────────────────────────────────────
 
 export default function Admin() {
@@ -1572,6 +1748,7 @@ export default function Admin() {
     { key: 'metrics',       label: 'Metrics' },
     { key: 'rules',         label: 'Rules' },
     { key: 'integrations',  label: 'Integrations' },
+    { key: 'aikeys',        label: '⬡ AI Keys' },
     { key: 'reports',       label: 'Reports' },
     { key: 'security',      label: 'Security' },
   ]
@@ -1610,6 +1787,7 @@ export default function Admin() {
           {section === 'rules'        && <RulesSection pw={pw} />}
           {section === 'integrations' && <IntegrationsSection pw={pw} />}
           {section === 'reports'      && <ReportsAdminSection pw={pw} />}
+          {section === 'aikeys'       && <AIKeysSection pw={pw} />}
           {section === 'security'     && <SecuritySection pw={pw} onPasswordChange={setPw} />}
         </div>
       </div>
