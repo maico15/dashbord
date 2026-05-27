@@ -291,7 +291,7 @@ def seed_data():
     cfg = [
         ("github_token",        os.environ.get("GITHUB_TOKEN", "")),
         ("github_org",          "homealliance"),
-        ("github_repos",        "apollo,callcenter-admin,crm-apollo,techapp,callcenter-server,callcenter-flex"),
+        ("github_repos",        "apollo,callcenter-admin,crm-apollo,techapp,callcenter-server,callcenter-flex,maico15/dashbord"),
         ("github_username_map", '{"DroonPog":"Andrey Pogrebnyak","KlimMalgin":"Andrey Brunetkin"}'),
         ("jira_token",          ""),
         ("jira_domain",         ""),
@@ -1292,15 +1292,14 @@ def _do_github_sync(conn) -> tuple:
     total_prs = 0
 
     for repo in repos:
-        url = (
-            f"https://api.github.com/repos/{org}/{repo}/pulls"
-            f"?state=closed&per_page=100"
-        )
+        # Support "owner/repo" for personal/cross-org repos; bare name uses org
+        owner_repo = repo if "/" in repo else f"{org}/{repo}"
+        url = f"https://api.github.com/repos/{owner_repo}/pulls?state=closed&per_page=100"
         try:
             pulls = gh_get(url)
         except ValueError as e:
             if "404" in str(e):
-                raise ValueError(f"404 Not Found — repository {repo} not found")
+                raise ValueError(f"404 Not Found — repository {owner_repo} not found")
             raise
         if not isinstance(pulls, list):
             continue
