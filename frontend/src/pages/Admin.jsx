@@ -1655,9 +1655,22 @@ function AIKeysSection({ pw }) {
       <h2>AI Key Mapping</h2>
       <div className="card">
         <div style={{ fontSize: 12, color: 'var(--muted)', marginBottom: 14 }}>
-          Map each engineer's Anthropic API Key ID for per-engineer usage attribution.
-          Engineers can find their Key ID at{' '}
-          <code style={{ color: 'var(--ai)', fontSize: 11 }}>console.anthropic.com/settings/keys</code>.
+          <div style={{ marginBottom: 8 }}>
+            To get Key IDs for all engineers, run this command in terminal (replace YOUR_ADMIN_KEY):
+          </div>
+          <pre style={{
+            background: 'var(--card2)', border: '1px solid var(--border)', borderRadius: 6,
+            padding: '10px 14px', fontSize: 11, color: 'var(--text)', overflowX: 'auto',
+            margin: '0 0 10px', fontFamily: 'monospace', lineHeight: 1.6,
+          }}>{`curl https://api.anthropic.com/v1/organizations/api_keys \\
+  -H 'anthropic-version: 2023-06-01' \\
+  -H 'x-api-key: YOUR_ADMIN_KEY'`}</pre>
+          <div>
+            This returns all API keys in the organization with their Key IDs.
+            Find each engineer's key by name and copy the{' '}
+            <code style={{ color: 'var(--ai)', fontSize: 11 }}>'id'</code> field
+            {' '}(format: <code style={{ color: 'var(--ai)', fontSize: 11 }}>key_01XxXx...</code>)
+          </div>
         </div>
 
         <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 10 }}>
