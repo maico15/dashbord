@@ -78,6 +78,78 @@ function PasswordInput({ value, onChange, placeholder, autoComplete, onKeyDown, 
   )
 }
 
+// ── SyncLog ──────────────────────────────────────────────────────────────────
+
+function SyncLog({ service, pw, trigger }) {
+  const [open, setOpen] = useState(false)
+  const [logs, setLogs] = useState([])
+  const [loading, setLoading] = useState(false)
+
+  useEffect(() => {
+    if (!open) return
+    setLoading(true)
+    api.get(`/sync/${service}/log?password=${encodeURIComponent(pw)}`)
+      .then(data => { setLogs(data); setLoading(false) })
+      .catch(() => { setLogs([]); setLoading(false) })
+  }, [open, trigger])
+
+  return (
+    <div style={{ marginTop: 10, borderTop: '1px solid var(--border)', paddingTop: 8 }}>
+      <button
+        type="button"
+        onClick={() => setOpen(o => !o)}
+        style={{
+          background: 'none', border: 'none', cursor: 'pointer', padding: '2px 0',
+          color: 'var(--muted)', fontSize: 12, display: 'flex', alignItems: 'center', gap: 6,
+        }}
+      >
+        <span style={{ fontSize: 10 }}>{open ? '▲' : '▼'}</span>
+        Sync Log
+      </button>
+
+      {open && (
+        <div style={{ marginTop: 8 }}>
+          {loading && <div className="spinner" style={{ display: 'block', margin: '8px auto' }} />}
+          {!loading && logs.length === 0 && (
+            <div style={{ fontSize: 12, color: 'var(--muted)', padding: '6px 0' }}>No sync history</div>
+          )}
+          {!loading && logs.length > 0 && (
+            <div style={{
+              border: '1px solid var(--border)', borderRadius: 6, overflow: 'hidden',
+              background: 'var(--card2)',
+            }}>
+              {logs.map((log, i) => (
+                <div key={log.id} style={{
+                  display: 'grid',
+                  gridTemplateColumns: '148px 68px 1fr 80px',
+                  gap: 10, padding: '7px 12px', fontSize: 12, alignItems: 'center',
+                  borderTop: i > 0 ? '1px solid var(--border)' : 'none',
+                }}>
+                  <span style={{ color: 'var(--muted)', fontVariantNumeric: 'tabular-nums' }}>
+                    {new Date(log.timestamp + (log.timestamp.endsWith('Z') ? '' : 'Z')).toLocaleString()}
+                  </span>
+                  <span style={{
+                    fontWeight: 600, fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.04em',
+                    color: log.status === 'success' ? 'var(--success)' : 'var(--danger)',
+                  }}>
+                    {log.status}
+                  </span>
+                  <span style={{ color: 'var(--text)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    {log.message || log.error || '—'}
+                  </span>
+                  <span style={{ color: 'var(--muted)', textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>
+                    {log.records_updated} record(s)
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ── Login ────────────────────────────────────────────────────────────────────
 
 function Login({ onLogin }) {
@@ -1015,6 +1087,9 @@ function IntegrationsSection({ pw }) {
   const [githubSyncResult, setGithubSyncResult]  = useState(null)
   const [githubLastSync,   setGithubLastSync]    = useState(null)
   const [githubSaved,      setGithubSaved]        = useState(false)
+  const [jiraLogTrigger,   setJiraLogTrigger]    = useState(0)
+  const [slackLogTrigger,  setSlackLogTrigger]   = useState(0)
+  const [githubLogTrigger, setGithubLogTrigger]  = useState(0)
 
   const loadStatus = () => {
     api.get(`/sync/jira/status?password=${encodeURIComponent(pw)}`)
@@ -1100,6 +1175,7 @@ function IntegrationsSection({ pw }) {
       setSyncResult({ ok: false, msg })
     } finally {
       setSyncing(false)
+      setJiraLogTrigger(t => t + 1)
     }
   }
 
@@ -1130,6 +1206,7 @@ function IntegrationsSection({ pw }) {
       setSyncResult({ ok: false, msg })
     } finally {
       setSyncing(false)
+      setSlackLogTrigger(t => t + 1)
     }
   }
 
@@ -1173,7 +1250,7 @@ function IntegrationsSection({ pw }) {
     setGithubSyncResult(null)
     try {
       const res = await api.post(`/sync/github?password=${encodeURIComponent(pw)}`, {})
-      setGithubSyncResult({ ok: true, msg: `Synced ${res.records_updated ?? 0} record(s)` })
+      setGithubSyncResult({ ok: true, msg: res.message || `Synced ${res.records_updated ?? 0} record(s)` })
       const status = await api.get(`/sync/github/status?password=${encodeURIComponent(pw)}`)
       setGithubLastSync(status)
     } catch (e) {
@@ -1181,6 +1258,7 @@ function IntegrationsSection({ pw }) {
       setGithubSyncResult({ ok: false, msg })
     } finally {
       setGithubSyncing(false)
+      setGithubLogTrigger(t => t + 1)
     }
   }
 
@@ -1300,6 +1378,7 @@ function IntegrationsSection({ pw }) {
 
           <button className="btn btn-primary" onClick={handleSave}>{saved ? '✓ Saved' : 'Save'}</button>
         </div>
+        <SyncLog service="jira" pw={pw} trigger={jiraLogTrigger} />
       </div>
 
       <div style={{ fontSize: 11, color: '#e879f9', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 10, marginTop: 24, fontWeight: 600 }}>
@@ -1351,6 +1430,7 @@ function IntegrationsSection({ pw }) {
             {slackLastSync.status === 'error' && <span style={{ color: 'var(--danger)', marginLeft: 6 }}>— {slackLastSync.error}</span>}
           </div>
         )}
+        <SyncLog service="slack-reports" pw={pw} trigger={slackLogTrigger} />
       </div>
 
       <div style={{ fontSize: 11, color: '#3fb950', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 10, marginTop: 24, fontWeight: 600 }}>
@@ -1452,6 +1532,7 @@ function IntegrationsSection({ pw }) {
           )}
           <button className="btn btn-primary" onClick={handleGithubSave}>{githubSaved ? '✓ Saved' : 'Save'}</button>
         </div>
+        <SyncLog service="github" pw={pw} trigger={githubLogTrigger} />
       </div>
     </div>
   )

@@ -152,7 +152,8 @@ def init_db():
             timestamp TEXT NOT NULL,
             status TEXT NOT NULL,
             records_updated INTEGER DEFAULT 0,
-            error TEXT DEFAULT NULL
+            error TEXT DEFAULT NULL,
+            message TEXT DEFAULT NULL
         );
 
         CREATE TABLE IF NOT EXISTS daily_reports (
@@ -283,6 +284,12 @@ def seed_data():
     ]
     c.executemany("INSERT OR IGNORE INTO config (key,value) VALUES (?,?)", cfg)
     conn.commit()
+    # Migration: add message column to sync_log if missing
+    try:
+        c.execute("ALTER TABLE sync_log ADD COLUMN message TEXT DEFAULT NULL")
+        conn.commit()
+    except Exception:
+        pass
     conn.close()
 
 
@@ -752,23 +759,25 @@ def _run_jira_sync() -> dict:
     conn = get_db()
     try:
         records = _do_jira_sync(conn)
+        msg = f"Synced {records} record(s) from Jira"
         conn.execute(
-            "INSERT INTO sync_log (service, timestamp, status, records_updated) VALUES (?,?,?,?)",
-            ("jira", datetime.utcnow().isoformat(), "success", records),
+            "INSERT INTO sync_log (service, timestamp, status, records_updated, message) VALUES (?,?,?,?,?)",
+            ("jira", datetime.utcnow().isoformat(), "success", records, msg),
         )
         conn.commit()
-        return {"status": "success", "records_updated": records}
+        return {"status": "success", "records_updated": records, "message": msg}
     except Exception as exc:
+        err = str(exc)
         try:
             conn.execute(
-                "INSERT INTO sync_log (service, timestamp, status, records_updated, error) "
-                "VALUES (?,?,?,?,?)",
-                ("jira", datetime.utcnow().isoformat(), "error", 0, str(exc)),
+                "INSERT INTO sync_log (service, timestamp, status, records_updated, error, message) "
+                "VALUES (?,?,?,?,?,?)",
+                ("jira", datetime.utcnow().isoformat(), "error", 0, err, err),
             )
             conn.commit()
         except Exception:
             pass
-        return {"status": "error", "error": str(exc)}
+        return {"status": "error", "error": err, "message": err}
     finally:
         conn.close()
 
@@ -911,22 +920,111 @@ def _run_slack_reports_sync() -> dict:
     conn = get_db()
     try:
         records = _do_slack_reports_sync(conn)
+        msg = f"Synced {records} report(s) from Slack channel"
         conn.execute(
-            "INSERT INTO sync_log (service, timestamp, status, records_updated) VALUES (?,?,?,?)",
-            ("slack_reports", datetime.utcnow().isoformat(), "success", records),
+            "INSERT INTO sync_log (service, timestamp, status, records_updated, message) VALUES (?,?,?,?,?)",
+            ("slack_reports", datetime.utcnow().isoformat(), "success", records, msg),
         )
         conn.commit()
-        return {"status": "success", "records_updated": records}
+        return {"status": "success", "records_updated": records, "message": msg}
     except Exception as exc:
+        err = str(exc)
         try:
             conn.execute(
-                "INSERT INTO sync_log (service, timestamp, status, records_updated, error) VALUES (?,?,?,?,?)",
-                ("slack_reports", datetime.utcnow().isoformat(), "error", 0, str(exc)),
+                "INSERT INTO sync_log (service, timestamp, status, records_updated, error, message) VALUES (?,?,?,?,?,?)",
+                ("slack_reports", datetime.utcnow().isoformat(), "error", 0, err, err),
             )
             conn.commit()
         except Exception:
             pass
-        return {"status": "error", "error": str(exc)}
+        return {"status": "error", "error": err, "message": err}
+    finally:
+        conn.close()
+
+
+# ── GitHub sync ───────────────────────────────────────────────────────────────
+
+def _do_github_sync(conn) -> tuple:
+    c = conn.cursor()
+    c.execute("SELECT key, value FROM config WHERE key IN ('github_token','github_org','github_repos')")
+    cfg = {r["key"]: r["value"] for r in c.fetchall()}
+    token = (cfg.get("github_token") or "").strip()
+    org   = (cfg.get("github_org")   or "homealliance").strip()
+    repos = [r.strip() for r in (cfg.get("github_repos") or "").split(",") if r.strip()]
+    if not token:
+        raise ValueError("GitHub token not configured")
+    if not repos:
+        raise ValueError("No repositories configured")
+
+    def gh_get(url):
+        req = urllib.request.Request(
+            url,
+            headers={
+                "Authorization": f"token {token}",
+                "Accept": "application/vnd.github.v3+json",
+                "User-Agent": "dashboard-sync/1.0",
+            },
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                return json_lib.loads(resp.read())
+        except urllib.error.HTTPError as e:
+            if e.code == 401:
+                raise ValueError("401 Unauthorized — invalid token")
+            if e.code == 403:
+                raise ValueError(f"403 Forbidden — no access to organization {org}")
+            if e.code == 404:
+                raise ValueError(f"404 Not Found — {url.rsplit('/', 1)[-1]} not found")
+            raise ValueError(f"GitHub API error {e.code}: {e.reason}")
+        except Exception as e:
+            s = str(e).lower()
+            if "timed out" in s or "timeout" in s:
+                raise ValueError("Connection timeout")
+            raise ValueError(f"Request failed: {e}")
+
+    gh_get("https://api.github.com/user")
+
+    try:
+        gh_get(f"https://api.github.com/orgs/{org}")
+    except ValueError as e:
+        err = str(e)
+        if "404" in err:
+            raise ValueError(f"404 Not Found — organization {org} not found")
+        raise
+
+    for repo in repos:
+        try:
+            gh_get(f"https://api.github.com/repos/{org}/{repo}")
+        except ValueError as e:
+            if "404" in str(e):
+                raise ValueError(f"404 Not Found — repository {repo} not found")
+            raise
+
+    msg = f"Validated access to {len(repos)} repo(s) in {org}"
+    return len(repos), msg
+
+
+def _run_github_sync() -> dict:
+    conn = get_db()
+    try:
+        records, msg = _do_github_sync(conn)
+        conn.execute(
+            "INSERT INTO sync_log (service, timestamp, status, records_updated, message) VALUES (?,?,?,?,?)",
+            ("github", datetime.utcnow().isoformat(), "success", records, msg),
+        )
+        conn.commit()
+        return {"status": "success", "records_updated": records, "message": msg}
+    except Exception as exc:
+        err = str(exc)
+        try:
+            conn.execute(
+                "INSERT INTO sync_log (service, timestamp, status, records_updated, error, message) VALUES (?,?,?,?,?,?)",
+                ("github", datetime.utcnow().isoformat(), "error", 0, err, err),
+            )
+            conn.commit()
+        except Exception:
+            pass
+        return {"status": "error", "error": err, "message": err}
     finally:
         conn.close()
 
@@ -960,6 +1058,18 @@ def jira_sync_status(password: str = ""):
     if not row:
         return {"status": "never", "timestamp": None, "records_updated": 0, "error": None}
     return dict(row)
+
+
+@app.get("/api/sync/jira/log")
+def jira_sync_log(password: str = ""):
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT * FROM sync_log WHERE service='jira' ORDER BY id DESC LIMIT 10")
+    rows = [dict(r) for r in c.fetchall()]
+    conn.close()
+    return rows
 
 
 # ── Public routes ──────────────────────────────────────────────────────────────
@@ -1905,6 +2015,61 @@ def slack_reports_status(password: str = ""):
     if not row:
         return {"status": "never", "timestamp": None, "records_updated": 0, "error": None}
     return dict(row)
+
+
+@app.get("/api/sync/slack-reports/log")
+def slack_sync_log(password: str = ""):
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT * FROM sync_log WHERE service='slack_reports' ORDER BY id DESC LIMIT 10")
+    rows = [dict(r) for r in c.fetchall()]
+    conn.close()
+    return rows
+
+
+@app.post("/api/sync/github")
+def sync_github(password: str = ""):
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    result = _run_github_sync()
+    if result.get("status") == "error":
+        err = result.get("error", "Sync failed")
+        if "401" in err:
+            raise HTTPException(401, err)
+        if "403" in err:
+            raise HTTPException(403, err)
+        if "404" in err:
+            raise HTTPException(404, err)
+        raise HTTPException(500, err)
+    return result
+
+
+@app.get("/api/sync/github/status")
+def github_sync_status(password: str = ""):
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT * FROM sync_log WHERE service='github' ORDER BY id DESC LIMIT 1")
+    row = c.fetchone()
+    conn.close()
+    if not row:
+        return {"status": "never", "timestamp": None, "records_updated": 0, "error": None}
+    return dict(row)
+
+
+@app.get("/api/sync/github/log")
+def github_sync_log(password: str = ""):
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT * FROM sync_log WHERE service='github' ORDER BY id DESC LIMIT 10")
+    rows = [dict(r) for r in c.fetchall()]
+    conn.close()
+    return rows
 
 
 @app.post("/api/sync/slack-reports/test")
