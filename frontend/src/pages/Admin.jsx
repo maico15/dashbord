@@ -230,7 +230,10 @@ function ConfigSection({ pw }) {
     setSyncMsg('')
     try {
       const res = await api.post(`/ai-usage/sync?password=${encodeURIComponent(pw)}`, {})
-      setSyncMsg(`✓ Synced (${res.source === 'api' ? 'live API' : 'mock'}) · ${res.total_tokens?.toLocaleString()} tokens`)
+      const usage = await api.get('/ai-usage')
+      const src = usage.source === 'db' || usage.source === 'api' ? 'live API' : 'mock'
+      const tok = usage.total_tokens ?? 0
+      setSyncMsg(`✓ Synced (${src}) · ${tok.toLocaleString()} tokens · ${res.records_updated} record(s) updated`)
     } catch (e) {
       setSyncMsg(`Error: ${e.message}`)
     } finally {
