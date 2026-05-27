@@ -10,7 +10,10 @@ except ImportError:
 from sqlalchemy import create_engine, text
 from sqlalchemy.pool import StaticPool
 
-DATABASE_URL = os.environ.get("DATABASE_URL", "sqlite:///./dashboard.db")
+DATABASE_URL = os.environ.get("DATABASE_URL", "")
+if not DATABASE_URL:
+    _db_path = os.environ.get("DB_PATH", "./dashboard.db")
+    DATABASE_URL = f"sqlite:///{_db_path}"
 # Render and older Heroku use postgres://, SQLAlchemy needs postgresql://
 if DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)

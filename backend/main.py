@@ -1,4 +1,5 @@
 import os
+DB_PATH = os.environ.get("DB_PATH", "./dashboard.db")
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
@@ -288,34 +289,44 @@ def seed_data():
     )
 
     cfg = [
-        ("github_token", ""),
-        ("github_org", "homealliance"),
-        ("github_repos", "apollo,callcenter-admin,crm-apollo,techapp,callcenter-server,callcenter-flex"),
+        ("github_token",        os.environ.get("GITHUB_TOKEN", "")),
+        ("github_org",          "homealliance"),
+        ("github_repos",        "apollo,callcenter-admin,crm-apollo,techapp,callcenter-server,callcenter-flex"),
         ("github_username_map", '{"DroonPog":"Andrey Pogrebnyak","KlimMalgin":"Andrey Brunetkin"}'),
-        ("jira_token", ""),
-        ("jira_domain", ""),
-        ("jira_email", ""),
-        ("jira_api_token", ""),
-        ("jira_project_keys", "[]"),
-        ("jira_username_map", "{}"),
-        ("slack_bot_token", ""),
+        ("jira_token",          ""),
+        ("jira_domain",         ""),
+        ("jira_email",          ""),
+        ("jira_api_token",      ""),
+        ("jira_project_keys",   "[]"),
+        ("jira_username_map",   "{}"),
+        ("slack_bot_token",     os.environ.get("SLACK_BOT_TOKEN", "")),
         ("slack_reports_channel_id", "C08NK2SD5CK"),
-        ("anthropic_admin_key", ""),
-        ("ai_auto_sync", "0"),
-        ("team_name", "Engineering Squad"),
-        ("current_week", str(current_week)),
-        ("current_year", str(current_year)),
+        ("anthropic_admin_key", os.environ.get("ANTHROPIC_ADMIN_KEY", "")),
+        ("ai_auto_sync",        "0"),
+        ("team_name",           "Engineering Squad"),
+        ("current_week",        str(current_week)),
+        ("current_year",        str(current_year)),
     ]
     c.executemany("INSERT OR IGNORE INTO config (key,value) VALUES (?,?)", cfg)
     conn.commit()
-    # Seed anthropic_admin_key from env if the stored value is still empty
-    _env_key = os.environ.get("ANTHROPIC_ADMIN_KEY", "")
-    if _env_key:
-        c.execute(
-            "UPDATE config SET value=? WHERE key='anthropic_admin_key' AND (value IS NULL OR value='')",
-            (_env_key,),
-        )
-        conn.commit()
+
+    # Pre-seed api_key_mapping with known engineer key IDs
+    c.execute("SELECT id, name FROM team_members")
+    _members_by_name = {r["name"]: r["id"] for r in c.fetchall()}
+    _key_seeds = [
+        ("Andrey Brunetkin",   "apikey_01BeAnze5XbzY1z8q1KXuzpk"),
+        ("Andrey Pogrebnyak",  "apikey_01VE6ZZxPrzyiv7b5Hs3vfVH"),
+        ("Evgeniy Vinogradov", "apikey_01We2K4wbvnJhd2hThv2PRkN"),
+    ]
+    for _name, _key_id in _key_seeds:
+        _mid = _members_by_name.get(_name)
+        if _mid:
+            c.execute(
+                "INSERT OR IGNORE INTO api_key_mapping (engineer_id, anthropic_key_id) VALUES (?,?)",
+                (_mid, _key_id),
+            )
+    conn.commit()
+
     # Migration: add message column to sync_log if missing
     try:
         c.execute("ALTER TABLE sync_log ADD COLUMN message TEXT DEFAULT NULL")
