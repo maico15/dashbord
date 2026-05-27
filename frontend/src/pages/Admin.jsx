@@ -985,6 +985,7 @@ function ReportsAdminSection({ pw }) {
 // ── Integrations section ─────────────────────────────────────────────────────
 
 function IntegrationsSection({ pw }) {
+  const [engineers,    setEngineers]    = useState([])
   const [jiraDomain,   setJiraDomain]   = useState('')
   const [jiraEmail,    setJiraEmail]    = useState('')
   const [jiraToken,    setJiraToken]    = useState('')
@@ -1022,7 +1023,8 @@ function IntegrationsSection({ pw }) {
   }
 
   useEffect(() => {
-    api.get('/config').then((c) => {
+    Promise.all([api.get('/config'), api.get('/team')]).then(([c, team]) => {
+      setEngineers(team)
       setJiraDomain(c.jira_domain || '')
       setJiraEmail(c.jira_email || '')
       setJiraToken(c.jira_api_token || '')
@@ -1036,6 +1038,7 @@ function IntegrationsSection({ pw }) {
           )
         )
       } catch { setUsernameMap([]) }
+      if (team.length) setNewRow(p => ({ ...p, engineer_name: p.engineer_name || team[0].name }))
       setSlackToken(c.slack_bot_token || '')
       setSlackChannel(c.slack_reports_channel_id || 'C08NK2SD5CK')
       setGithubToken(c.github_token || '')
@@ -1043,14 +1046,20 @@ function IntegrationsSection({ pw }) {
       setGithubRepos(c.github_repos || 'apollo,callcenter-admin,crm-apollo,techapp')
       try {
         const gmap = JSON.parse(c.github_username_map || '{}')
-        const grows = Object.entries(gmap).map(([github_username, engineer_name]) => ({ github_username, engineer_name }))
-        while (grows.length < 3) grows.push({ github_username: '', engineer_name: '' })
+        // One row per engineer, pre-filled name; use saved github_username if mapped
+        const grows = team.map(m => {
+          const saved = Object.entries(gmap).find(([, name]) => name === m.name)
+          return { github_username: saved ? saved[0] : '', engineer_name: m.name }
+        })
+        // Append any saved mappings that don't match a known engineer
+        Object.entries(gmap).forEach(([gh, name]) => {
+          if (!grows.find(r => r.engineer_name === name)) grows.push({ github_username: gh, engineer_name: name })
+        })
         setGithubUsernameMap(grows)
-      } catch { setGithubUsernameMap([
-        { github_username: '', engineer_name: '' },
-        { github_username: '', engineer_name: '' },
-        { github_username: '', engineer_name: '' },
-      ]) }
+      } catch {
+        setGithubUsernameMap(team.map(m => ({ github_username: '', engineer_name: m.name })))
+      }
+      if (team.length) setGithubNewRow(p => ({ ...p, engineer_name: p.engineer_name || team[0].name }))
     })
     loadStatus()
     api.get(`/sync/slack-reports/status?password=${encodeURIComponent(pw)}`)
@@ -1230,12 +1239,14 @@ function IntegrationsSection({ pw }) {
                 style={inputStyle}
               />
               <span style={{ color: 'var(--muted)', fontSize: 13, flexShrink: 0 }}>→</span>
-              <input
+              <select
                 value={row.engineer_name}
                 onChange={e => updateRow(idx, 'engineer_name', e.target.value)}
-                placeholder="Engineer Name"
                 style={inputStyle}
-              />
+              >
+                <option value="">— select engineer —</option>
+                {engineers.map(m => <option key={m.id} value={m.name}>{m.name}</option>)}
+              </select>
               <button className="btn btn-danger" style={{ padding: '3px 8px', fontSize: 12, flexShrink: 0 }} onClick={() => removeRow(idx)}>✕</button>
             </div>
           ))}
@@ -1248,13 +1259,14 @@ function IntegrationsSection({ pw }) {
               onKeyDown={e => e.key === 'Enter' && addRow()}
             />
             <span style={{ color: 'var(--muted)', fontSize: 13, flexShrink: 0 }}>→</span>
-            <input
+            <select
               value={newRow.engineer_name}
               onChange={e => setNewRow(p => ({ ...p, engineer_name: e.target.value }))}
-              placeholder="Engineer Name"
               style={inputStyle}
-              onKeyDown={e => e.key === 'Enter' && addRow()}
-            />
+            >
+              <option value="">— select engineer —</option>
+              {engineers.map(m => <option key={m.id} value={m.name}>{m.name}</option>)}
+            </select>
             <button className="btn btn-primary" style={{ padding: '3px 12px', fontSize: 12, flexShrink: 0 }} onClick={addRow}>+ Add</button>
           </div>
         </div>
@@ -1377,12 +1389,14 @@ function IntegrationsSection({ pw }) {
                 style={inputStyle}
               />
               <span style={{ color: 'var(--muted)', fontSize: 13, flexShrink: 0 }}>→</span>
-              <input
+              <select
                 value={row.engineer_name}
                 onChange={e => updateGithubRow(idx, 'engineer_name', e.target.value)}
-                placeholder="Engineer Name"
                 style={inputStyle}
-              />
+              >
+                <option value="">— select engineer —</option>
+                {engineers.map(m => <option key={m.id} value={m.name}>{m.name}</option>)}
+              </select>
               <button className="btn btn-danger" style={{ padding: '3px 8px', fontSize: 12, flexShrink: 0 }} onClick={() => removeGithubRow(idx)}>✕</button>
             </div>
           ))}
@@ -1395,13 +1409,14 @@ function IntegrationsSection({ pw }) {
               onKeyDown={e => e.key === 'Enter' && addGithubRow()}
             />
             <span style={{ color: 'var(--muted)', fontSize: 13, flexShrink: 0 }}>→</span>
-            <input
+            <select
               value={githubNewRow.engineer_name}
               onChange={e => setGithubNewRow(p => ({ ...p, engineer_name: e.target.value }))}
-              placeholder="Engineer Name"
               style={inputStyle}
-              onKeyDown={e => e.key === 'Enter' && addGithubRow()}
-            />
+            >
+              <option value="">— select engineer —</option>
+              {engineers.map(m => <option key={m.id} value={m.name}>{m.name}</option>)}
+            </select>
             <button className="btn btn-primary" style={{ padding: '3px 12px', fontSize: 12, flexShrink: 0 }} onClick={addGithubRow}>+ Add</button>
           </div>
         </div>
