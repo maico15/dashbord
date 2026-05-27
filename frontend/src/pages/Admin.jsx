@@ -1076,7 +1076,7 @@ function IntegrationsSection({ pw }) {
   const [slackLastSync, setSlackLastSync] = useState(null)
   const [githubToken,       setGithubToken]       = useState('')
   const [githubOrg,         setGithubOrg]         = useState('homealliance')
-  const [githubRepos,       setGithubRepos]        = useState('apollo,callcenter-admin,crm-apollo,techapp')
+  const [githubRepos,       setGithubRepos]        = useState('apollo,callcenter-admin,crm-apollo,techapp,callcenter-server,callcenter-flex')
   const [githubUsernameMap, setGithubUsernameMap]  = useState([
     { github_username: '', engineer_name: '' },
     { github_username: '', engineer_name: '' },
@@ -1118,7 +1118,7 @@ function IntegrationsSection({ pw }) {
       setSlackChannel(c.slack_reports_channel_id || 'C08NK2SD5CK')
       setGithubToken(c.github_token || '')
       setGithubOrg(c.github_org || 'homealliance')
-      setGithubRepos(c.github_repos || 'apollo,callcenter-admin,crm-apollo,techapp')
+      setGithubRepos(c.github_repos || 'apollo,callcenter-admin,crm-apollo,techapp,callcenter-server,callcenter-flex')
       try {
         const gmap = JSON.parse(c.github_username_map || '{}')
         // One row per engineer, pre-filled name; use saved github_username if mapped
@@ -1451,7 +1451,7 @@ function IntegrationsSection({ pw }) {
         <div className="form-row">
           <div className="form-group">
             <label>Repositories (comma-separated)</label>
-            <input value={githubRepos} onChange={e => setGithubRepos(e.target.value)} placeholder="apollo,callcenter-admin,crm-apollo,techapp" />
+            <input value={githubRepos} onChange={e => setGithubRepos(e.target.value)} placeholder="apollo,callcenter-admin,crm-apollo,techapp,callcenter-server,callcenter-flex" />
           </div>
         </div>
 

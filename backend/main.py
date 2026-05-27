@@ -266,7 +266,7 @@ def seed_data():
     cfg = [
         ("github_token", ""),
         ("github_org", "homealliance"),
-        ("github_repos", "apollo,callcenter-admin,crm-apollo,techapp"),
+        ("github_repos", "apollo,callcenter-admin,crm-apollo,techapp,callcenter-server,callcenter-flex"),
         ("github_username_map", "{}"),
         ("jira_token", ""),
         ("jira_domain", ""),
