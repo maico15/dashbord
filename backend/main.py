@@ -474,25 +474,13 @@ def _mock_ai_usage(conn) -> dict:
 
 
 def _live_ai_usage(admin_key: str, conn) -> dict:
-    end = datetime.now()
+    end = datetime.utcnow()
     start = end - timedelta(days=30)
-    qs = f"?start_date={start.strftime('%Y-%m-%d')}&end_date={end.strftime('%Y-%m-%d')}"
-
-    # Fetch all pages from the correct organizations/usage endpoint
-    all_items: list = []
-    last_id = None
-    while True:
-        url = f"/v1/organizations/usage{qs}"
-        if last_id:
-            url += f"&starting_after={last_id}"
-        data = _anthropic_get(url, admin_key)
-        items = data.get("data", [])
-        all_items.extend(items)
-        if not data.get("has_more") or not items:
-            break
-        last_id = items[-1].get("id") or items[-1].get("api_key_id")
-        if not last_id:
-            break
+    qs = (
+        f"?starting_at={start.strftime('%Y-%m-%dT00:00:00Z')}"
+        f"&ending_at={end.strftime('%Y-%m-%dT23:59:59Z')}"
+        f"&bucket_width=1d&group_by[]=api_key_id"
+    )
 
     # Load key → engineer mapping from DB
     c = conn.cursor()
@@ -501,26 +489,43 @@ def _live_ai_usage(admin_key: str, conn) -> dict:
     c.execute("SELECT id, name, stream FROM team_members")
     eng_info = {r["id"]: dict(r) for r in c.fetchall()}
 
+    # Fetch all pages (token-based pagination via next_page)
+    all_buckets: list = []
+    next_page = None
+    while True:
+        url = f"/v1/organizations/usage_report/messages{qs}"
+        if next_page:
+            url += f"&next_page={next_page}"
+        data = _anthropic_get(url, admin_key, usage_beta=False)
+        buckets = data.get("data", [])
+        all_buckets.extend(buckets)
+        if not data.get("has_more"):
+            break
+        next_page = data.get("next_page")
+        if not next_page:
+            break
+
     day_map: dict = {}
     user_map: dict = {}
     total_tokens = 0
 
-    for item in all_items:
-        key_id = item.get("api_key_id", "")
-        date_str = (item.get("date") or item.get("timestamp") or item.get("created_at") or "")[:10]
-        input_tok  = item.get("input_tokens", 0)
-        output_tok = item.get("output_tokens", 0)
-        tok = input_tok + output_tok
-        total_tokens += tok
-        if date_str:
-            day_map[date_str] = day_map.get(date_str, 0) + tok
-        eng_id = key_to_eng.get(key_id)
-        if eng_id:
-            if eng_id not in user_map:
-                user_map[eng_id] = {"input_tokens": 0, "output_tokens": 0, "tokens": 0}
-            user_map[eng_id]["input_tokens"]  += input_tok
-            user_map[eng_id]["output_tokens"] += output_tok
-            user_map[eng_id]["tokens"]        += tok
+    for bucket in all_buckets:
+        date_str = (bucket.get("starting_at") or "")[:10]
+        for result in bucket.get("results", []):
+            key_id    = result.get("api_key_id", "")
+            input_tok = result.get("uncached_input_tokens", 0) + result.get("cache_read_input_tokens", 0)
+            output_tok = result.get("output_tokens", 0)
+            tok = input_tok + output_tok
+            total_tokens += tok
+            if date_str:
+                day_map[date_str] = day_map.get(date_str, 0) + tok
+            eng_id = key_to_eng.get(key_id)
+            if eng_id:
+                if eng_id not in user_map:
+                    user_map[eng_id] = {"input_tokens": 0, "output_tokens": 0, "tokens": 0}
+                user_map[eng_id]["input_tokens"]  += input_tok
+                user_map[eng_id]["output_tokens"] += output_tok
+                user_map[eng_id]["tokens"]        += tok
 
     tokens_per_day = [{"date": k, "tokens": v} for k, v in sorted(day_map.items())]
 
@@ -764,44 +769,49 @@ def _do_ai_usage_sync(conn) -> tuple:
 
     end_dt = datetime.utcnow()
     start_dt = end_dt - timedelta(days=30)
-    qs = f"?start_date={start_dt.strftime('%Y-%m-%d')}&end_date={end_dt.strftime('%Y-%m-%d')}"
+    qs = (
+        f"?starting_at={start_dt.strftime('%Y-%m-%dT00:00:00Z')}"
+        f"&ending_at={end_dt.strftime('%Y-%m-%dT23:59:59Z')}"
+        f"&bucket_width=1d&group_by[]=api_key_id"
+    )
 
-    # Fetch all pages
-    all_items: list = []
-    last_id = None
+    # Fetch all pages (token-based pagination via next_page)
+    all_buckets: list = []
+    next_page = None
     while True:
-        url = f"/v1/organizations/usage{qs}"
-        if last_id:
-            url += f"&starting_after={last_id}"
-        data = _anthropic_get(url, admin_key)
-        items = data.get("data", [])
-        all_items.extend(items)
-        if not data.get("has_more") or not items:
+        url = f"/v1/organizations/usage_report/messages{qs}"
+        if next_page:
+            url += f"&next_page={next_page}"
+        data = _anthropic_get(url, admin_key, usage_beta=False)
+        buckets = data.get("data", [])
+        all_buckets.extend(buckets)
+        if not data.get("has_more"):
             break
-        last_id = items[-1].get("id") or items[-1].get("api_key_id")
-        if not last_id:
+        next_page = data.get("next_page")
+        if not next_page:
             break
 
-    # Aggregate by (api_key_id, date)
+    # Aggregate by (engineer_id, date) — response is bucketed: data[].results[]
     agg: dict = {}
-    for item in all_items:
-        key_id = item.get("api_key_id", "")
-        date_str = (
-            item.get("date") or item.get("timestamp") or item.get("created_at") or ""
-        )[:10]
-        if not key_id or not date_str:
+    for bucket in all_buckets:
+        date_str = (bucket.get("starting_at") or "")[:10]
+        if not date_str:
             continue
-        k = (key_id, date_str)
-        if k not in agg:
-            agg[k] = {"input_tokens": 0, "output_tokens": 0}
-        agg[k]["input_tokens"]  += item.get("input_tokens", 0)
-        agg[k]["output_tokens"] += item.get("output_tokens", 0)
+        for result in bucket.get("results", []):
+            key_id = result.get("api_key_id", "")
+            engineer_id = key_map.get(key_id)
+            if not engineer_id:
+                continue
+            input_tok  = result.get("uncached_input_tokens", 0) + result.get("cache_read_input_tokens", 0)
+            output_tok = result.get("output_tokens", 0)
+            k = (engineer_id, date_str)
+            if k not in agg:
+                agg[k] = {"input_tokens": 0, "output_tokens": 0}
+            agg[k]["input_tokens"]  += input_tok
+            agg[k]["output_tokens"] += output_tok
 
     records = 0
-    for (key_id, date_str), tok in agg.items():
-        engineer_id = key_map.get(key_id)
-        if not engineer_id:
-            continue
+    for (engineer_id, date_str), tok in agg.items():
         try:
             dt = datetime.strptime(date_str, "%Y-%m-%d")
             iso = dt.isocalendar()
