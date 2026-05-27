@@ -946,11 +946,19 @@ def _run_slack_reports_sync() -> dict:
 
 def _do_github_sync(conn) -> tuple:
     c = conn.cursor()
-    c.execute("SELECT key, value FROM config WHERE key IN ('github_token','github_org','github_repos')")
+    c.execute(
+        "SELECT key, value FROM config WHERE key IN "
+        "('github_token','github_org','github_repos','github_username_map')"
+    )
     cfg = {r["key"]: r["value"] for r in c.fetchall()}
     token = (cfg.get("github_token") or "").strip()
     org   = (cfg.get("github_org")   or "homealliance").strip()
     repos = [r.strip() for r in (cfg.get("github_repos") or "").split(",") if r.strip()]
+    try:
+        username_map = json_lib.loads(cfg.get("github_username_map") or "{}")
+    except Exception:
+        username_map = {}
+
     if not token:
         raise ValueError("GitHub token not configured")
     if not repos:
@@ -972,9 +980,9 @@ def _do_github_sync(conn) -> tuple:
             if e.code == 401:
                 raise ValueError("401 Unauthorized — invalid token")
             if e.code == 403:
-                raise ValueError(f"403 Forbidden — no access to organization {org}")
+                raise ValueError(f"403 Forbidden — no access to repository")
             if e.code == 404:
-                raise ValueError(f"404 Not Found — {url.rsplit('/', 1)[-1]} not found")
+                raise ValueError(f"404 Not Found — {url.rsplit('/', 2)[-1]} not found")
             raise ValueError(f"GitHub API error {e.code}: {e.reason}")
         except Exception as e:
             s = str(e).lower()
@@ -982,26 +990,83 @@ def _do_github_sync(conn) -> tuple:
                 raise ValueError("Connection timeout")
             raise ValueError(f"Request failed: {e}")
 
-    gh_get("https://api.github.com/user")
+    # Determine current week date range (ISO week)
+    week, year = current_week_year(conn)
+    jan4 = datetime(year, 1, 4).date()
+    week1_monday = jan4 - timedelta(days=jan4.weekday())
+    week_monday  = week1_monday + timedelta(weeks=week - 1)
+    week_sunday  = week_monday  + timedelta(days=6)
 
-    try:
-        gh_get(f"https://api.github.com/orgs/{org}")
-    except ValueError as e:
-        err = str(e)
-        if "404" in err:
-            raise ValueError(f"404 Not Found — organization {org} not found")
-        raise
+    # Fetch merged PRs per repo, filtered to current week
+    pr_counts = {}  # github_login -> count
+    total_prs = 0
 
     for repo in repos:
+        url = (
+            f"https://api.github.com/repos/{org}/{repo}/pulls"
+            f"?state=closed&per_page=100"
+        )
         try:
-            gh_get(f"https://api.github.com/repos/{org}/{repo}")
+            pulls = gh_get(url)
         except ValueError as e:
             if "404" in str(e):
                 raise ValueError(f"404 Not Found — repository {repo} not found")
             raise
+        if not isinstance(pulls, list):
+            continue
 
-    msg = f"Validated access to {len(repos)} repo(s) in {org}"
-    return len(repos), msg
+        for pr in pulls:
+            merged_at = pr.get("merged_at")
+            if not merged_at:
+                continue
+            try:
+                merged_date = datetime.fromisoformat(merged_at.rstrip("Z")).date()
+            except Exception:
+                continue
+            if not (week_monday <= merged_date <= week_sunday):
+                continue
+            login = (pr.get("user") or {}).get("login", "")
+            if login:
+                pr_counts[login] = pr_counts.get(login, 0) + 1
+                total_prs += 1
+
+    # Map logins → engineers and write to dev_metrics
+    records_updated = 0
+    for login, count in pr_counts.items():
+        eng_name = username_map.get(login)
+        if not eng_name:
+            continue
+        c.execute("SELECT id FROM team_members WHERE name=?", (eng_name,))
+        row = c.fetchone()
+        if not row:
+            continue
+        member_id = row["id"]
+        c.execute(
+            "SELECT prs_merged FROM dev_metrics WHERE member_id=? AND week=? AND year=?",
+            (member_id, week, year),
+        )
+        existing = c.fetchone()
+        if existing:
+            c.execute(
+                "UPDATE dev_metrics SET prs_merged=? WHERE member_id=? AND week=? AND year=?",
+                (count, member_id, week, year),
+            )
+        else:
+            c.execute(
+                "INSERT INTO dev_metrics "
+                "(member_id, week, year, prs_merged, tickets_closed, cycle_time_days, features_completed, deploys) "
+                "VALUES (?,?,?,?,?,?,?,?)",
+                (member_id, week, year, count, 0, 0.0, 0, 0),
+            )
+        records_updated += 1
+
+    conn.commit()
+
+    if total_prs == 0:
+        msg = f"No merged PRs found in week {week} across {len(repos)} repo(s)"
+    else:
+        msg = f"Synced {total_prs} merged PR(s) → {records_updated} engineer(s) updated (week {week})"
+    return records_updated, msg
 
 
 def _run_github_sync() -> dict:
