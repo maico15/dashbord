@@ -225,52 +225,9 @@ def seed_data():
     c.executemany("INSERT INTO team_members (name, stream, avatar_color) VALUES (?,?,?)", members)
     conn.commit()
 
-    c.execute("SELECT id, stream FROM team_members ORDER BY id")
-    rows = [dict(r) for r in c.fetchall()]
-
-    rng = random.Random(42)
     now = datetime.now().isocalendar()
     current_week = now[1]
     current_year = now[0]
-
-    for wo in range(8):
-        w = current_week - 7 + wo
-        if w <= 0:
-            w += 52
-        for row in rows:
-            mid = row["id"]
-            for stream in parse_streams(row["stream"]):
-                if stream == "dev":
-                    ct = round(rng.uniform(0.5, 4.5), 1)
-                    c.execute(
-                        "INSERT OR IGNORE INTO dev_metrics "
-                        "(member_id,week,year,prs_merged,tickets_closed,cycle_time_days,features_completed,deploys) "
-                        "VALUES (?,?,?,?,?,?,?,?)",
-                        (mid, w, current_year,
-                         rng.randint(2, 9), rng.randint(3, 12), ct,
-                         rng.randint(1, 4), rng.randint(1, 6)),
-                    )
-                elif stream == "support":
-                    opened = rng.randint(2, 8)
-                    resolved = rng.randint(max(1, opened - 2), opened)
-                    c.execute(
-                        "INSERT OR IGNORE INTO support_metrics "
-                        "(member_id,week,year,incidents_opened,incidents_resolved,avg_resolution_hours,sla_breached,total_incidents) "
-                        "VALUES (?,?,?,?,?,?,?,?)",
-                        (mid, w, current_year,
-                         opened, resolved,
-                         round(rng.uniform(0.5, 6.0), 1),
-                         rng.randint(0, 2), opened),
-                    )
-                elif stream == "docs":
-                    c.execute(
-                        "INSERT OR IGNORE INTO docs_metrics "
-                        "(member_id,week,year,docs_created,docs_updated,projects_covered,projects_total) "
-                        "VALUES (?,?,?,?,?,?,?)",
-                        (mid, w, current_year,
-                         rng.randint(1, 5), rng.randint(2, 9),
-                         rng.randint(5, 9), 10),
-                    )
 
     rules = [
         ("dev", "pr_merged", "PR merged", 50, None),
@@ -2175,6 +2132,25 @@ def admin_update_metrics(stream: str, week: int, member_id: int, data: MetricUpd
     conn.commit()
     conn.close()
     return {"ok": True}
+
+
+@app.delete("/api/metrics/mock")
+def delete_mock_metrics(password: str = ""):
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    conn = get_db()
+    week, year = current_week_year(conn)
+    c = conn.cursor()
+    deleted = 0
+    for table in ("dev_metrics", "support_metrics", "docs_metrics"):
+        c.execute(
+            f"DELETE FROM {table} WHERE year < ? OR (year = ? AND week < ?)",
+            (year, year, week),
+        )
+        deleted += c.rowcount
+    conn.commit()
+    conn.close()
+    return {"ok": True, "deleted_rows": deleted, "kept_week": week, "kept_year": year}
 
 
 # ── AI Usage routes ────────────────────────────────────────────────────────────
