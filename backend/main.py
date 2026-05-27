@@ -2549,6 +2549,84 @@ def github_sync_log(password: str = ""):
     return rows
 
 
+@app.get("/api/sync/github/debug")
+def github_sync_debug():
+    """No-auth debug endpoint: returns config, live API test, and recent sync log."""
+    conn = get_db()
+    c = conn.cursor()
+
+    # Config (mask token)
+    c.execute(
+        "SELECT key, value FROM config WHERE key IN "
+        "('github_token','github_org','github_repos','github_username_map')"
+    )
+    cfg = {r["key"]: r["value"] for r in c.fetchall()}
+    token = (cfg.get("github_token") or "").strip()
+    masked_token = (token[:6] + "..." + token[-4:]) if len(token) > 10 else ("set" if token else "NOT SET")
+
+    # Last 5 sync log entries
+    c.execute("SELECT * FROM sync_log WHERE service='github' ORDER BY id DESC LIMIT 5")
+    logs = [dict(r) for r in c.fetchall()]
+
+    conn.close()
+
+    # Live API test: list repos for the configured org
+    org = (cfg.get("github_org") or "homealliance").strip()
+    repos_cfg = cfg.get("github_repos") or ""
+    api_test: dict = {}
+    if token:
+        try:
+            test_repo = None
+            for r in repos_cfg.split(","):
+                r = r.strip()
+                if r:
+                    test_repo = r if "/" in r else f"{org}/{r}"
+                    break
+            if test_repo:
+                req = urllib.request.Request(
+                    f"https://api.github.com/repos/{test_repo}",
+                    headers={
+                        "Authorization": f"token {token}",
+                        "Accept": "application/vnd.github.v3+json",
+                        "User-Agent": "dashboard-sync/1.0",
+                    },
+                )
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    data = json_lib.loads(resp.read())
+                api_test = {
+                    "ok": True,
+                    "repo": test_repo,
+                    "full_name": data.get("full_name"),
+                    "private": data.get("private"),
+                    "default_branch": data.get("default_branch"),
+                }
+            else:
+                api_test = {"ok": False, "error": "No repos configured"}
+        except urllib.error.HTTPError as e:
+            body = ""
+            try:
+                body = e.read().decode("utf-8", errors="replace")
+            except Exception:
+                pass
+            api_test = {"ok": False, "status": e.code, "error": body}
+        except Exception as e:
+            api_test = {"ok": False, "error": str(e)}
+    else:
+        api_test = {"ok": False, "error": "github_token not configured"}
+
+    return {
+        "auth_mechanism": "POST /api/sync/github requires ?password=ADMIN_PASSWORD query param",
+        "config": {
+            "github_token": masked_token,
+            "github_org": org,
+            "github_repos": [r.strip() for r in repos_cfg.split(",") if r.strip()],
+            "github_username_map": cfg.get("github_username_map", "{}"),
+        },
+        "api_test": api_test,
+        "recent_sync_log": logs,
+    }
+
+
 @app.post("/api/sync/slack-reports/test")
 def test_slack_connection(password: str = ""):
     if password != ADMIN_PASSWORD:
