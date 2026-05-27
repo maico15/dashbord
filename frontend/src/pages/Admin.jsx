@@ -953,6 +953,19 @@ function IntegrationsSection({ pw }) {
   const [slackTesting, setSlackTesting] = useState(false)
   const [slackTestResult, setSlackTestResult] = useState(null)
   const [slackLastSync, setSlackLastSync] = useState(null)
+  const [githubToken,       setGithubToken]       = useState('')
+  const [githubOrg,         setGithubOrg]         = useState('homealliance')
+  const [githubRepos,       setGithubRepos]        = useState('apollo,callcenter-admin,crm-apollo,techapp')
+  const [githubUsernameMap, setGithubUsernameMap]  = useState([
+    { github_username: '', engineer_name: '' },
+    { github_username: '', engineer_name: '' },
+    { github_username: '', engineer_name: '' },
+  ])
+  const [githubNewRow,     setGithubNewRow]      = useState({ github_username: '', engineer_name: '' })
+  const [githubSyncing,    setGithubSyncing]     = useState(false)
+  const [githubSyncResult, setGithubSyncResult]  = useState(null)
+  const [githubLastSync,   setGithubLastSync]    = useState(null)
+  const [githubSaved,      setGithubSaved]        = useState(false)
 
   const loadStatus = () => {
     api.get(`/sync/jira/status?password=${encodeURIComponent(pw)}`)
@@ -977,10 +990,25 @@ function IntegrationsSection({ pw }) {
       } catch { setUsernameMap([]) }
       setSlackToken(c.slack_bot_token || '')
       setSlackChannel(c.slack_reports_channel_id || 'C08NK2SD5CK')
+      setGithubToken(c.github_token || '')
+      setGithubOrg(c.github_org || 'homealliance')
+      setGithubRepos(c.github_repos || 'apollo,callcenter-admin,crm-apollo,techapp')
+      try {
+        const gmap = JSON.parse(c.github_username_map || '{}')
+        const grows = Object.entries(gmap).map(([github_username, engineer_name]) => ({ github_username, engineer_name }))
+        while (grows.length < 3) grows.push({ github_username: '', engineer_name: '' })
+        setGithubUsernameMap(grows)
+      } catch { setGithubUsernameMap([
+        { github_username: '', engineer_name: '' },
+        { github_username: '', engineer_name: '' },
+        { github_username: '', engineer_name: '' },
+      ]) }
     })
     loadStatus()
     api.get(`/sync/slack-reports/status?password=${encodeURIComponent(pw)}`)
       .then(setSlackLastSync).catch(() => {})
+    api.get(`/sync/github/status?password=${encodeURIComponent(pw)}`)
+      .then(setGithubLastSync).catch(() => {})
   }, [])
 
   const handleSave = async () => {
@@ -1058,6 +1086,46 @@ function IntegrationsSection({ pw }) {
 
   const updateRow = (idx, field, val) =>
     setUsernameMap(prev => prev.map((r, i) => i === idx ? { ...r, [field]: val } : r))
+
+  const addGithubRow = () => {
+    if (!githubNewRow.github_username.trim() || !githubNewRow.engineer_name.trim()) return
+    setGithubUsernameMap(prev => [...prev, { ...githubNewRow }])
+    setGithubNewRow({ github_username: '', engineer_name: '' })
+  }
+  const removeGithubRow = (idx) => setGithubUsernameMap(prev => prev.filter((_, i) => i !== idx))
+  const updateGithubRow = (idx, field, val) =>
+    setGithubUsernameMap(prev => prev.map((r, i) => i === idx ? { ...r, [field]: val } : r))
+
+  const handleGithubSave = async () => {
+    const mapObj = {}
+    githubUsernameMap.forEach(({ github_username, engineer_name }) => {
+      if (github_username.trim() && engineer_name.trim()) mapObj[github_username.trim()] = engineer_name.trim()
+    })
+    await api.put('/config', {
+      github_token:        githubToken,
+      github_org:          githubOrg,
+      github_repos:        githubRepos,
+      github_username_map: JSON.stringify(mapObj),
+    }, pw)
+    setGithubSaved(true)
+    setTimeout(() => setGithubSaved(false), 2000)
+  }
+
+  const handleGithubSync = async () => {
+    setGithubSyncing(true)
+    setGithubSyncResult(null)
+    try {
+      const res = await api.post(`/sync/github?password=${encodeURIComponent(pw)}`, {})
+      setGithubSyncResult({ ok: true, msg: `Synced ${res.records_updated ?? 0} record(s)` })
+      const status = await api.get(`/sync/github/status?password=${encodeURIComponent(pw)}`)
+      setGithubLastSync(status)
+    } catch (e) {
+      let msg = e.message; try { msg = JSON.parse(msg).detail || msg } catch {}
+      setGithubSyncResult({ ok: false, msg })
+    } finally {
+      setGithubSyncing(false)
+    }
+  }
 
   const statusDot = lastSync?.status === 'success'
     ? 'var(--success)'
@@ -1223,6 +1291,104 @@ function IntegrationsSection({ pw }) {
             {slackLastSync.status === 'error' && <span style={{ color: 'var(--danger)', marginLeft: 6 }}>— {slackLastSync.error}</span>}
           </div>
         )}
+      </div>
+
+      <div style={{ fontSize: 11, color: '#3fb950', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 10, marginTop: 24, fontWeight: 600 }}>
+        GitHub
+      </div>
+
+      <div className="card">
+        <div className="form-row">
+          <div className="form-group">
+            <label>GitHub Token</label>
+            <input type="password" value={githubToken} onChange={e => setGithubToken(e.target.value)} placeholder="ghp_..." />
+          </div>
+          <div className="form-group" style={{ maxWidth: 200 }}>
+            <label>Organization</label>
+            <input value={githubOrg} onChange={e => setGithubOrg(e.target.value)} placeholder="homealliance" />
+          </div>
+        </div>
+        <div className="form-row">
+          <div className="form-group">
+            <label>Repositories (comma-separated)</label>
+            <input value={githubRepos} onChange={e => setGithubRepos(e.target.value)} placeholder="apollo,callcenter-admin,crm-apollo,techapp" />
+          </div>
+        </div>
+
+        <div style={{ margin: '16px 0 8px', fontSize: 12, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+          GitHub Username → Engineer Name Mapping
+        </div>
+
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 10 }}>
+          {githubUsernameMap.map((row, idx) => (
+            <div key={idx} style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+              <input
+                value={row.github_username}
+                onChange={e => updateGithubRow(idx, 'github_username', e.target.value)}
+                placeholder="github-username"
+                style={inputStyle}
+              />
+              <span style={{ color: 'var(--muted)', fontSize: 13, flexShrink: 0 }}>→</span>
+              <input
+                value={row.engineer_name}
+                onChange={e => updateGithubRow(idx, 'engineer_name', e.target.value)}
+                placeholder="Engineer Name"
+                style={inputStyle}
+              />
+              <button className="btn btn-danger" style={{ padding: '3px 8px', fontSize: 12, flexShrink: 0 }} onClick={() => removeGithubRow(idx)}>✕</button>
+            </div>
+          ))}
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            <input
+              value={githubNewRow.github_username}
+              onChange={e => setGithubNewRow(p => ({ ...p, github_username: e.target.value }))}
+              placeholder="github-username"
+              style={inputStyle}
+              onKeyDown={e => e.key === 'Enter' && addGithubRow()}
+            />
+            <span style={{ color: 'var(--muted)', fontSize: 13, flexShrink: 0 }}>→</span>
+            <input
+              value={githubNewRow.engineer_name}
+              onChange={e => setGithubNewRow(p => ({ ...p, engineer_name: e.target.value }))}
+              placeholder="Engineer Name"
+              style={inputStyle}
+              onKeyDown={e => e.key === 'Enter' && addGithubRow()}
+            />
+            <button className="btn btn-primary" style={{ padding: '3px 12px', fontSize: 12, flexShrink: 0 }} onClick={addGithubRow}>+ Add</button>
+          </div>
+        </div>
+
+        <div style={{ borderTop: '1px solid var(--border)', paddingTop: 14, display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 12 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+            <button
+              className="btn"
+              style={{ background: 'rgba(63,185,80,0.12)', color: '#3fb950', border: '1px solid rgba(63,185,80,0.3)', padding: '6px 14px' }}
+              onClick={handleGithubSync}
+              disabled={githubSyncing}
+            >
+              {githubSyncing ? <span className="spinner" /> : '⟳ Sync Now'}
+            </button>
+            {githubSyncResult && (
+              <span style={{ fontSize: 12, color: githubSyncResult.ok ? 'var(--success)' : 'var(--danger)' }}>
+                {githubSyncResult.ok ? '✓ ' : '✕ '}{githubSyncResult.msg}
+              </span>
+            )}
+          </div>
+          {githubLastSync && githubLastSync.status !== 'never' && (
+            <div style={{ fontSize: 12, color: 'var(--muted)', display: 'flex', alignItems: 'center', gap: 6 }}>
+              <span style={{
+                width: 7, height: 7, borderRadius: '50%',
+                background: githubLastSync.status === 'success' ? 'var(--success)' : githubLastSync.status === 'error' ? 'var(--danger)' : 'var(--muted)',
+                display: 'inline-block', flexShrink: 0,
+              }} />
+              Last synced: {new Date(githubLastSync.timestamp).toLocaleString()} · {githubLastSync.records_updated} record(s)
+              {githubLastSync.status === 'error' && (
+                <span style={{ color: 'var(--danger)', marginLeft: 4 }}>— {githubLastSync.error}</span>
+              )}
+            </div>
+          )}
+          <button className="btn btn-primary" onClick={handleGithubSave}>{githubSaved ? '✓ Saved' : 'Save'}</button>
+        </div>
       </div>
     </div>
   )

@@ -264,6 +264,9 @@ def seed_data():
 
     cfg = [
         ("github_token", ""),
+        ("github_org", "homealliance"),
+        ("github_repos", "apollo,callcenter-admin,crm-apollo,techapp"),
+        ("github_username_map", "{}"),
         ("jira_token", ""),
         ("jira_domain", ""),
         ("jira_email", ""),
@@ -1603,6 +1606,9 @@ def get_config():
 
 class ConfigUpdate(BaseModel):
     github_token: Optional[str] = None
+    github_org: Optional[str] = None
+    github_repos: Optional[str] = None
+    github_username_map: Optional[str] = None
     jira_token: Optional[str] = None
     jira_domain: Optional[str] = None
     jira_email: Optional[str] = None
