@@ -415,17 +415,26 @@ ANTHROPIC_BASE = "https://api.anthropic.com"
 AI_CACHE_TTL = 3600  # seconds
 
 
-def _anthropic_get(path: str, admin_key: str) -> dict:
-    req = urllib.request.Request(
-        ANTHROPIC_BASE + path,
-        headers={
-            "anthropic-version": "2023-06-01",
-            "x-api-key": admin_key,
-            "anthropic-beta": "usage-2025-01",
-        },
-    )
-    with urllib.request.urlopen(req, timeout=15) as resp:
-        return json_lib.loads(resp.read())
+def _anthropic_get(path: str, admin_key: str, usage_beta: bool = True) -> dict:
+    url = ANTHROPIC_BASE + path
+    headers = {
+        "anthropic-version": "2023-06-01",
+        "x-api-key": admin_key,
+    }
+    if usage_beta:
+        headers["anthropic-beta"] = "usage-2025-01"
+    req = urllib.request.Request(url, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            return json_lib.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        body = ""
+        try:
+            body = e.read().decode("utf-8", errors="replace")
+        except Exception:
+            pass
+        print(f"[Anthropic API] {e.code} GET {url} — {body}")
+        raise
 
 
 def _mock_ai_usage(conn) -> dict:
@@ -485,35 +494,66 @@ def _live_ai_usage(admin_key: str, conn) -> dict:
     start = end - timedelta(days=30)
     qs = f"?start_date={start.strftime('%Y-%m-%d')}&end_date={end.strftime('%Y-%m-%d')}"
 
-    ws_data = _anthropic_get(f"/v1/usage/workspaces{qs}", admin_key)
-    user_data = _anthropic_get(f"/v1/usage/workspaces/users{qs}", admin_key)
+    # Fetch all pages from the correct organizations/usage endpoint
+    all_items: list = []
+    last_id = None
+    while True:
+        url = f"/v1/organizations/usage{qs}"
+        if last_id:
+            url += f"&starting_after={last_id}"
+        data = _anthropic_get(url, admin_key)
+        items = data.get("data", [])
+        all_items.extend(items)
+        if not data.get("has_more") or not items:
+            break
+        last_id = items[-1].get("id") or items[-1].get("api_key_id")
+        if not last_id:
+            break
+
+    # Load key → engineer mapping from DB
+    c = conn.cursor()
+    c.execute("SELECT anthropic_key_id, engineer_id FROM api_key_mapping")
+    key_to_eng = {r["anthropic_key_id"]: r["engineer_id"] for r in c.fetchall()}
+    c.execute("SELECT id, name, stream FROM team_members")
+    eng_info = {r["id"]: dict(r) for r in c.fetchall()}
 
     day_map: dict = {}
+    user_map: dict = {}
     total_tokens = 0
-    for item in ws_data.get("data", []):
-        date = (item.get("created_at") or item.get("date") or "")[:10]
-        tok = item.get("input_tokens", 0) + item.get("output_tokens", 0)
-        day_map[date] = day_map.get(date, 0) + tok
+
+    for item in all_items:
+        key_id = item.get("api_key_id", "")
+        date_str = (item.get("date") or item.get("timestamp") or item.get("created_at") or "")[:10]
+        input_tok  = item.get("input_tokens", 0)
+        output_tok = item.get("output_tokens", 0)
+        tok = input_tok + output_tok
         total_tokens += tok
+        if date_str:
+            day_map[date_str] = day_map.get(date_str, 0) + tok
+        eng_id = key_to_eng.get(key_id)
+        if eng_id:
+            if eng_id not in user_map:
+                user_map[eng_id] = {"input_tokens": 0, "output_tokens": 0, "tokens": 0}
+            user_map[eng_id]["input_tokens"]  += input_tok
+            user_map[eng_id]["output_tokens"] += output_tok
+            user_map[eng_id]["tokens"]        += tok
 
     tokens_per_day = [{"date": k, "tokens": v} for k, v in sorted(day_map.items())]
 
     tokens_per_user = []
-    for item in user_data.get("data", []):
-        name = item.get("user_email") or item.get("user_id") or "Unknown"
-        tok = item.get("input_tokens", 0) + item.get("output_tokens", 0)
+    for eng_id, d in user_map.items():
+        info = eng_info.get(eng_id, {})
+        name = info.get("name", f"Engineer {eng_id}")
         tokens_per_user.append({
-            "name": name.split("@")[0],
-            "full_name": name,
-            "member_id": None,
-            "stream": None,
-            "tokens": tok,
-            "input_tokens": item.get("input_tokens", 0),
-            "output_tokens": item.get("output_tokens", 0),
+            "name": name, "full_name": name,
+            "member_id": eng_id, "stream": info.get("stream"),
+            "tokens": d["tokens"],
+            "input_tokens": d["input_tokens"],
+            "output_tokens": d["output_tokens"],
         })
     tokens_per_user.sort(key=lambda x: x["tokens"], reverse=True)
 
-    # Derive weekly data from daily totals + proportional user distribution
+    # Derive weekly data from daily totals + proportional per-engineer distribution
     week_map: dict = {}
     for d in tokens_per_day:
         try:
@@ -746,7 +786,7 @@ def _do_ai_usage_sync(conn) -> tuple:
     all_items: list = []
     last_id = None
     while True:
-        url = f"/v1/usage{qs}"
+        url = f"/v1/organizations/usage{qs}"
         if last_id:
             url += f"&starting_after={last_id}"
         data = _anthropic_get(url, admin_key)
@@ -2238,11 +2278,10 @@ def test_ai_connection(password: str = ""):
     if not admin_key:
         raise HTTPException(400, "Anthropic Admin API key not configured")
     try:
-        today = datetime.utcnow().strftime("%Y-%m-%d")
-        _anthropic_get(f"/v1/usage?start_date={today}&end_date={today}", admin_key)
+        _anthropic_get("/v1/organizations/api_keys", admin_key, usage_beta=False)
         return {"ok": True, "message": "Connection successful"}
     except urllib.error.HTTPError as e:
-        raise HTTPException(e.code, f"Anthropic API error {e.code}")
+        raise HTTPException(e.code, f"Anthropic API error {e.code}: check your Admin API key")
     except Exception as e:
         raise HTTPException(500, str(e))
 
