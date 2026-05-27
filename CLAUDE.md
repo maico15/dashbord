@@ -164,3 +164,6 @@ These are merged into the saved config on every startup as defaults (saved value
 - `seed_data()` only runs when `team_members` is empty — safe across restarts
 - On Render (ephemeral filesystem), set `DB_PATH` to a persistent disk mount to survive deploys
 - `DELETE /api/metrics/mock?password=...` clears all metric rows from weeks before the current week
+
+## PR Workflow
+All changes must go through pull requests.
