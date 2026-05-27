@@ -292,7 +292,7 @@ def seed_data():
         ("github_token",        os.environ.get("GITHUB_TOKEN", "")),
         ("github_org",          "homealliance"),
         ("github_repos",        "apollo,callcenter-admin,crm-apollo,techapp,callcenter-server,callcenter-flex,maico15/dashbord"),
-        ("github_username_map", '{"DroonPog":"Andrey Pogrebnyak","KlimMalgin":"Andrey Brunetkin"}'),
+        ("github_username_map", '{"DroonPog":"Andrey Pogrebnyak","KlimMalgin":"Andrey Brunetkin","maico15":"Aleksandr Malyshev"}'),
         ("jira_token",          ""),
         ("jira_domain",         ""),
         ("jira_email",          ""),
@@ -1304,6 +1304,7 @@ def _do_github_sync(conn) -> tuple:
         if not isinstance(pulls, list):
             continue
 
+        print(f"[GitHub sync] {owner_repo}: fetched {len(pulls)} closed PR(s)")
         for pr in pulls:
             merged_at = pr.get("merged_at")
             if not merged_at:
@@ -1312,17 +1313,19 @@ def _do_github_sync(conn) -> tuple:
                 merged_date = datetime.fromisoformat(merged_at.rstrip("Z")).date()
             except Exception:
                 continue
-            if not (week_monday <= merged_date <= week_sunday):
-                continue
             login = (pr.get("user") or {}).get("login", "")
-            if login:
+            in_week = week_monday <= merged_date <= week_sunday
+            print(f"[GitHub sync]   PR #{pr.get('number')} by {login!r} merged {merged_date} — {'IN WEEK' if in_week else 'skip'}")
+            if in_week and login:
                 pr_counts[login] = pr_counts.get(login, 0) + 1
                 total_prs += 1
 
+    print(f"[GitHub sync] PR counts by login: {pr_counts}")
     # Map logins → engineers and write to dev_metrics
     records_updated = 0
     for login, count in pr_counts.items():
         eng_name = username_map.get(login)
+        print(f"[GitHub sync] {login!r} → engineer {eng_name!r} ({count} PR(s))")
         if not eng_name:
             continue
         c.execute("SELECT id FROM team_members WHERE name=?", (eng_name,))
