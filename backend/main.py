@@ -489,20 +489,27 @@ def _live_ai_usage(admin_key: str, conn) -> dict:
     c.execute("SELECT id, name, stream FROM team_members")
     eng_info = {r["id"]: dict(r) for r in c.fetchall()}
 
-    # Fetch all pages (token-based pagination via next_page)
+    # Fetch all pages — next_page decodes to next starting_at, not a query param
+    end_str   = end.strftime('%Y-%m-%dT23:59:59Z')
+    start_str = start.strftime('%Y-%m-%dT00:00:00Z')
     all_buckets: list = []
-    next_page = None
     while True:
-        url = f"/v1/organizations/usage_report/messages{qs}"
-        if next_page:
-            url += f"&next_page={next_page}"
+        url = (
+            f"/v1/organizations/usage_report/messages"
+            f"?starting_at={start_str}&ending_at={end_str}"
+            f"&bucket_width=1d&group_by[]=api_key_id"
+        )
         data = _anthropic_get(url, admin_key, usage_beta=False)
-        buckets = data.get("data", [])
-        all_buckets.extend(buckets)
+        all_buckets.extend(data.get("data", []))
         if not data.get("has_more"):
             break
-        next_page = data.get("next_page")
-        if not next_page:
+        token = data.get("next_page", "")
+        if not token:
+            break
+        try:
+            b64 = token.replace("page_", "", 1) + "=="
+            start_str = base64.b64decode(b64).decode()
+        except Exception:
             break
 
     day_map: dict = {}
@@ -769,26 +776,28 @@ def _do_ai_usage_sync(conn) -> tuple:
 
     end_dt = datetime.utcnow()
     start_dt = end_dt - timedelta(days=30)
-    qs = (
-        f"?starting_at={start_dt.strftime('%Y-%m-%dT00:00:00Z')}"
-        f"&ending_at={end_dt.strftime('%Y-%m-%dT23:59:59Z')}"
-        f"&bucket_width=1d&group_by[]=api_key_id"
-    )
 
-    # Fetch all pages (token-based pagination via next_page)
+    # Fetch all pages — next_page decodes to next starting_at, not a query param
+    end_str   = end_dt.strftime('%Y-%m-%dT23:59:59Z')
+    start_str = start_dt.strftime('%Y-%m-%dT00:00:00Z')
     all_buckets: list = []
-    next_page = None
     while True:
-        url = f"/v1/organizations/usage_report/messages{qs}"
-        if next_page:
-            url += f"&next_page={next_page}"
+        url = (
+            f"/v1/organizations/usage_report/messages"
+            f"?starting_at={start_str}&ending_at={end_str}"
+            f"&bucket_width=1d&group_by[]=api_key_id"
+        )
         data = _anthropic_get(url, admin_key, usage_beta=False)
-        buckets = data.get("data", [])
-        all_buckets.extend(buckets)
+        all_buckets.extend(data.get("data", []))
         if not data.get("has_more"):
             break
-        next_page = data.get("next_page")
-        if not next_page:
+        token = data.get("next_page", "")
+        if not token:
+            break
+        try:
+            b64 = token.replace("page_", "", 1) + "=="
+            start_str = base64.b64decode(b64).decode()
+        except Exception:
             break
 
     # Aggregate by (engineer_id, date) — response is bucketed: data[].results[]
