@@ -1,3 +1,4 @@
+import os
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
@@ -307,6 +308,14 @@ def seed_data():
     ]
     c.executemany("INSERT OR IGNORE INTO config (key,value) VALUES (?,?)", cfg)
     conn.commit()
+    # Seed anthropic_admin_key from env if the stored value is still empty
+    _env_key = os.environ.get("ANTHROPIC_ADMIN_KEY", "")
+    if _env_key:
+        c.execute(
+            "UPDATE config SET value=? WHERE key='anthropic_admin_key' AND (value IS NULL OR value='')",
+            (_env_key,),
+        )
+        conn.commit()
     # Migration: add message column to sync_log if missing
     try:
         c.execute("ALTER TABLE sync_log ADD COLUMN message TEXT DEFAULT NULL")
