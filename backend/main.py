@@ -38,6 +38,30 @@ def _load_password():
 scheduler = BackgroundScheduler(timezone="UTC")
 
 
+def _ensure_github_username_map():
+    """Merge required logins into github_username_map without overwriting other entries."""
+    required = {
+        "DroonPog":  "Andrey Pogrebnyak",
+        "KlimMalgin": "Andrey Brunetkin",
+        "maico15":   "Aleksandr Malyshev",
+    }
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT value FROM config WHERE key='github_username_map'")
+    row = c.fetchone()
+    try:
+        current = json_lib.loads(row["value"] if row else "{}")
+    except Exception:
+        current = {}
+    merged = {**required, **current}   # required fills gaps; saved overrides win
+    c.execute(
+        "INSERT OR REPLACE INTO config (key, value) VALUES ('github_username_map', ?)",
+        (json_lib.dumps(merged),),
+    )
+    conn.commit()
+    conn.close()
+
+
 @asynccontextmanager
 async def lifespan(app):
     init_db()
@@ -48,10 +72,13 @@ async def lifespan(app):
     if count == 0:
         seed_data()
     _load_password()
-    scheduler.add_job(_run_jira_sync,        'cron', hour=2,  minute=0,  id='jira_daily_sync',    replace_existing=True)
-    scheduler.add_job(_run_slack_reports_sync,'cron', hour=20, minute=0,  id='slack_reports_sync', replace_existing=True)
-    scheduler.add_job(_run_ai_usage_sync,    'cron', hour=2,  minute=30, id='ai_usage_daily_sync', replace_existing=True)
+    _ensure_github_username_map()
+    scheduler.add_job(_run_jira_sync,        'cron',     hour=2,  minute=0,  id='jira_daily_sync',    replace_existing=True)
+    scheduler.add_job(_run_slack_reports_sync,'cron',     hour=20, minute=0,  id='slack_reports_sync', replace_existing=True)
+    scheduler.add_job(_run_ai_usage_sync,    'cron',     hour=2,  minute=30, id='ai_usage_daily_sync', replace_existing=True)
+    scheduler.add_job(_run_github_sync,      'interval', minutes=15,          id='github_interval_sync', replace_existing=True)
     scheduler.start()
+    _run_github_sync()   # immediate run on startup
     yield
     scheduler.shutdown(wait=False)
 
