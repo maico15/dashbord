@@ -2171,7 +2171,7 @@ def admin_update_metrics(stream: str, week: int, member_id: int, data: MetricUpd
 
 
 @app.delete("/api/metrics/mock")
-def delete_mock_metrics(password: str = ""):
+def delete_mock_metrics(password: str = "", include_current: bool = False):
     if password != ADMIN_PASSWORD:
         raise HTTPException(403, "Unauthorized")
     conn = get_db()
@@ -2179,14 +2179,18 @@ def delete_mock_metrics(password: str = ""):
     c = conn.cursor()
     deleted = 0
     for table in ("dev_metrics", "support_metrics", "docs_metrics"):
-        c.execute(
-            f"DELETE FROM {table} WHERE year < ? OR (year = ? AND week < ?)",
-            (year, year, week),
-        )
+        if include_current:
+            c.execute(f"DELETE FROM {table}")
+        else:
+            c.execute(
+                f"DELETE FROM {table} WHERE year < ? OR (year = ? AND week < ?)",
+                (year, year, week),
+            )
         deleted += c.rowcount
     conn.commit()
     conn.close()
-    return {"ok": True, "deleted_rows": deleted, "kept_week": week, "kept_year": year}
+    kept = None if include_current else {"week": week, "year": year}
+    return {"ok": True, "deleted_rows": deleted, "kept": kept}
 
 
 # ── AI Usage routes ────────────────────────────────────────────────────────────
