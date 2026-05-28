@@ -1648,6 +1648,289 @@ def _do_github_sync(conn) -> tuple:
     return records_updated, msg
 
 
+def _do_github_backfill(conn, weeks: int = 8) -> tuple:
+    """Fetch the last `weeks` ISO weeks of PRs and commits from GitHub and
+    back-fill commit_log, pr_log, and dev_metrics.  Idempotent — skips
+    records that already exist (UNIQUE constraints)."""
+    c = conn.cursor()
+    c.execute(
+        "SELECT key, value FROM config WHERE key IN "
+        "('github_token','github_org','github_repos','github_username_map')"
+    )
+    cfg = {r["key"]: r["value"] for r in c.fetchall()}
+    token = (cfg.get("github_token") or "").strip()
+    org   = (cfg.get("github_org")   or "homealliance").strip()
+    repos = [r.strip() for r in (cfg.get("github_repos") or "").split(",") if r.strip()]
+    try:
+        username_map = json_lib.loads(cfg.get("github_username_map") or "{}")
+    except Exception:
+        username_map = {}
+
+    if not token:
+        raise ValueError("GitHub token not configured")
+    if not repos:
+        raise ValueError("No repositories configured")
+
+    def gh_get(url):
+        req = urllib.request.Request(url, headers={
+            "Authorization": f"token {token}",
+            "Accept": "application/vnd.github.v3+json",
+            "User-Agent": "dashboard-sync/1.0",
+        })
+        try:
+            with urllib.request.urlopen(req, timeout=20) as resp:
+                return json_lib.loads(resp.read())
+        except urllib.error.HTTPError as e:
+            raise ValueError(f"GitHub API error {e.code}: {e.reason}")
+        except Exception as e:
+            raise ValueError(f"Request failed: {e}")
+
+    # --- Date range ---
+    cur_week, cur_year = current_week_year(conn)
+    jan4 = datetime(cur_year, 1, 4).date()
+    week1_monday = jan4 - timedelta(days=jan4.weekday())
+    cur_monday   = week1_monday + timedelta(weeks=cur_week - 1)
+    cur_sunday   = cur_monday + timedelta(days=6)
+
+    # Start N weeks back (handle year wrap)
+    start_week = cur_week - weeks + 1
+    start_year = cur_year
+    if start_week < 1:
+        start_week += 52
+        start_year -= 1
+    sjan4 = datetime(start_year, 1, 4).date()
+    sweek1_monday = sjan4 - timedelta(days=sjan4.weekday())
+    range_start  = sweek1_monday + timedelta(weeks=start_week - 1)
+    range_end    = cur_sunday
+
+    since_iso = f"{range_start.isoformat()}T00:00:00Z"
+    until_iso = f"{range_end.isoformat()}T23:59:59Z"
+    print(f"[backfill] range {range_start} → {range_end} ({weeks} weeks)")
+
+    # --- Login → member_id maps ---
+    login_to_member: dict = {}
+    for login, eng_name in username_map.items():
+        c.execute("SELECT id FROM team_members WHERE name=?", (eng_name,))
+        row = c.fetchone()
+        if row:
+            login_to_member[login] = row["id"]
+    login_to_member_ci = {k.lower(): v for k, v in login_to_member.items()}
+    login_canonical    = {k.lower(): k for k in login_to_member}
+    name_to_login      = {
+        eng.lower(): login
+        for login, eng in username_map.items()
+        if login in login_to_member
+    }
+
+    def resolve_login(entry: dict) -> str:
+        """Return canonical username_map login for a commit entry, or ''."""
+        gh = ((entry.get("author")    or {}).get("login") or "").strip()
+        if gh and login_canonical.get(gh.lower()):
+            return login_canonical[gh.lower()]
+        gh = ((entry.get("committer") or {}).get("login") or "").strip()
+        if gh and login_canonical.get(gh.lower()):
+            return login_canonical[gh.lower()]
+        cmt = entry.get("commit") or {}
+        name = ((cmt.get("author") or {}).get("name") or "").strip()
+        if name and login_canonical.get(name.lower()):
+            return login_canonical[name.lower()]
+        if name and name_to_login.get(name.lower()):
+            return name_to_login[name.lower()]
+        # Co-authored-by trailers
+        message = cmt.get("message") or ""
+        for m in re.finditer(r"(?im)^co-authored-by:\s*(.+?)\s*<([^>]+)>", message):
+            co_name = m.group(1).strip()
+            co_email = m.group(2).strip()
+            if co_name and login_canonical.get(co_name.lower()):
+                return login_canonical[co_name.lower()]
+            if co_name and name_to_login.get(co_name.lower()):
+                return name_to_login[co_name.lower()]
+            local = co_email.split("@")[0].lower() if "@" in co_email else ""
+            if local and login_canonical.get(local):
+                return login_canonical[local]
+        return ""
+
+    pr_inserted     = 0
+    commit_inserted = 0
+    affected: set   = set()  # (member_id, week, year)
+
+    for repo in repos:
+        owner_repo = repo if "/" in repo else f"{org}/{repo}"
+        print(f"[backfill] processing {owner_repo}")
+
+        # ── PRs ──────────────────────────────────────────────────────────────
+        in_range_prs = []  # (owner_repo, pr_num, title, body, merged_at_str, login)
+        page = 1
+        while True:
+            url = (f"https://api.github.com/repos/{owner_repo}/pulls"
+                   f"?state=closed&per_page=100&page={page}")
+            try:
+                page_data = gh_get(url)
+            except ValueError as e:
+                print(f"[backfill] {owner_repo} pulls error: {e}")
+                break
+            if not isinstance(page_data, list) or not page_data:
+                break
+            stop = False
+            for pr in page_data:
+                merged_at = pr.get("merged_at")
+                if not merged_at:
+                    continue
+                try:
+                    merged_date = datetime.fromisoformat(merged_at.rstrip("Z")).date()
+                except Exception:
+                    continue
+                if merged_date < range_start:
+                    stop = True
+                    break
+                if merged_date > range_end:
+                    continue
+                login = (pr.get("user") or {}).get("login", "")
+                if login:
+                    in_range_prs.append((
+                        owner_repo, pr.get("number"),
+                        pr.get("title") or "", pr.get("body") or "",
+                        merged_at, login,
+                    ))
+            if stop or len(page_data) < 100:
+                break
+            page += 1
+
+        print(f"[backfill] {owner_repo}: {len(in_range_prs)} PR(s) in range")
+        for owner_repo_pr, pr_num, title, body, merged_at_str, login in in_range_prs:
+            member_id = login_to_member.get(login)
+            if not member_id:
+                continue
+            merged_date = datetime.fromisoformat(merged_at_str.rstrip("Z")).date()
+            iso = merged_date.isocalendar()
+            pr_week, pr_year = iso[1], iso[0]
+            try:
+                detail = gh_get(
+                    f"https://api.github.com/repos/{owner_repo_pr}/pulls/{pr_num}"
+                )
+                additions     = detail.get("additions",     0)
+                deletions     = detail.get("deletions",     0)
+                changed_files = detail.get("changed_files", 0)
+            except Exception as e:
+                print(f"[backfill] PR #{pr_num} detail error: {e}")
+                additions = deletions = changed_files = 0
+            try:
+                cdata = gh_get(
+                    f"https://api.github.com/repos/{owner_repo_pr}"
+                    f"/pulls/{pr_num}/commits?per_page=100"
+                )
+                commits_list = [
+                    {
+                        "sha": (e.get("sha") or "")[:7],
+                        "message": ((e.get("commit") or {}).get("message") or "").split("\n")[0].strip(),
+                    }
+                    for e in (cdata if isinstance(cdata, list) else [])
+                ]
+            except Exception:
+                commits_list = []
+            try:
+                c.execute(
+                    "INSERT OR IGNORE INTO pr_log "
+                    "(member_id, week, year, repo, pr_number, title, body, "
+                    "additions, deletions, changed_files, merged_at, commits) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (member_id, pr_week, pr_year, owner_repo_pr, pr_num,
+                     title, body, additions, deletions, changed_files,
+                     merged_at_str, json_lib.dumps(commits_list)),
+                )
+                if c.rowcount != 0:
+                    pr_inserted += 1
+            except Exception as ex:
+                print(f"[backfill] pr_log insert PR #{pr_num}: {ex}")
+            affected.add((member_id, pr_week, pr_year))
+
+        # ── Commits ───────────────────────────────────────────────────────────
+        page = 1
+        while True:
+            qs = urllib.parse.urlencode({
+                "since": since_iso, "until": until_iso,
+                "per_page": 100, "page": page,
+            })
+            url = f"https://api.github.com/repos/{owner_repo}/commits?{qs}"
+            try:
+                page_data = gh_get(url)
+            except ValueError as e:
+                print(f"[backfill] {owner_repo} commits error: {e}")
+                break
+            if not isinstance(page_data, list) or not page_data:
+                break
+            for entry in page_data:
+                canonical = resolve_login(entry)
+                if not canonical:
+                    continue
+                member_id = login_to_member_ci.get(canonical.lower())
+                if not member_id:
+                    continue
+                cmt          = entry.get("commit") or {}
+                committed_at = (cmt.get("committer") or {}).get("date") or ""
+                sha          = entry.get("sha") or ""
+                msg          = (cmt.get("message") or "").strip()
+                if not sha or not committed_at:
+                    continue
+                try:
+                    iso = datetime.fromisoformat(
+                        committed_at.rstrip("Z")
+                    ).date().isocalendar()
+                    c_week, c_year = iso[1], iso[0]
+                except Exception:
+                    continue
+                try:
+                    c.execute(
+                        "INSERT OR IGNORE INTO commit_log "
+                        "(member_id, week, year, repo, sha, message, committed_at) "
+                        "VALUES (?,?,?,?,?,?,?)",
+                        (member_id, c_week, c_year, owner_repo, sha, msg, committed_at),
+                    )
+                    if c.rowcount != 0:
+                        commit_inserted += 1
+                except Exception as ex:
+                    print(f"[backfill] commit_log {sha[:7]}: {ex}")
+                affected.add((member_id, c_week, c_year))
+            if len(page_data) < 100:
+                break
+            page += 1
+
+    # ── Rebuild dev_metrics from actual table counts ───────────────────────────
+    records_updated = 0
+    for member_id, w, y in sorted(affected):
+        c.execute("SELECT COUNT(*) FROM commit_log WHERE member_id=? AND week=? AND year=?",
+                  (member_id, w, y))
+        commit_count = (c.fetchone() or [0])[0]
+        c.execute("SELECT COUNT(*) FROM pr_log WHERE member_id=? AND week=? AND year=?",
+                  (member_id, w, y))
+        pr_count = (c.fetchone() or [0])[0]
+        c.execute("SELECT id FROM dev_metrics WHERE member_id=? AND week=? AND year=?",
+                  (member_id, w, y))
+        if c.fetchone():
+            c.execute(
+                "UPDATE dev_metrics SET prs_merged=?, commits_count=? "
+                "WHERE member_id=? AND week=? AND year=?",
+                (pr_count, commit_count, member_id, w, y),
+            )
+        else:
+            c.execute(
+                "INSERT INTO dev_metrics "
+                "(member_id, week, year, prs_merged, tickets_closed, "
+                "cycle_time_days, features_completed, deploys, commits_count) "
+                "VALUES (?,?,?,?,0,0.0,0,0,?)",
+                (member_id, w, y, pr_count, commit_count),
+            )
+        records_updated += 1
+
+    conn.commit()
+    msg = (
+        f"Backfill complete: {pr_inserted} PR(s) + {commit_inserted} commit(s) inserted "
+        f"→ {records_updated} engineer-week(s) updated across {weeks} week(s)"
+    )
+    print(f"[backfill] {msg}")
+    return records_updated, msg
+
+
 def _run_github_sync() -> dict:
     conn = get_db()
     try:
@@ -3466,6 +3749,38 @@ def sync_github(password: str = ""):
             raise HTTPException(404, err)
         raise HTTPException(500, err)
     return result
+
+
+@app.post("/api/sync/github/backfill")
+def github_backfill(weeks: int = 8, password: str = ""):
+    """Back-fill the last N ISO weeks of GitHub commits and PRs.
+    Idempotent — safe to run multiple times."""
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    conn = get_db()
+    try:
+        records, msg = _do_github_backfill(conn, weeks=weeks)
+        conn.execute(
+            "INSERT INTO sync_log (service, timestamp, status, records_updated, message) "
+            "VALUES (?,?,?,?,?)",
+            ("github_backfill", datetime.utcnow().isoformat(), "success", records, msg),
+        )
+        conn.commit()
+        return {"status": "success", "records_updated": records, "message": msg}
+    except Exception as exc:
+        err = str(exc)
+        try:
+            conn.execute(
+                "INSERT INTO sync_log (service, timestamp, status, records_updated, error, message) "
+                "VALUES (?,?,?,?,?,?)",
+                ("github_backfill", datetime.utcnow().isoformat(), "error", 0, err, err),
+            )
+            conn.commit()
+        except Exception:
+            pass
+        return {"status": "error", "error": err, "message": err}
+    finally:
+        conn.close()
 
 
 @app.get("/api/sync/github/status")

@@ -1382,6 +1382,25 @@ function IntegrationsSection({ pw }) {
     }
   }
 
+  const [backfilling,    setBackfilling]    = useState(false)
+  const [backfillResult, setBackfillResult] = useState(null)
+
+  const handleBackfill = async () => {
+    if (!confirm('Fetch last 8 weeks of commits and PRs from GitHub? This may take 1–2 minutes.')) return
+    setBackfilling(true)
+    setBackfillResult(null)
+    try {
+      const res = await api.post(`/sync/github/backfill?weeks=8&password=${encodeURIComponent(pw)}`, {})
+      setBackfillResult({ ok: res.status === 'success', msg: res.message })
+      setGithubLogTrigger(t => t + 1)
+    } catch (e) {
+      let msg = e.message; try { msg = JSON.parse(msg).detail || msg } catch {}
+      setBackfillResult({ ok: false, msg })
+    } finally {
+      setBackfilling(false)
+    }
+  }
+
   const statusDot = lastSync?.status === 'success'
     ? 'var(--success)'
     : lastSync?.status === 'error'
@@ -1671,9 +1690,22 @@ function IntegrationsSection({ pw }) {
             >
               {githubSyncing ? <span className="spinner" /> : '⟳ Sync Now'}
             </button>
+            <button
+              className="btn"
+              style={{ background: 'rgba(63,185,80,0.08)', color: '#3fb950', border: '1px solid rgba(63,185,80,0.25)', padding: '6px 14px' }}
+              onClick={handleBackfill}
+              disabled={backfilling}
+            >
+              {backfilling ? <span className="spinner" /> : '⏪ Backfill history'}
+            </button>
             {githubSyncResult && (
               <span style={{ fontSize: 12, color: githubSyncResult.ok ? 'var(--success)' : 'var(--danger)' }}>
                 {githubSyncResult.ok ? '✓ ' : '✕ '}{githubSyncResult.msg}
+              </span>
+            )}
+            {backfillResult && (
+              <span style={{ fontSize: 12, color: backfillResult.ok ? 'var(--success)' : 'var(--danger)' }}>
+                {backfillResult.ok ? '✓ ' : '✕ '}{backfillResult.msg}
               </span>
             )}
           </div>
