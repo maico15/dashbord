@@ -31,7 +31,7 @@ function DevTab({ data }) {
           value={totals.avg_pr_size > 0 ? `+${totals.avg_pr_size} lines avg` : '—'}
           sub="additions + deletions"
           accent={totals.avg_pr_size < 400 ? 'success' : 'warning'}
-          tooltip="Average lines changed (additions + deletions) per merged PR this week. Smaller PRs are easier to review."
+          tooltip={"< 100 lines — excellent, easy to review\n100–300 lines — good, normal working size\n300–600 lines — acceptable, harder to review\n600+ lines — too large, consider splitting tasks\n\nNote: auto-generated code (e.g. Lovable) may inflate this metric."}
         />
       </div>
 

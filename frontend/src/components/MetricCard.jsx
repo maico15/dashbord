@@ -5,7 +5,7 @@ export default function MetricCard({ label, value, sub, accent = 'accent1', tool
   const timer = useRef(null)
 
   function handleEnter() {
-    timer.current = setTimeout(() => setVisible(true), 5000)
+    timer.current = setTimeout(() => setVisible(true), 400)
   }
 
   function handleLeave() {
@@ -36,9 +36,9 @@ export default function MetricCard({ label, value, sub, accent = 'accent1', tool
           width: 'max-content',
           zIndex: 100,
           animation: 'tooltip-fade 0.2s ease',
-          lineHeight: 1.5,
+          lineHeight: 1.7,
           pointerEvents: 'none',
-          whiteSpace: 'normal',
+          whiteSpace: 'pre-line',
           textAlign: 'left',
         }}>
           {tooltip}
@@ -55,7 +55,17 @@ export default function MetricCard({ label, value, sub, accent = 'accent1', tool
           }} />
         </div>
       )}
-      <div className="label">{label}</div>
+      <div className="label">
+        {label}
+        {tooltip && (
+          <span style={{
+            marginLeft: 5, fontSize: 11, opacity: 0.5,
+            cursor: 'default', userSelect: 'none',
+          }}>
+            ℹ
+          </span>
+        )}
+      </div>
       <div className="value">{value ?? '—'}</div>
       {sub && <div className="sub">{sub}</div>}
     </div>
