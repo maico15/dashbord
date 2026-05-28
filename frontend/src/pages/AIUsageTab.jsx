@@ -69,7 +69,7 @@ function TokensConsumptionChart({ tokensPerWeek, tokensPerUser, engineers }) {
       tension: 0.3,
       hidden: !active.has('team'),
     },
-    ...ENGINEERS.map(e => ({
+    ...(engineers || []).map(e => ({
       label: e.name,
       data: weeks.map(d => Math.round((d[e.name] || 0) / 1000)),
       borderColor: e.color,
@@ -130,7 +130,7 @@ function TokensConsumptionChart({ tokensPerWeek, tokensPerUser, engineers }) {
       color: AI_COLOR,
       tokens: (tokensPerUser || []).reduce((s, u) => s + u.tokens, 0),
     },
-    ...ENGINEERS.map(e => ({
+    ...(engineers || []).map(e => ({
       key: e.name,
       label: e.name,
       initials: e.initials,
@@ -314,12 +314,12 @@ export default function AIUsageTab({ data }) {
       <div className="metric-grid" style={{ marginTop: 20 }}>
         <AICard
           label="Total tokens this month"
-          value={fmt(total_tokens)}
+          value={fmt(total_tokens ?? 0)}
           sub="input + output"
         />
         <AICard
           label="Estimated cost"
-          value={`$${total_cost_usd?.toFixed(2)}`}
+          value={total_cost_usd != null ? `$${total_cost_usd.toFixed(2)}` : '—'}
           sub="$0.003 per 1K tokens"
           color="#00cfff"
         />
