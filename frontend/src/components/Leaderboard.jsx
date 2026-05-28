@@ -27,15 +27,14 @@ function Avatar({ name, color }) {
 function BreakdownText({ breakdown, stream }) {
   if (!breakdown || Object.keys(breakdown).length === 0) return <span style={{ color: 'var(--muted)' }}>—</span>
   const labels = {
-    pr_merged: 'PRs',
-    ticket_closed: 'Tickets',
-    fast_cycle: 'Fast',
-    incident_resolved: 'Resolved',
-    fast_resolve: 'Quick',
-    sla_breached: 'SLA↓',
-    doc_created: 'Created',
-    doc_updated: 'Updated',
-    no_docs_penalty: 'NoDocs',
+    pr_merged:        'PRs',
+    commit:           'Commits',
+    incident_resolved:'Resolved',
+    fast_resolve:     'Quick',
+    sla_breached:     'SLA↓',
+    doc_created:      'Created',
+    doc_updated:      'Updated',
+    no_docs_penalty:  'NoDocs',
   }
   return (
     <div className="lb-breakdown">

@@ -40,6 +40,7 @@ function DevTab() {
   const [week, setWeek] = useState(null)
   const [year, setYear] = useState(null)
   const [data, setData] = useState(null)
+  const [error, setError] = useState(null)
 
   useEffect(() => {
     api.get('/overview').then(d => {
@@ -51,10 +52,18 @@ function DevTab() {
     })
   }, [])
 
+  const fetchData = (w, y) => {
+    setData(null)
+    setError(null)
+    api.get(`/metrics/dev?week=${w}&year=${y}`).then(setData).catch(e => {
+      console.error(e)
+      setError('Failed to load development metrics')
+    })
+  }
+
   useEffect(() => {
     if (!week || !year) return
-    setData(null)
-    api.get(`/metrics/dev?week=${week}&year=${year}`).then(setData).catch(console.error)
+    fetchData(week, year)
   }, [week, year])
 
   const navigate = (delta) => {
@@ -67,6 +76,13 @@ function DevTab() {
   }
 
   const dateRange = week && year ? weekDateRange(week, year) : ''
+
+  if (error) return (
+    <div className="card" style={{ padding: '20px 24px', color: 'var(--danger)', display: 'flex', alignItems: 'center', gap: 12 }}>
+      <span>{error}</span>
+      <button className="btn btn-ghost" style={{ fontSize: 13 }} onClick={() => fetchData(week, year)}>↺ Retry</button>
+    </div>
+  )
 
   if (!data) return <div style={{ display: 'flex', justifyContent: 'center', padding: '40px 0' }}><LoadingSpinner /></div>
 

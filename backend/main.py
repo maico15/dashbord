@@ -2225,16 +2225,15 @@ def metrics_dev(week: Optional[int] = None, year: Optional[int] = None):
     for m in members:
         c.execute("SELECT * FROM dev_metrics WHERE member_id=? AND week=? AND year=?", (m["id"], week, year))
         row = c.fetchone()
-        if row:
-            row = dict(row)
-            bottlenecks.append({
-                "name": m["name"],
-                "prs_merged": row["prs_merged"],
-                "tickets_closed": row["tickets_closed"],
-                "cycle_time_days": row["cycle_time_days"],
-                "deploys": row["deploys"],
-                "commits_count": row.get("commits_count", 0),
-            })
+        row = dict(row) if row else {}
+        bottlenecks.append({
+            "name":           m["name"],
+            "color":          m.get("avatar_color", "#ccc"),
+            "prs_merged":     row.get("prs_merged", 0),
+            "commits_count":  row.get("commits_count", 0),
+            "cycle_time_days":row.get("cycle_time_days", 0),
+            "deploys":        row.get("deploys", 0),
+        })
 
     ct_list = totals["cycle_time_days"]
     avg_ct = round(sum(ct_list) / len(ct_list), 1) if ct_list else 0

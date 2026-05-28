@@ -153,11 +153,12 @@ export default function AIUsageTab() {
   const [year, setYear]       = useState(null)
   const [report, setReport]   = useState(null)
   const [loading, setLoading] = useState(true)
+  const [error, setError]     = useState(null)
 
   useEffect(() => {
     api.get('/overview').then(d => {
-      setWeek(d.week || calcCurrentWeek())
-      setYear(d.year || new Date().getFullYear())
+      setWeek(d.current_week || calcCurrentWeek())
+      setYear(d.current_year || new Date().getFullYear())
     }).catch(() => {
       setWeek(calcCurrentWeek())
       setYear(new Date().getFullYear())
@@ -167,10 +168,11 @@ export default function AIUsageTab() {
   useEffect(() => {
     if (!week || !year) return
     setLoading(true)
+    setError(null)
     setReport(null)
     api.get(`/ai-usage/weekly?week=${week}&year=${year}`)
       .then(d => { setReport(d); setLoading(false) })
-      .catch(() => setLoading(false))
+      .catch(e => { console.error(e); setError('Failed to load AI usage data'); setLoading(false) })
   }, [week, year])
 
   const navigate = (delta) => {
@@ -209,7 +211,14 @@ export default function AIUsageTab() {
         </div>
       )}
 
-      {!loading && !hasData && <EmptyState week={week} />}
+      {!loading && error && (
+        <div className="card" style={{ padding: '20px 24px', color: 'var(--danger)', display: 'flex', alignItems: 'center', gap: 12 }}>
+          <span>{error}</span>
+          <button className="btn btn-ghost" style={{ fontSize: 13 }} onClick={() => { setError(null); setLoading(true); api.get(`/ai-usage/weekly?week=${week}&year=${year}`).then(d => { setReport(d); setLoading(false) }).catch(e => { setError('Failed to load AI usage data'); setLoading(false) }) }}>↺ Retry</button>
+        </div>
+      )}
+
+      {!loading && !error && !hasData && <EmptyState week={week} />}
 
       {!loading && hasData && (
         <>
