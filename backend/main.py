@@ -1669,7 +1669,7 @@ def metrics_dev():
     weeks = _weeks_range(week)
 
     weekly_chart = []
-    totals = {"prs_merged": 0, "tickets_closed": 0, "cycle_time_days": [], "features_completed": 0, "deploys": 0}
+    totals = {"prs_merged": 0, "tickets_closed": 0, "cycle_time_days": [], "features_completed": 0, "deploys": 0, "commits_count": 0}
     bottlenecks = []
 
     for i, w in enumerate(weeks):
@@ -1690,6 +1690,7 @@ def metrics_dev():
                     totals["cycle_time_days"].append(row["cycle_time_days"])
                     totals["features_completed"] += row["features_completed"]
                     totals["deploys"] += row["deploys"]
+                    totals["commits_count"] += row.get("commits_count", 0)
         weekly_chart.append(wd)
 
     for m in members:
@@ -1703,6 +1704,7 @@ def metrics_dev():
                 "tickets_closed": row["tickets_closed"],
                 "cycle_time_days": row["cycle_time_days"],
                 "deploys": row["deploys"],
+                "commits_count": row.get("commits_count", 0),
             })
 
     ct_list = totals["cycle_time_days"]
@@ -1716,6 +1718,7 @@ def metrics_dev():
             "features_completed": totals["features_completed"],
             "deploys": totals["deploys"],
             "deploy_frequency": round(totals["deploys"] / max(len(members), 1), 1),
+            "commits_count": totals["commits_count"],
         },
         "weekly_chart": weekly_chart,
         "bottlenecks": bottlenecks,
