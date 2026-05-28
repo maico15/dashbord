@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import { Link } from 'react-router-dom'
 import { api } from '../api/client'
+import LoadingSpinner from '../components/LoadingSpinner'
 import { useTheme, toggleTheme } from '../hooks/useTheme'
 
 function SunIcon() {
@@ -303,7 +304,7 @@ export default function Reports() {
         {/* Cards grid */}
         {loading ? (
           <div style={{ display: 'flex', justifyContent: 'center', padding: 60 }}>
-            <div className="spinner" />
+            <LoadingSpinner />
           </div>
         ) : (
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(340px, 1fr))', gap: 16 }}>

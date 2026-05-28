@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
 import { Link } from 'react-router-dom'
 import { api } from '../api/client'
+import LoadingSpinner from '../components/LoadingSpinner'
 
 const STREAMS = ['dev', 'support', 'docs']
 const STREAM_LABELS = { dev: 'Development', support: 'Support', docs: 'Documentation' }
@@ -108,7 +109,7 @@ function SyncLog({ service, pw, trigger }) {
 
       {open && (
         <div style={{ marginTop: 8 }}>
-          {loading && <div className="spinner" style={{ display: 'block', margin: '8px auto' }} />}
+          {loading && <div style={{ display: 'flex', justifyContent: 'center', padding: '8px 0' }}><LoadingSpinner size={32} /></div>}
           {!loading && logs.length === 0 && (
             <div style={{ fontSize: 12, color: 'var(--muted)', padding: '6px 0' }}>No sync history</div>
           )}
@@ -1095,7 +1096,7 @@ function ReportsAdminSection({ pw }) {
       </div>
 
       {loading ? (
-        <div className="spinner" style={{ display: 'block', margin: '20px auto' }} />
+        <div style={{ display: 'flex', justifyContent: 'center', padding: '20px 0' }}><LoadingSpinner /></div>
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
           {items.map(item => {

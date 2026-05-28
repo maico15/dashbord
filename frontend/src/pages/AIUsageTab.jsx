@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react'
+import LoadingSpinner from '../components/LoadingSpinner'
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid,
   Tooltip, ResponsiveContainer,
@@ -204,7 +205,7 @@ export default function AIUsageTab() {
 
       {loading && (
         <div style={{ display: 'flex', justifyContent: 'center', padding: 48 }}>
-          <div className="spinner" />
+          <LoadingSpinner />
         </div>
       )}
 

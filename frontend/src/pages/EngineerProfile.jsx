@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { api } from '../api/client'
+import LoadingSpinner from '../components/LoadingSpinner'
 import {
   AreaChart, Area, XAxis, YAxis, CartesianGrid,
   Tooltip, ResponsiveContainer,
@@ -298,7 +299,7 @@ function WeeklyTasksPanel({ engineerId, stream, initialWeek, initialYear }) {
 
       {loading && (
         <div style={{ display: 'flex', justifyContent: 'center', padding: 40 }}>
-          <div className="spinner" />
+          <LoadingSpinner />
         </div>
       )}
 
@@ -365,7 +366,7 @@ function CommitsTimeline({ engineerId }) {
   if (commits === null) {
     return (
       <div className="card" style={{ padding: 24, display: 'flex', justifyContent: 'center' }}>
-        <div className="spinner" />
+        <LoadingSpinner />
       </div>
     )
   }
@@ -513,7 +514,7 @@ function PRActivityTab({ engineerId }) {
   if (prs === null) {
     return (
       <div className="card" style={{ padding: 24, display: 'flex', justifyContent: 'center' }}>
-        <div className="spinner" />
+        <LoadingSpinner />
       </div>
     )
   }
@@ -656,7 +657,7 @@ export default function EngineerProfile() {
   if (!profile) {
     return (
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100vh' }}>
-        <div className="spinner" />
+        <LoadingSpinner size={120} />
       </div>
     )
   }

@@ -7,6 +7,7 @@ import XPChart from '../components/XPChart'
 import Leaderboard from '../components/Leaderboard'
 import AIUsageTab from './AIUsageTab'
 import WeeklyReportTab from './WeeklyReportTab'
+import LoadingSpinner from '../components/LoadingSpinner'
 
 const TABS = [
   { key: 'dev',    label: 'Development' },
@@ -67,7 +68,7 @@ function DevTab() {
 
   const dateRange = week && year ? weekDateRange(week, year) : ''
 
-  if (!data) return <div className="spinner" style={{ margin: '40px auto', display: 'block' }} />
+  if (!data) return <div style={{ display: 'flex', justifyContent: 'center', padding: '40px 0' }}><LoadingSpinner /></div>
 
   const { totals, weekly_chart, bottlenecks } = data
   return (
@@ -114,7 +115,7 @@ function DevTab() {
 }
 
 function SupportTab({ data }) {
-  if (!data) return <div className="spinner" style={{ margin: '40px auto', display: 'block' }} />
+  if (!data) return <div style={{ display: 'flex', justifyContent: 'center', padding: '40px 0' }}><LoadingSpinner /></div>
   const { totals, weekly_chart, bottlenecks } = data
   return (
     <>
@@ -151,7 +152,7 @@ function SupportTab({ data }) {
 }
 
 function DocsTab({ data }) {
-  if (!data) return <div className="spinner" style={{ margin: '40px auto', display: 'block' }} />
+  if (!data) return <div style={{ display: 'flex', justifyContent: 'center', padding: '40px 0' }}><LoadingSpinner /></div>
   const { totals, weekly_chart, bottlenecks } = data
   return (
     <>
@@ -220,7 +221,7 @@ export default function Dashboard() {
   if (loading) {
     return (
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100vh' }}>
-        <div className="spinner" />
+        <LoadingSpinner size={120} />
       </div>
     )
   }

@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 import { api } from '../api/client'
+import LoadingSpinner from '../components/LoadingSpinner'
 
 function weekDateRange(week, year) {
   const jan4 = new Date(year, 0, 4)
@@ -259,7 +260,7 @@ export default function WeeklyReportTab() {
 
       {loading && (
         <div style={{ display: 'flex', justifyContent: 'center', padding: 48 }}>
-          <div className="spinner" />
+          <LoadingSpinner />
         </div>
       )}
 
