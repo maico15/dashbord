@@ -7,11 +7,10 @@ const STREAM_LABELS = { dev: 'Development', support: 'Support', docs: 'Documenta
 
 const METRIC_FIELDS = {
   dev: [
-    { key: 'prs_merged', label: 'PRs merged', type: 'number' },
-    { key: 'tickets_closed', label: 'Tickets closed', type: 'number' },
-    { key: 'cycle_time_days', label: 'Cycle time (days)', type: 'number', step: '0.1' },
-    { key: 'features_completed', label: 'Features', type: 'number' },
-    { key: 'deploys', label: 'Deploys', type: 'number' },
+    { key: 'prs_merged',    label: 'PRs merged',  type: 'number' },
+    { key: 'commits_count', label: 'Commits',      type: 'number', auto: true },
+    { key: 'avg_pr_size',   label: 'Avg PR size',  type: 'number', auto: true },
+    { key: 'ai_tokens',     label: 'AI Tokens',    type: 'number', auto: true },
   ],
   support: [
     { key: 'incidents_opened', label: 'Opened', type: 'number' },
@@ -621,8 +620,9 @@ function MetricsSection({ pw }) {
     const startOfYear = new Date(now.getFullYear(), 0, 1)
     return Math.ceil(((now - startOfYear) / 86400000 + startOfYear.getDay() + 1) / 7)
   })
-  const [rows, setRows] = useState([])
-  const [edits, setEdits] = useState({})
+  const [rows, setRows]     = useState([])
+  const [autoVals, setAutoVals] = useState({})  // { memberId: { commits_count, avg_pr_size, ai_tokens } }
+  const [edits, setEdits]   = useState({})
   const [saving, setSaving] = useState({})
 
   useEffect(() => {
@@ -630,12 +630,33 @@ function MetricsSection({ pw }) {
   }, [])
 
   const loadMetrics = () => {
-    api.get(`/admin/metrics/${stream}/${week}?password=${encodeURIComponent(pw)}`)
-      .then((data) => {
+    const savedP = api.get(`/admin/metrics/${stream}/${week}?password=${encodeURIComponent(pw)}`)
+    const autoP  = stream === 'dev'
+      ? api.get(`/admin/metrics/dev/${week}/auto?password=${encodeURIComponent(pw)}`)
+      : Promise.resolve([])
+
+    Promise.all([savedP, autoP])
+      .then(([data, autoData]) => {
         setRows(data)
+        const av = {}
+        autoData.forEach(a => { av[a.member_id] = a })
+        setAutoVals(av)
+
         const initial = {}
-        data.forEach((r) => {
-          if (r.metrics) initial[r.member.id] = { ...r.metrics }
+        const fields = METRIC_FIELDS[stream] || []
+        data.forEach(r => {
+          const mid  = r.member.id
+          const saved = r.metrics || {}
+          const auto  = av[mid]   || {}
+          const init  = {}
+          fields.forEach(f => {
+            const sv = saved[f.key]
+            // Use saved value if non-null; fall back to auto for auto fields, else 0
+            init[f.key] = (sv !== null && sv !== undefined)
+              ? sv
+              : (f.auto ? (auto[f.key] ?? 0) : 0)
+          })
+          initial[mid] = init
         })
         setEdits(initial)
       })
@@ -645,20 +666,39 @@ function MetricsSection({ pw }) {
   useEffect(() => { loadMetrics() }, [stream, week, pw])
 
   const setField = (memberId, key, val) => {
-    setEdits((prev) => ({
+    setEdits(prev => ({
       ...prev,
       [memberId]: { ...(prev[memberId] || {}), [key]: parseFloat(val) || 0 },
     }))
   }
 
+  const handleResetToAuto = (memberId) => {
+    const auto   = autoVals[memberId] || {}
+    const fields = (METRIC_FIELDS[stream] || []).filter(f => f.auto)
+    setEdits(prev => ({
+      ...prev,
+      [memberId]: {
+        ...(prev[memberId] || {}),
+        ...Object.fromEntries(fields.map(f => [f.key, auto[f.key] ?? 0])),
+      },
+    }))
+  }
+
   const handleSave = async (memberId) => {
-    setSaving((s) => ({ ...s, [memberId]: true }))
+    setSaving(s => ({ ...s, [memberId]: true }))
     await api.put(
       `/admin/metrics/${stream}/${week}/${memberId}`,
       { metrics: edits[memberId] || {} },
       pw,
     )
-    setSaving((s) => ({ ...s, [memberId]: false }))
+    setSaving(s => ({ ...s, [memberId]: false }))
+  }
+
+  const fmtK = n => {
+    if (!n) return '0'
+    if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
+    if (n >= 1_000)     return `${(n / 1_000).toFixed(0)}K`
+    return String(n)
   }
 
   const fields = METRIC_FIELDS[stream] || []
@@ -687,42 +727,70 @@ function MetricsSection({ pw }) {
             <thead>
               <tr>
                 <th>Member</th>
-                {fields.map((f) => <th key={f.key}>{f.label}</th>)}
+                {fields.map(f => (
+                  <th key={f.key}>
+                    {f.label}
+                    {f.auto && <span style={{ fontSize: 9, color: 'var(--muted)', marginLeft: 4 }}>auto</span>}
+                  </th>
+                ))}
                 <th></th>
               </tr>
             </thead>
             <tbody>
-              {rows.map((r) => {
-                const mid = r.member.id
-                const edit = edits[mid] || {}
+              {rows.map(r => {
+                const mid  = r.member.id
+                const edit = edits[mid]  || {}
+                const auto = autoVals[mid] || {}
                 return (
                   <tr key={mid}>
                     <td style={{ fontWeight: 500 }}>{r.member.name}</td>
-                    {fields.map((f) => (
-                      <td key={f.key}>
-                        <input
-                          type="number"
-                          step={f.step || '1'}
-                          min={0}
-                          value={edit[f.key] ?? 0}
-                          onChange={(e) => setField(mid, f.key, e.target.value)}
-                          style={{
-                            background: 'var(--card2)', border: '1px solid var(--border)',
-                            borderRadius: 5, color: 'var(--text)', padding: '4px 6px',
-                            fontSize: 13, width: 80,
-                          }}
-                        />
-                      </td>
-                    ))}
+                    {fields.map(f => {
+                      const autoVal    = auto[f.key] ?? 0
+                      const isOverride = f.auto && edit[f.key] !== autoVal && autoVal > 0
+                      return (
+                        <td key={f.key}>
+                          <input
+                            type="number"
+                            step={f.step || '1'}
+                            min={0}
+                            value={edit[f.key] ?? 0}
+                            onChange={e => setField(mid, f.key, e.target.value)}
+                            style={{
+                              background: isOverride ? 'rgba(255,160,0,0.06)' : 'var(--card2)',
+                              border: `1px solid ${isOverride ? 'rgba(255,160,0,0.45)' : 'var(--border)'}`,
+                              borderRadius: 5, color: 'var(--text)',
+                              padding: '4px 6px', fontSize: 13, width: 80,
+                            }}
+                          />
+                          {f.auto && autoVal > 0 && (
+                            <div style={{ fontSize: 10, color: 'var(--muted)', marginTop: 2 }}>
+                              {f.key === 'ai_tokens' ? fmtK(autoVal) : autoVal}
+                            </div>
+                          )}
+                        </td>
+                      )
+                    })}
                     <td>
-                      <button
-                        className="btn btn-primary"
-                        style={{ padding: '4px 12px' }}
-                        onClick={() => handleSave(mid)}
-                        disabled={saving[mid]}
-                      >
-                        {saving[mid] ? <span className="spinner" /> : 'Save'}
-                      </button>
+                      <div style={{ display: 'flex', gap: 4 }}>
+                        <button
+                          className="btn btn-primary"
+                          style={{ padding: '4px 12px' }}
+                          onClick={() => handleSave(mid)}
+                          disabled={saving[mid]}
+                        >
+                          {saving[mid] ? <span className="spinner" /> : 'Save'}
+                        </button>
+                        {stream === 'dev' && (
+                          <button
+                            className="btn btn-ghost"
+                            style={{ padding: '4px 8px', fontSize: 11 }}
+                            title="Reset to auto-calculated values"
+                            onClick={() => handleResetToAuto(mid)}
+                          >
+                            ↺ Auto
+                          </button>
+                        )}
+                      </div>
                     </td>
                   </tr>
                 )

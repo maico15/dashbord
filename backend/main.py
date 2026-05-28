@@ -305,6 +305,16 @@ def init_db():
         conn.commit()
     except Exception:
         pass
+    try:
+        conn.execute("ALTER TABLE dev_metrics ADD COLUMN avg_pr_size INTEGER DEFAULT NULL")
+        conn.commit()
+    except Exception:
+        pass
+    try:
+        conn.execute("ALTER TABLE dev_metrics ADD COLUMN ai_tokens INTEGER DEFAULT NULL")
+        conn.commit()
+    except Exception:
+        pass
     # ai_events and ai_usage_daily are created via executescript above (IF NOT EXISTS);
     # these no-op try/except blocks handle the case where CREATE INDEX runs on a DB
     # that was initialized before those statements were added to the script.
@@ -2516,6 +2526,65 @@ def admin_get_metrics(stream: str, week: int, year: int = None, password: str = 
     return result
 
 
+@app.get("/api/admin/metrics/dev/{week}/auto")
+def admin_dev_metrics_auto(week: int, year: int = None, password: str = ""):
+    """Return auto-calculated dev metrics per engineer for a given week."""
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    conn = get_db()
+    c = conn.cursor()
+    if year is None:
+        _, year = current_week_year(conn)
+
+    # ISO week date range for ai_usage_daily (which keys on calendar date)
+    jan4 = datetime(year, 1, 4).date()
+    week1_monday = jan4 - timedelta(days=jan4.weekday())
+    week_monday  = week1_monday + timedelta(weeks=week - 1)
+    week_sunday  = week_monday  + timedelta(days=6)
+    date_from    = week_monday.isoformat()
+    date_to      = week_sunday.isoformat()
+
+    c.execute("SELECT * FROM team_members")
+    members = [m for m in [dict(r) for r in c.fetchall()] if "dev" in parse_streams(m["stream"])]
+
+    result = []
+    for m in members:
+        mid = m["id"]
+
+        c.execute("SELECT COUNT(*) FROM commit_log WHERE member_id=? AND week=? AND year=?",
+                  (mid, week, year))
+        commits = (c.fetchone() or [0])[0]
+
+        c.execute(
+            "SELECT COALESCE(SUM(additions+deletions),0) AS lines, COUNT(*) AS cnt "
+            "FROM pr_log WHERE member_id=? AND week=? AND year=?",
+            (mid, week, year),
+        )
+        pr_row = c.fetchone()
+        avg_pr_size = (
+            round(pr_row["lines"] / pr_row["cnt"])
+            if pr_row and pr_row["cnt"] > 0 else 0
+        )
+
+        c.execute(
+            "SELECT COALESCE(SUM(tokens_input+tokens_output),0) AS total "
+            "FROM ai_usage_daily WHERE engineer_id=? AND date>=? AND date<=?",
+            (mid, date_from, date_to),
+        )
+        ai_row = c.fetchone()
+        ai_tokens = int((ai_row["total"] if ai_row else 0) or 0)
+
+        result.append({
+            "member_id":    mid,
+            "commits_count": commits,
+            "avg_pr_size":  avg_pr_size,
+            "ai_tokens":    ai_tokens,
+        })
+
+    conn.close()
+    return result
+
+
 class MetricUpdate(BaseModel):
     metrics: Dict[str, Any]
 
@@ -2532,15 +2601,28 @@ def admin_update_metrics(stream: str, week: int, member_id: int, data: MetricUpd
 
     m = data.metrics
     if stream == "dev":
-        c.execute(
-            "INSERT OR REPLACE INTO dev_metrics "
-            "(member_id,week,year,prs_merged,tickets_closed,cycle_time_days,features_completed,deploys) "
-            "VALUES (?,?,?,?,?,?,?,?)",
-            (member_id, week, year,
-             m.get("prs_merged", 0), m.get("tickets_closed", 0),
-             m.get("cycle_time_days", 0.0), m.get("features_completed", 0),
-             m.get("deploys", 0)),
-        )
+        # Use UPDATE/INSERT to preserve columns not managed here (cycle_time, tickets, etc.)
+        c.execute("SELECT id FROM dev_metrics WHERE member_id=? AND week=? AND year=?",
+                  (member_id, week, year))
+        if c.fetchone():
+            c.execute(
+                "UPDATE dev_metrics SET prs_merged=?, commits_count=?, "
+                "avg_pr_size=?, ai_tokens=? "
+                "WHERE member_id=? AND week=? AND year=?",
+                (m.get("prs_merged", 0), m.get("commits_count", 0),
+                 m.get("avg_pr_size"),    m.get("ai_tokens"),
+                 member_id, week, year),
+            )
+        else:
+            c.execute(
+                "INSERT INTO dev_metrics "
+                "(member_id,week,year,prs_merged,tickets_closed,cycle_time_days,"
+                "features_completed,deploys,commits_count,avg_pr_size,ai_tokens) "
+                "VALUES (?,?,?,?,0,0.0,0,0,?,?,?)",
+                (member_id, week, year,
+                 m.get("prs_merged", 0), m.get("commits_count", 0),
+                 m.get("avg_pr_size"),    m.get("ai_tokens")),
+            )
     elif stream == "support":
         c.execute(
             "INSERT OR REPLACE INTO support_metrics "
