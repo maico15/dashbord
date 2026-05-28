@@ -38,6 +38,7 @@ _CONFLICT_TARGETS: dict = {
     "docs_metrics":    ["member_id", "week", "year"],
     "weekly_tasks":    ["engineer_id", "week_number", "year"],
     "daily_reports":   ["engineer_id", "report_date"],
+    "pr_log":          ["repo", "pr_number"],
 }
 
 _OR_REPLACE = re.compile(

@@ -234,6 +234,23 @@ def init_db():
             committed_at TEXT NOT NULL,
             UNIQUE(repo, sha)
         );
+
+        CREATE TABLE IF NOT EXISTS pr_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            member_id INTEGER REFERENCES team_members(id) ON DELETE CASCADE,
+            week INTEGER NOT NULL,
+            year INTEGER NOT NULL,
+            repo TEXT NOT NULL,
+            pr_number INTEGER NOT NULL,
+            title TEXT NOT NULL DEFAULT '',
+            body TEXT NOT NULL DEFAULT '',
+            additions INTEGER DEFAULT 0,
+            deletions INTEGER DEFAULT 0,
+            changed_files INTEGER DEFAULT 0,
+            merged_at TEXT NOT NULL,
+            commits TEXT NOT NULL DEFAULT '[]',
+            UNIQUE(repo, pr_number)
+        );
     """)
     conn.commit()
     # Add blocked_count for existing SQLite databases that pre-date this column
@@ -1310,8 +1327,9 @@ def _do_github_sync(conn) -> tuple:
     week_sunday  = week_monday  + timedelta(days=6)
 
     # Fetch merged PRs per repo, filtered to current week
-    pr_counts = {}  # github_login -> count
+    pr_counts = {}   # github_login -> count
     total_prs = 0
+    in_week_prs = []  # (owner_repo, pr_number, title, body, merged_at, login)
 
     for repo in repos:
         # Support "owner/repo" for personal/cross-org repos; bare name uses org
@@ -1350,6 +1368,7 @@ def _do_github_sync(conn) -> tuple:
             if in_week and login:
                 pr_counts[login] = pr_counts.get(login, 0) + 1
                 total_prs += 1
+                in_week_prs.append((owner_repo, pr.get("number"), pr.get("title") or "", pr.get("body") or "", merged_at, login))
 
     print(f"[GitHub sync] PR counts by login: {pr_counts}")
 
@@ -1365,6 +1384,48 @@ def _do_github_sync(conn) -> tuple:
         row = c.fetchone()
         if row:
             login_to_member[login] = row["id"]
+
+    # Fetch full details + commits for each in-week PR and upsert into pr_log
+    for owner_repo, pr_number, title, body, merged_at_str, login in in_week_prs:
+        member_id = login_to_member.get(login)
+        if not member_id:
+            continue
+        try:
+            detail = gh_get(f"https://api.github.com/repos/{owner_repo}/pulls/{pr_number}")
+            additions     = detail.get("additions", 0)
+            deletions     = detail.get("deletions", 0)
+            changed_files = detail.get("changed_files", 0)
+        except Exception as e:
+            print(f"[GitHub sync] Failed to fetch PR #{pr_number} details: {e}")
+            additions = deletions = changed_files = 0
+        try:
+            commits_data = gh_get(
+                f"https://api.github.com/repos/{owner_repo}/pulls/{pr_number}/commits?per_page=100"
+            )
+            commits_list = [
+                {
+                    "sha": (entry.get("sha") or "")[:7],
+                    "message": ((entry.get("commit") or {}).get("message") or "").split("\n")[0].strip(),
+                }
+                for entry in (commits_data if isinstance(commits_data, list) else [])
+            ]
+        except Exception as e:
+            print(f"[GitHub sync] Failed to fetch PR #{pr_number} commits: {e}")
+            commits_list = []
+        try:
+            c.execute(
+                "INSERT OR REPLACE INTO pr_log "
+                "(member_id, week, year, repo, pr_number, title, body, "
+                "additions, deletions, changed_files, merged_at, commits) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                (member_id, week, year, owner_repo, pr_number, title, body,
+                 additions, deletions, changed_files, merged_at_str,
+                 json_lib.dumps(commits_list)),
+            )
+            print(f"[GitHub sync] pr_log saved PR #{pr_number} ({owner_repo}): "
+                  f"+{additions}/-{deletions}, {len(commits_list)} commit(s)")
+        except Exception as ex:
+            print(f"[GitHub sync] pr_log insert failed for PR #{pr_number}: {ex}")
 
     for repo in repos:
         owner_repo = repo if "/" in repo else f"{org}/{repo}"
@@ -2193,6 +2254,34 @@ def get_engineer_commits(member_id: int):
         (member_id, year, *weeks),
     )
     rows = [dict(r) for r in c.fetchall()]
+    conn.close()
+    return rows
+
+
+@app.get("/api/engineers/{member_id}/prs")
+def get_engineer_prs(member_id: int):
+    """Return merged PRs for an engineer across the last 8 weeks, newest first."""
+    conn = get_db()
+    c = conn.cursor()
+    week, year = current_week_year(conn)
+    weeks = _weeks_range(week)
+    placeholders = ",".join(["?"] * len(weeks))
+    c.execute(
+        f"SELECT id, member_id, week, year, repo, pr_number, title, body, "
+        f"additions, deletions, changed_files, merged_at, commits "
+        f"FROM pr_log "
+        f"WHERE member_id=? AND year=? AND week IN ({placeholders}) "
+        f"ORDER BY merged_at DESC",
+        (member_id, year, *weeks),
+    )
+    rows = []
+    for row in c.fetchall():
+        d = dict(row)
+        try:
+            d["commits"] = json_lib.loads(d.get("commits") or "[]")
+        except Exception:
+            d["commits"] = []
+        rows.append(d)
     conn.close()
     return rows
 

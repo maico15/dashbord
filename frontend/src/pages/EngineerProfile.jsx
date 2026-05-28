@@ -491,13 +491,151 @@ function CommitsTimeline({ engineerId }) {
   )
 }
 
+// ── PR activity tab ───────────────────────────────────────────────────────────
+
+function PRActivityTab({ engineerId }) {
+  const [prs, setPrs]     = useState(null)
+  const [error, setError] = useState(null)
+
+  useEffect(() => {
+    api.get(`/engineers/${engineerId}/prs`)
+      .then(setPrs)
+      .catch(e => setError(e.message))
+  }, [engineerId])
+
+  if (error) {
+    return (
+      <div className="card" style={{ padding: '14px 16px', fontSize: 13, color: 'var(--danger)' }}>
+        Failed to load activity: {error}
+      </div>
+    )
+  }
+  if (prs === null) {
+    return (
+      <div className="card" style={{ padding: 24, display: 'flex', justifyContent: 'center' }}>
+        <div className="spinner" />
+      </div>
+    )
+  }
+
+  const grouped = {}
+  for (const pr of prs) {
+    const key = `${pr.year}-${String(pr.week).padStart(2, '0')}`
+    if (!grouped[key]) grouped[key] = { week: pr.week, year: pr.year, prs: [] }
+    grouped[key].prs.push(pr)
+  }
+  const weekKeys = Object.keys(grouped).sort((a, b) => b.localeCompare(a))
+
+  if (weekKeys.length === 0) {
+    return (
+      <div style={{
+        display: 'flex', flexDirection: 'column', alignItems: 'center',
+        justifyContent: 'center', padding: '48px 24px',
+        background: 'var(--card)', border: '1px solid var(--border)',
+        borderRadius: 12, gap: 10,
+      }}>
+        <div style={{ fontSize: 32 }}>🔀</div>
+        <div style={{ fontSize: 15, color: 'var(--muted)', fontWeight: 500 }}>No PR activity</div>
+        <div style={{ fontSize: 12, color: 'var(--muted)', opacity: 0.7 }}>
+          PRs will appear here after the next GitHub sync
+        </div>
+      </div>
+    )
+  }
+
+  const shortRepo = (repo) => (repo.includes('/') ? repo.split('/')[1] : repo)
+  const firstLine = (s) => (s || '').split('\n')[0].trim()
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+      {weekKeys.map(key => {
+        const { week, year, prs: weekPrs } = grouped[key]
+        return (
+          <div key={key} className="card" style={{ padding: '18px 20px' }}>
+            <div style={{
+              display: 'flex', justifyContent: 'space-between',
+              fontSize: 11, color: 'var(--muted)',
+              textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 14,
+            }}>
+              <span>Week {week} · {year}</span>
+              <span>{weekPrs.length} PR{weekPrs.length !== 1 ? 's' : ''}</span>
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+              {weekPrs.map((pr, i) => (
+                <div key={pr.pr_number ?? i} style={{
+                  background: 'var(--card2)', borderRadius: 8,
+                  border: '1px solid var(--border)', overflow: 'hidden',
+                }}>
+                  <div style={{ padding: '12px 14px' }}>
+                    <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10 }}>
+                      <span style={{ color: 'var(--accent1)', flexShrink: 0, fontSize: 14, marginTop: 1 }}>⊕</span>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ fontSize: 14, fontWeight: 600, lineHeight: 1.4, marginBottom: 5 }}>
+                          {pr.title || `PR #${pr.pr_number}`}
+                        </div>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+                          <code style={{
+                            fontSize: 11, color: 'var(--accent2)',
+                            fontFamily: 'ui-monospace, SFMono-Regular, monospace',
+                          }}>
+                            {shortRepo(pr.repo)}
+                          </code>
+                          <span style={{ fontSize: 11, color: 'var(--muted)' }}>#{pr.pr_number}</span>
+                          <span style={{ fontSize: 11, color: 'var(--success)', fontWeight: 600 }}>
+                            +{pr.additions}
+                          </span>
+                          <span style={{ fontSize: 11, color: 'var(--danger)', fontWeight: 600 }}>
+                            −{pr.deletions}
+                          </span>
+                          <span style={{ fontSize: 11, color: 'var(--muted)' }}>
+                            {pr.changed_files} file{pr.changed_files !== 1 ? 's' : ''}
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                  {pr.commits?.length > 0 && (
+                    <div style={{ borderTop: '1px solid var(--border)', padding: '8px 14px 12px' }}>
+                      <div style={{ fontSize: 11, color: 'var(--muted)', marginBottom: 6 }}>
+                        {pr.commits.length} commit{pr.commits.length !== 1 ? 's' : ''}
+                      </div>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                        {pr.commits.map((commit, ci) => (
+                          <div key={commit.sha || ci} style={{
+                            display: 'flex', alignItems: 'flex-start', gap: 8, fontSize: 12,
+                          }}>
+                            <code style={{
+                              color: 'var(--muted)', fontSize: 11, flexShrink: 0,
+                              fontFamily: 'ui-monospace, SFMono-Regular, monospace',
+                            }}>
+                              {commit.sha}
+                            </code>
+                            <span style={{ color: 'var(--text)', lineHeight: 1.4 }}>
+                              {firstLine(commit.message) || '(no message)'}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
 // ── Page ──────────────────────────────────────────────────────────────────────
 
 export default function EngineerProfile() {
   const { id }    = useParams()
   const navigate  = useNavigate()
-  const [profile, setProfile] = useState(null)
-  const [error,   setError]   = useState(null)
+  const [profile,  setProfile]  = useState(null)
+  const [error,    setError]    = useState(null)
+  const [rightTab, setRightTab] = useState('tasks')
 
   useEffect(() => {
     api.get(`/engineers/${id}/profile`)
@@ -553,15 +691,30 @@ export default function EngineerProfile() {
           <ProfileCard profile={profile} />
         </div>
 
-        {/* Right: weekly tasks + commits timeline */}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 28 }}>
-          <WeeklyTasksPanel
-            engineerId={id}
-            stream={profile.stream}
-            initialWeek={profile.current_week}
-            initialYear={profile.current_year}
-          />
-          <CommitsTimeline engineerId={id} />
+        {/* Right: tabbed panel */}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 24 }}>
+          <div style={{ display: 'flex', gap: 4 }}>
+            {[['tasks', 'Weekly Tasks'], ['activity', 'Activity'], ['commits', 'Commits']].map(([key, label]) => (
+              <button
+                key={key}
+                onClick={() => setRightTab(key)}
+                className={`btn ${rightTab === key ? 'btn-primary' : 'btn-ghost'}`}
+                style={{ fontSize: 13 }}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+          {rightTab === 'tasks' && (
+            <WeeklyTasksPanel
+              engineerId={id}
+              stream={profile.stream}
+              initialWeek={profile.current_week}
+              initialYear={profile.current_year}
+            />
+          )}
+          {rightTab === 'activity' && <PRActivityTab engineerId={id} />}
+          {rightTab === 'commits' && <CommitsTimeline engineerId={id} />}
         </div>
       </div>
     </div>
