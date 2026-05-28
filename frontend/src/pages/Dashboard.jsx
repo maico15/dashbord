@@ -9,8 +9,8 @@ import AIUsageTab from './AIUsageTab'
 
 const TABS = [
   { key: 'dev', label: 'Development' },
-  { key: 'support', label: 'Support' },
-  { key: 'docs', label: 'Documentation' },
+  // { key: 'support', label: 'Support' },
+  // { key: 'docs', label: 'Documentation' },
   { key: 'ai', label: '⬡ AI Usage' },
 ]
 
