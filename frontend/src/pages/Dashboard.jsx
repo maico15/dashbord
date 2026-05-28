@@ -22,8 +22,8 @@ function DevTab({ data }) {
       <div className="metric-grid">
         <MetricCard label="PRs merged" value={totals.prs_merged} sub="this week" accent="accent1"
           tooltip="Pull requests merged this week. Each PR earns XP based on the points configured in Admin → Rules." />
-        <MetricCard label="Tickets closed" value={totals.tickets_closed} sub="this week" accent="accent2"
-          tooltip="Jira / Linear tickets resolved this week. Counts toward the dev XP score for each engineer." />
+        <MetricCard label="Commits" value={totals.commits_count} sub="this week" accent="accent2"
+          tooltip="Commits pushed this week across all tracked repositories." />
         <MetricCard
           label="Avg cycle time"
           value={`${totals.avg_cycle_time}d`}
@@ -42,8 +42,8 @@ function DevTab({ data }) {
           color="var(--accent1)"
         />
         <BottleneckBars
-          title="Tickets closed per engineer"
-          rows={bottlenecks.map((b) => ({ name: b.name, value: b.tickets_closed }))}
+          title="Commits per engineer"
+          rows={bottlenecks.map((b) => ({ name: b.name, value: b.commits_count }))}
           color="var(--accent2)"
         />
       </div>
