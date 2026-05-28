@@ -17,6 +17,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from database import get_db, IS_POSTGRES
 
 ADMIN_PASSWORD = "admin123"
+TELEMETRY_SECRET = os.environ.get("TELEMETRY_SECRET", "")
 
 
 def _load_password():
@@ -251,6 +252,37 @@ def init_db():
             commits TEXT NOT NULL DEFAULT '[]',
             UNIQUE(repo, pr_number)
         );
+
+        CREATE TABLE IF NOT EXISTS ai_events (
+            id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_id            TEXT UNIQUE NOT NULL,
+            engineer_id         INTEGER NOT NULL,
+            session_id          TEXT NOT NULL,
+            timestamp           TEXT NOT NULL,
+            model               TEXT NOT NULL DEFAULT 'unknown',
+            tokens_input        INTEGER NOT NULL DEFAULT 0,
+            tokens_output       INTEGER NOT NULL DEFAULT 0,
+            tokens_cache_read   INTEGER NOT NULL DEFAULT 0,
+            tokens_cache_write  INTEGER NOT NULL DEFAULT 0,
+            repo                TEXT,
+            created_at          TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_ai_events_engineer
+            ON ai_events(engineer_id, timestamp);
+
+        CREATE TABLE IF NOT EXISTS ai_usage_daily (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            engineer_id     INTEGER NOT NULL,
+            date            TEXT NOT NULL,
+            tokens_input    INTEGER NOT NULL DEFAULT 0,
+            tokens_output   INTEGER NOT NULL DEFAULT 0,
+            sessions_count  INTEGER NOT NULL DEFAULT 0,
+            UNIQUE(engineer_id, date)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_ai_usage_daily_date
+            ON ai_usage_daily(date, engineer_id);
     """)
     conn.commit()
     # Add blocked_count for existing SQLite databases that pre-date this column
@@ -269,6 +301,25 @@ def init_db():
         pass
     try:
         conn.execute("ALTER TABLE team_members ADD COLUMN position TEXT DEFAULT ''")
+        conn.commit()
+    except Exception:
+        pass
+    # ai_events and ai_usage_daily are created via executescript above (IF NOT EXISTS);
+    # these no-op try/except blocks handle the case where CREATE INDEX runs on a DB
+    # that was initialized before those statements were added to the script.
+    try:
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_ai_events_engineer "
+            "ON ai_events(engineer_id, timestamp)"
+        )
+        conn.commit()
+    except Exception:
+        pass
+    try:
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_ai_usage_daily_date "
+            "ON ai_usage_daily(date, engineer_id)"
+        )
         conn.commit()
     except Exception:
         pass
@@ -2673,6 +2724,236 @@ def save_key_mappings(data: List[KeyMappingIn], password: str = ""):
     conn.commit()
     conn.close()
     return {"ok": True}
+
+
+# ── Claude Code telemetry ─────────────────────────────────────────────────────
+
+class TelemetryEvent(BaseModel):
+    event_id: str
+    session_id: str
+    timestamp: str
+    model: Optional[str] = "unknown"
+    tokens_input: int = 0
+    tokens_output: int = 0
+    tokens_cache_read: int = 0
+    tokens_cache_write: int = 0
+    repo: Optional[str] = None
+
+
+class TelemetryPayload(BaseModel):
+    engineer_id: int
+    secret: str
+    events: List[TelemetryEvent]
+
+
+@app.post("/api/telemetry/events")
+def ingest_telemetry(payload: TelemetryPayload):
+    if not TELEMETRY_SECRET or payload.secret != TELEMETRY_SECRET:
+        raise HTTPException(401, "Invalid telemetry secret")
+    conn = get_db()
+    c = conn.cursor()
+    accepted = 0
+    duplicate = 0
+    for ev in payload.events:
+        # Parse date from timestamp (YYYY-MM-DD)
+        try:
+            date = ev.timestamp[:10]
+        except Exception:
+            continue
+        # INSERT OR IGNORE — event_id is the dedup key
+        c.execute(
+            "INSERT OR IGNORE INTO ai_events "
+            "(event_id, engineer_id, session_id, timestamp, model, "
+            "tokens_input, tokens_output, tokens_cache_read, tokens_cache_write, repo) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (ev.event_id, payload.engineer_id, ev.session_id, ev.timestamp,
+             ev.model or "unknown", ev.tokens_input, ev.tokens_output,
+             ev.tokens_cache_read, ev.tokens_cache_write, ev.repo),
+        )
+        inserted = getattr(c, "rowcount", -1)
+        # rowcount == 0 means IGNORE fired (duplicate)
+        if inserted == 0:
+            duplicate += 1
+            continue
+        accepted += 1
+        # Upsert daily aggregate — increment on conflict
+        try:
+            c.execute(
+                "INSERT INTO ai_usage_daily "
+                "(engineer_id, date, tokens_input, tokens_output, sessions_count) "
+                "VALUES (?, ?, ?, ?, 1) "
+                "ON CONFLICT(engineer_id, date) DO UPDATE SET "
+                "tokens_input = tokens_input + excluded.tokens_input, "
+                "tokens_output = tokens_output + excluded.tokens_output, "
+                "sessions_count = sessions_count + 1",
+                (payload.engineer_id, date, ev.tokens_input, ev.tokens_output),
+            )
+        except Exception as ex:
+            print(f"[telemetry] ai_usage_daily upsert failed: {ex}")
+    conn.commit()
+    conn.close()
+    return {"accepted": accepted, "duplicate": duplicate}
+
+
+def _iso_week_bounds(week: int, year: int):
+    """Return (monday_date, sunday_date) for the given ISO week."""
+    jan4 = datetime(year, 1, 4).date()
+    week1_monday = jan4 - timedelta(days=jan4.weekday())
+    monday = week1_monday + timedelta(weeks=week - 1)
+    sunday = monday + timedelta(days=6)
+    return monday, sunday
+
+
+@app.get("/api/ai-usage/weekly")
+def get_ai_usage_weekly(week: Optional[int] = None, year: Optional[int] = None):
+    conn = get_db()
+    c = conn.cursor()
+    if week is None or year is None:
+        cw, cy = current_week_year(conn)
+        if week is None:
+            week = cw
+        if year is None:
+            year = cy
+    date_from, date_to = _iso_week_bounds(week, year)
+    date_from_s = date_from.isoformat()
+    date_to_s   = date_to.isoformat()
+
+    # Per-engineer totals
+    c.execute("""
+        SELECT
+            t.id, t.name, t.avatar_color, COALESCE(t.position,'') AS position,
+            COALESCE(SUM(d.tokens_input),  0) AS tokens_input,
+            COALESCE(SUM(d.tokens_output), 0) AS tokens_output,
+            COALESCE(SUM(d.sessions_count), 0) AS sessions,
+            COUNT(DISTINCT CASE WHEN d.tokens_input > 0 OR d.tokens_output > 0
+                                THEN d.date END) AS active_days
+        FROM team_members t
+        LEFT JOIN ai_usage_daily d
+               ON d.engineer_id = t.id
+              AND d.date >= ? AND d.date <= ?
+        GROUP BY t.id
+        ORDER BY tokens_input DESC
+    """, (date_from_s, date_to_s))
+    engineers_rows = [dict(r) for r in c.fetchall()]
+
+    # Daily totals for the week
+    c.execute("""
+        SELECT date,
+               COALESCE(SUM(tokens_input),  0) AS tokens_input,
+               COALESCE(SUM(tokens_output), 0) AS tokens_output
+        FROM ai_usage_daily
+        WHERE date >= ? AND date <= ?
+        GROUP BY date
+        ORDER BY date
+    """, (date_from_s, date_to_s))
+    daily_rows = [dict(r) for r in c.fetchall()]
+    conn.close()
+
+    total_input   = sum(e["tokens_input"]  for e in engineers_rows)
+    total_output  = sum(e["tokens_output"] for e in engineers_rows)
+    total_sessions = sum(e["sessions"]     for e in engineers_rows)
+    active_count  = sum(1 for e in engineers_rows if e["sessions"] > 0)
+
+    return {
+        "week":                 week,
+        "year":                 year,
+        "total_tokens_input":   total_input,
+        "total_tokens_output":  total_output,
+        "total_sessions":       total_sessions,
+        "engineers": [
+            {
+                "id":           e["id"],
+                "name":         e["name"],
+                "color":        e["avatar_color"] or "#00cfff",
+                "position":     e["position"],
+                "tokens_input":  e["tokens_input"],
+                "tokens_output": e["tokens_output"],
+                "sessions":      e["sessions"],
+                "active_days":   e["active_days"] or 0,
+            }
+            for e in engineers_rows
+        ],
+        "daily": daily_rows,
+        "active_engineers": active_count,
+    }
+
+
+@app.get("/api/ai-usage/engineer/{engineer_id}")
+def get_ai_usage_engineer(
+    engineer_id: int,
+    week: Optional[int] = None,
+    year: Optional[int] = None,
+):
+    conn = get_db()
+    c = conn.cursor()
+    if week is None or year is None:
+        cw, cy = current_week_year(conn)
+        if week is None:
+            week = cw
+        if year is None:
+            year = cy
+    date_from, date_to = _iso_week_bounds(week, year)
+    date_from_s = date_from.isoformat()
+    date_to_s   = date_to.isoformat()
+
+    c.execute("SELECT id, name FROM team_members WHERE id=?", (engineer_id,))
+    eng = c.fetchone()
+    if not eng:
+        conn.close()
+        raise HTTPException(404, "Engineer not found")
+    eng = dict(eng)
+
+    # Daily breakdown
+    c.execute("""
+        SELECT date,
+               COALESCE(tokens_input,  0) AS tokens_input,
+               COALESCE(tokens_output, 0) AS tokens_output
+        FROM ai_usage_daily
+        WHERE engineer_id=? AND date >= ? AND date <= ?
+        ORDER BY date
+    """, (engineer_id, date_from_s, date_to_s))
+    daily_rows = [dict(r) for r in c.fetchall()]
+
+    # Top repos from raw events
+    c.execute("""
+        SELECT COALESCE(repo, 'unknown') AS repo,
+               SUM(tokens_input + tokens_output) AS tokens
+        FROM ai_events
+        WHERE engineer_id=?
+          AND timestamp >= ? AND timestamp <= ?
+        GROUP BY repo
+        ORDER BY tokens DESC
+        LIMIT 5
+    """, (engineer_id, date_from_s + "T00:00:00Z", date_to_s + "T23:59:59Z"))
+    top_repos = [dict(r) for r in c.fetchall()]
+
+    tokens_input  = sum(d["tokens_input"]  for d in daily_rows)
+    tokens_output = sum(d["tokens_output"] for d in daily_rows)
+    sessions      = sum(
+        d.get("sessions_count", 0) for d in
+        [dict(r) for r in []] # placeholder; query below
+    )
+    # Actual sessions from daily table
+    c.execute("""
+        SELECT COALESCE(SUM(sessions_count), 0) AS s
+        FROM ai_usage_daily
+        WHERE engineer_id=? AND date >= ? AND date <= ?
+    """, (engineer_id, date_from_s, date_to_s))
+    row = c.fetchone()
+    sessions = row["s"] if row else 0
+    conn.close()
+
+    return {
+        "engineer_id":   engineer_id,
+        "name":          eng["name"],
+        "week":          week,
+        "year":          year,
+        "tokens_input":  tokens_input,
+        "tokens_output": tokens_output,
+        "sessions":      sessions,
+        "top_repos":     top_repos,
+        "daily":         daily_rows,
+    }
 
 
 # ── Daily reports endpoints ───────────────────────────────────────────────────

@@ -188,7 +188,7 @@ export default function Dashboard() {
         {activeTab === 'dev'     && <DevTab data={tabData.dev} />}
         {activeTab === 'support' && <SupportTab data={tabData.support} />}
         {activeTab === 'docs'    && <DocsTab data={tabData.docs} />}
-        {activeTab === 'ai'      && <AIUsageTab data={tabData.ai} />}
+        {activeTab === 'ai'      && <AIUsageTab />}
         {activeTab === 'report'  && <WeeklyReportTab />}
 
         <Leaderboard data={leaderboard} />

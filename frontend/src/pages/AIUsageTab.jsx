@@ -1,29 +1,42 @@
 import { useState, useEffect } from 'react'
-import { Line } from 'react-chartjs-2'
 import {
-  Chart as ChartJS,
-  CategoryScale,
-  LinearScale,
-  PointElement,
-  LineElement,
-  Filler,
-  Tooltip,
-} from 'chart.js'
+  BarChart, Bar, XAxis, YAxis, CartesianGrid,
+  Tooltip, ResponsiveContainer,
+} from 'recharts'
 import BottleneckBars from '../components/BottleneckBars'
-import { useTheme } from '../hooks/useTheme'
 import { api } from '../api/client'
 
-ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, Filler, Tooltip)
+const COLOR_INPUT  = '#00cfff'   // teal — accent1
+const COLOR_OUTPUT = '#7b61ff'   // purple — accent2
 
-const AI_COLOR = '#a855f7'
-
-function fmt(n) {
+const formatTokens = (n) => {
+  if (!n) return '0'
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
   if (n >= 1_000)     return `${(n / 1_000).toFixed(0)}K`
   return String(n)
 }
 
-function AICard({ label, value, sub, color = AI_COLOR }) {
+function calcCurrentWeek() {
+  const now = new Date()
+  const startOfYear = new Date(now.getFullYear(), 0, 1)
+  return Math.ceil(((now - startOfYear) / 86400000 + startOfYear.getDay() + 1) / 7)
+}
+
+function weekDateRange(week, year) {
+  const jan4 = new Date(year, 0, 4)
+  const dow = jan4.getDay() || 7
+  const week1Mon = new Date(jan4)
+  week1Mon.setDate(jan4.getDate() - (dow - 1))
+  const mon = new Date(week1Mon)
+  mon.setDate(week1Mon.getDate() + (week - 1) * 7)
+  const fri = new Date(mon)
+  fri.setDate(mon.getDate() + 4)
+  const fmt = d => d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+  return `${fmt(mon)} – ${fmt(fri)}`
+}
+
+// ── Stat card ─────────────────────────────────────────────────────────────────
+function AICard({ label, value, sub, color = COLOR_OUTPUT }) {
   return (
     <div className="metric-card" style={{ borderColor: `${color}22` }}>
       <div className="label">{label}</div>
@@ -33,318 +46,217 @@ function AICard({ label, value, sub, color = AI_COLOR }) {
   )
 }
 
-function TokensConsumptionChart({ tokensPerWeek, tokensPerUser, engineers }) {
-  const [active, setActive] = useState(new Set(['team']))
-  const theme = useTheme()
-  const isDark = theme === 'dark'
+// ── Stacked daily bar chart ───────────────────────────────────────────────────
+const DailyTip = ({ active, payload, label }) => {
+  if (!active || !payload?.length) return null
+  return (
+    <div style={{
+      background: 'var(--card2)', border: '1px solid var(--border)',
+      borderRadius: 8, padding: '8px 12px', fontSize: 12,
+    }}>
+      <div style={{ color: 'var(--muted)', marginBottom: 4 }}>{label}</div>
+      {payload.map((p, i) => (
+        <div key={i} style={{ color: p.fill, fontWeight: 600 }}>
+          {p.name}: {formatTokens(p.value)}
+        </div>
+      ))}
+    </div>
+  )
+}
 
-  const gridColor   = isDark ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.08)'
-  const tickColor   = isDark ? 'rgba(255,255,255,0.35)' : 'rgba(13,19,64,0.5)'
-  const tipBg       = isDark ? '#111c3a' : '#ffffff'
-  const tipBorder   = isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.12)'
-  const tipTitle    = isDark ? 'rgba(255,255,255,0.45)' : 'rgba(13,19,64,0.5)'
-  const tipBody     = isDark ? '#e2e8f0' : '#0d1340'
-
-  function toggle(key) {
-    setActive(prev => {
-      const next = new Set(prev)
-      if (next.has(key)) next.delete(key)
-      else next.add(key)
-      return next
-    })
-  }
-
-  const weeks = tokensPerWeek || []
-
-  const datasets = [
-    {
-      label: 'Team total',
-      data: weeks.map(d => Math.round((d.team || 0) / 1000)),
-      borderColor: AI_COLOR,
-      backgroundColor: 'rgba(168,85,247,0.12)',
-      fill: true,
-      borderWidth: 2,
-      pointRadius: 3,
-      pointHoverRadius: 5,
-      tension: 0.3,
-      hidden: !active.has('team'),
-    },
-    ...(engineers || []).map(e => ({
-      label: e.name,
-      data: weeks.map(d => Math.round((d[e.name] || 0) / 1000)),
-      borderColor: e.color,
-      backgroundColor: 'transparent',
-      fill: false,
-      borderDash: [5, 4],
-      borderWidth: 2,
-      pointRadius: 3,
-      pointHoverRadius: 5,
-      tension: 0.3,
-      hidden: !active.has(e.name),
-    })),
-  ]
-
-  const chartData = {
-    labels: weeks.map(d => d.week),
-    datasets,
-  }
-
-  const options = {
-    responsive: true,
-    maintainAspectRatio: false,
-    animation: { duration: 180 },
-    interaction: { mode: 'index', intersect: false },
-    plugins: {
-      legend: { display: false },
-      tooltip: {
-        backgroundColor: tipBg,
-        borderColor: tipBorder,
-        borderWidth: 1,
-        titleColor: tipTitle,
-        bodyColor: tipBody,
-        padding: 10,
-        callbacks: {
-          label: ctx => ` ${ctx.dataset.label}: ${ctx.parsed.y}K`,
-        },
-      },
-    },
-    scales: {
-      x: {
-        grid: { color: gridColor },
-        border: { display: false },
-        ticks: { color: tickColor, font: { size: 11 } },
-      },
-      y: {
-        grid: { color: gridColor },
-        border: { display: false },
-        ticks: { color: tickColor, font: { size: 11 }, callback: v => `${v}K` },
-      },
-    },
-  }
-
-  const legendItems = [
-    {
-      key: 'team',
-      label: 'Team total',
-      initials: 'ALL',
-      color: AI_COLOR,
-      tokens: (tokensPerUser || []).reduce((s, u) => s + u.tokens, 0),
-    },
-    ...(engineers || []).map(e => ({
-      key: e.name,
-      label: e.name,
-      initials: e.initials,
-      color: e.color,
-      tokens: (tokensPerUser || []).find(u => u.name === e.name)?.tokens || 0,
-    })),
-  ]
+function DailyChart({ daily }) {
+  const DAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
+  const rows = (daily || []).map(d => ({
+    day: DAY_NAMES[new Date(d.date + 'T12:00:00Z').getDay()] || d.date.slice(5),
+    tokens_input:  d.tokens_input  || 0,
+    tokens_output: d.tokens_output || 0,
+  }))
 
   return (
     <div className="card" style={{ marginTop: 20 }}>
       <div style={{
-        fontSize: 11,
-        fontWeight: 700,
-        letterSpacing: '0.08em',
-        color: 'var(--muted)',
-        textTransform: 'uppercase',
-        marginBottom: 16,
+        fontSize: 11, fontWeight: 700, letterSpacing: '0.08em',
+        color: 'var(--muted)', textTransform: 'uppercase', marginBottom: 14,
       }}>
-        AI Usage · Tokens Consumption · 8 Weeks
+        Daily Token Usage
       </div>
-
-      {/* Checkbox legend */}
-      <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginBottom: 20 }}>
-        {legendItems.map(item => {
-          const on = active.has(item.key)
-          return (
-            <div
-              key={item.key}
-              onClick={() => toggle(item.key)}
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: 8,
-                cursor: 'pointer',
-                userSelect: 'none',
-                padding: '6px 12px',
-                borderRadius: 8,
-                background: on ? `${item.color}12` : 'transparent',
-                border: `1px solid ${on ? item.color + '55' : 'var(--border)'}`,
-                transition: 'all 0.15s ease',
-              }}
-            >
-              {/* Checkbox */}
-              <div style={{
-                width: 16,
-                height: 16,
-                borderRadius: 4,
-                border: `2px solid ${item.color}`,
-                background: on ? item.color : 'transparent',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                flexShrink: 0,
-                transition: 'background 0.15s ease',
-              }}>
-                {on && (
-                  <svg width="9" height="7" viewBox="0 0 9 7" fill="none">
-                    <path d="M1 3.5L3.5 6L8 1" stroke="#080d1f" strokeWidth="1.8"
-                      strokeLinecap="round" strokeLinejoin="round" />
-                  </svg>
-                )}
-              </div>
-              {/* Avatar */}
-              <div style={{
-                width: 24,
-                height: 24,
-                borderRadius: 4,
-                background: `${item.color}1a`,
-                border: `1px solid ${item.color}44`,
-                color: item.color,
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                fontSize: 9,
-                fontWeight: 800,
-                flexShrink: 0,
-                letterSpacing: 0,
-              }}>
-                {item.initials}
-              </div>
-              {/* Name */}
-              <span style={{
-                fontSize: 13,
-                color: on ? '#e2e8f0' : 'var(--muted)',
-                transition: 'color 0.15s ease',
-              }}>
-                {item.label}
-              </span>
-              {/* Tokens total */}
-              <span style={{ fontSize: 11, color: item.color, fontWeight: 600 }}>
-                {fmt(item.tokens)}
-              </span>
-            </div>
-          )
-        })}
+      <div style={{ height: 220 }}>
+        <ResponsiveContainer width="100%" height="100%">
+          <BarChart data={rows} margin={{ top: 4, right: 4, left: -10, bottom: 0 }}>
+            <CartesianGrid stroke="rgba(255,255,255,0.04)" vertical={false} />
+            <XAxis
+              dataKey="day"
+              tick={{ fill: 'var(--muted)', fontSize: 11 }}
+              axisLine={false} tickLine={false}
+            />
+            <YAxis
+              tick={{ fill: 'var(--muted)', fontSize: 11 }}
+              axisLine={false} tickLine={false}
+              tickFormatter={v => formatTokens(v)}
+            />
+            <Tooltip content={<DailyTip />} />
+            <Bar dataKey="tokens_input"  name="Input"  stackId="a" fill={COLOR_INPUT}  radius={[0, 0, 0, 0]} />
+            <Bar dataKey="tokens_output" name="Output" stackId="a" fill={COLOR_OUTPUT} radius={[3, 3, 0, 0]} />
+          </BarChart>
+        </ResponsiveContainer>
       </div>
-
-      {/* Chart */}
-      <div style={{ height: 260, position: 'relative' }}>
-        <Line data={chartData} options={options} />
+      <div style={{ display: 'flex', gap: 16, marginTop: 10, justifyContent: 'center' }}>
+        {[['Input tokens', COLOR_INPUT], ['Output tokens', COLOR_OUTPUT]].map(([label, color]) => (
+          <div key={label} style={{
+            display: 'flex', alignItems: 'center', gap: 6,
+            fontSize: 11, color: 'var(--muted)',
+          }}>
+            <div style={{ width: 10, height: 10, borderRadius: 2, background: color, flexShrink: 0 }} />
+            {label}
+          </div>
+        ))}
       </div>
     </div>
   )
 }
 
-export default function AIUsageTab({ data }) {
-  const [engineers, setEngineers] = useState([])
+// ── Empty / no-collector state ────────────────────────────────────────────────
+function EmptyState({ week }) {
+  return (
+    <div style={{
+      textAlign: 'center', padding: '48px 24px',
+      background: 'var(--card)', border: '1px solid var(--border)',
+      borderRadius: 12, marginTop: 20,
+    }}>
+      <div style={{ fontSize: 32, marginBottom: 12 }}>⬡</div>
+      <div style={{ fontSize: 15, fontWeight: 600, marginBottom: 8 }}>
+        No telemetry data for week {week}
+      </div>
+      <div style={{ fontSize: 13, color: 'var(--muted)', marginBottom: 20, lineHeight: 1.6 }}>
+        Install the Claude Code collector on each developer machine to start tracking token usage.
+      </div>
+      <div style={{
+        background: 'var(--card2)', borderRadius: 8, padding: '12px 16px',
+        fontSize: 12, fontFamily: 'ui-monospace, SFMono-Regular, monospace',
+        color: 'var(--accent1)', textAlign: 'left', display: 'inline-block',
+        border: '1px solid var(--border)',
+      }}>
+        curl -sSL https://dashbord-5u0i.onrender.com/install.sh | bash
+      </div>
+      <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 12 }}>
+        Or run manually:{' '}
+        <code style={{ color: 'var(--accent2)' }}>python cc_telemetry.py --once</code>
+      </div>
+    </div>
+  )
+}
+
+// ── Tab root ──────────────────────────────────────────────────────────────────
+export default function AIUsageTab() {
+  const [week, setWeek]       = useState(null)
+  const [year, setYear]       = useState(null)
+  const [report, setReport]   = useState(null)
+  const [loading, setLoading] = useState(true)
 
   useEffect(() => {
-    api.get('/team')
-      .then(members => setEngineers(members.map(m => ({
-        name: m.name,
-        initials: m.name.split(' ').map(w => w[0]).join('').toUpperCase(),
-        color: m.avatar_color,
-      }))))
-      .catch(() => {})
+    api.get('/overview').then(d => {
+      setWeek(d.week || calcCurrentWeek())
+      setYear(d.year || new Date().getFullYear())
+    }).catch(() => {
+      setWeek(calcCurrentWeek())
+      setYear(new Date().getFullYear())
+    })
   }, [])
 
-  if (!data) {
-    return (
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 60 }}>
-        <div className="spinner" />
-      </div>
-    )
+  useEffect(() => {
+    if (!week || !year) return
+    setLoading(true)
+    setReport(null)
+    api.get(`/ai-usage/weekly?week=${week}&year=${year}`)
+      .then(d => { setReport(d); setLoading(false) })
+      .catch(() => setLoading(false))
+  }, [week, year])
+
+  const navigate = (delta) => {
+    let w = (week ?? 1) + delta
+    let y = year ?? new Date().getFullYear()
+    if (w < 1)  { w = 52; y-- }
+    if (w > 52) { w = 1;  y++ }
+    setWeek(w)
+    setYear(y)
   }
 
-  const {
-    total_tokens, total_cost_usd,
-    tokens_per_user, tokens_per_week,
-    leverage_scores, source, api_error,
-  } = data
-
-  // Top consumer this week (latest week in tokens_per_week)
-  const latestWeek = tokens_per_week?.[tokens_per_week.length - 1]
-  let topThisWeek = { name: '—', tokens: 0, pct: 0 }
-  if (latestWeek) {
-    for (const e of engineers) {
-      const tok = latestWeek[e.name] || 0
-      if (tok > topThisWeek.tokens) topThisWeek = { name: e.name, tokens: tok, pct: 0 }
-    }
-    if (latestWeek.team) {
-      topThisWeek.pct = Math.round(topThisWeek.tokens / latestWeek.team * 100)
-    }
-  }
-
-  const tokensRows = (tokens_per_user || []).map(u => ({
-    name: u.name,
-    value: Math.round(u.tokens / 1000),
-    unit: 'K',
-  }))
-
-  const leverageRows = (leverage_scores || []).map(s => ({
-    name: s.name,
-    value: Math.round(s.leverage_score * 100) / 100,
-  }))
+  const dateRange = week && year ? weekDateRange(week, year) : ''
+  const hasData   = report && (
+    (report.total_tokens_input || 0) + (report.total_tokens_output || 0) > 0
+  )
 
   return (
     <>
-      {source === 'mock' && (
-        <div style={{
-          margin: '16px 0 0',
-          padding: '10px 14px',
-          background: 'rgba(168,85,247,0.08)',
-          border: '1px solid rgba(168,85,247,0.25)',
-          borderRadius: 8,
-          fontSize: 12,
-          color: 'var(--muted)',
-          display: 'flex',
-          alignItems: 'center',
-          gap: 8,
-        }}>
-          <span style={{ color: AI_COLOR }}>⬡</span>
-          {api_error
-            ? `API error: ${api_error} — showing mock data.`
-            : 'Showing mock data. Add your Anthropic Admin API key in /admin → Configuration to see live usage.'}
+      {/* Week navigation */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 16, marginTop: 4, marginBottom: 20 }}>
+        <button className="btn btn-ghost" onClick={() => navigate(-1)} style={{ padding: '5px 14px' }}>←</button>
+        <div style={{ textAlign: 'center', minWidth: 200 }}>
+          <div style={{ fontSize: 15, fontWeight: 700 }}>Week {week ?? '…'}</div>
+          {dateRange && (
+            <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 2 }}>
+              {dateRange}, {year}
+            </div>
+          )}
+        </div>
+        <button className="btn btn-ghost" onClick={() => navigate(+1)} style={{ padding: '5px 14px' }}>→</button>
+      </div>
+
+      {loading && (
+        <div style={{ display: 'flex', justifyContent: 'center', padding: 48 }}>
+          <div className="spinner" />
         </div>
       )}
 
-      <TokensConsumptionChart tokensPerWeek={tokens_per_week} tokensPerUser={tokens_per_user} engineers={engineers} />
+      {!loading && !hasData && <EmptyState week={week} />}
 
-      <div className="metric-grid" style={{ marginTop: 20 }}>
-        <AICard
-          label="Total tokens this month"
-          value={fmt(total_tokens ?? 0)}
-          sub="input + output"
-        />
-        <AICard
-          label="Estimated cost"
-          value={total_cost_usd != null ? `$${total_cost_usd.toFixed(2)}` : '—'}
-          sub="$0.003 per 1K tokens"
-          color="#00cfff"
-        />
-        <AICard
-          label="Top consumer this week"
-          value={topThisWeek.name}
-          sub={topThisWeek.tokens > 0
-            ? `${fmt(topThisWeek.tokens)} · ${topThisWeek.pct}% of total`
-            : '—'}
-          color="#c084fc"
-        />
-      </div>
+      {!loading && hasData && (
+        <>
+          <div className="metric-grid">
+            <AICard
+              label="Total tokens"
+              value={formatTokens((report.total_tokens_input || 0) + (report.total_tokens_output || 0))}
+              sub="input + output"
+              color={COLOR_OUTPUT}
+            />
+            <AICard
+              label="Output tokens"
+              value={formatTokens(report.total_tokens_output || 0)}
+              sub={`${formatTokens(report.total_tokens_input || 0)} input`}
+              color={COLOR_INPUT}
+            />
+            <AICard
+              label="Active engineers"
+              value={report.active_engineers ?? 0}
+              sub={`${report.total_sessions ?? 0} session${report.total_sessions !== 1 ? 's' : ''}`}
+              color="#c084fc"
+            />
+          </div>
 
-      <div className="two-col" style={{ marginTop: 20 }}>
-        <BottleneckBars
-          title="Tokens per engineer"
-          rows={tokensRows}
-          color={AI_COLOR}
-        />
-        <BottleneckBars
-          title="AI leverage score · tasks / 1K tokens"
-          rows={leverageRows}
-          color="var(--success)"
-        />
-      </div>
+          <DailyChart daily={report.daily || []} />
+
+          <div className="two-col" style={{ marginTop: 20 }}>
+            <BottleneckBars
+              title="Input tokens per engineer"
+              rows={(report.engineers || []).map(e => ({
+                name: e.name,
+                value: Math.round((e.tokens_input || 0) / 1000),
+                unit: 'K',
+              }))}
+              color={COLOR_INPUT}
+            />
+            <BottleneckBars
+              title="Output tokens per engineer"
+              rows={(report.engineers || []).map(e => ({
+                name: e.name,
+                value: Math.round((e.tokens_output || 0) / 1000),
+                unit: 'K',
+              }))}
+              color={COLOR_OUTPUT}
+            />
+          </div>
+        </>
+      )}
     </>
   )
 }
