@@ -1545,21 +1545,36 @@ def _do_github_sync(conn) -> tuple:
     print(f"[GitHub sync] username_map in use: {username_map}")
 
     def _resolve_login(entry: dict) -> str:
-        """Return the canonical username_map login for a commit entry, or ''."""
-        # 1. GitHub-linked author object (most reliable)
-        gh = ((entry.get("author") or {}).get("login") or "").strip()
-        if gh and login_canonical.get(gh.lower()):
-            return login_canonical[gh.lower()]
-        # 2. GitHub-linked committer object (merge commits often have author=null)
-        gh = ((entry.get("committer") or {}).get("login") or "").strip()
-        if gh and login_canonical.get(gh.lower()):
-            return login_canonical[gh.lower()]
+        """Return the canonical username_map login for a commit entry, or ''.
+
+        Attribution order for Lovable/bot co-authored commits:
+          1. author.login   — if it is NOT a bot account
+          2. committer.login — always checked when author is a bot or unknown
+          3. git commit author name == known GitHub login or engineer name
+          4. git commit committer name (same two checks)
+          5. Co-authored-by trailers in commit message
+        If author.login ends with '[bot]', steps 1 is skipped and we go
+        straight to committer (rule 4 in the user spec).
+        """
+        gh_author = ((entry.get("author") or {}).get("login") or "").strip()
+        is_bot = gh_author.endswith("[bot]")
+
+        # 1. author.login — skip if it's a bot account (e.g. lovable-dev[bot])
+        if not is_bot and gh_author and login_canonical.get(gh_author.lower()):
+            return login_canonical[gh_author.lower()]
+
+        # 2. committer.login — preferred fallback when author is a bot
+        gh_committer = ((entry.get("committer") or {}).get("login") or "").strip()
+        if gh_committer and not gh_committer.endswith("[bot]") \
+                and login_canonical.get(gh_committer.lower()):
+            return login_canonical[gh_committer.lower()]
+
         cmt = entry.get("commit") or {}
-        # 3. Git author name matches a GitHub login directly (e.g. name == "KlimMalgin")
+        # 3. Git author name == GitHub login
         git_author_name = ((cmt.get("author") or {}).get("name") or "").strip()
         if git_author_name and login_canonical.get(git_author_name.lower()):
             return login_canonical[git_author_name.lower()]
-        # 4. Git author name matches an engineer's display name
+        # 4. Git author name == engineer display name
         if git_author_name and name_to_login.get(git_author_name.lower()):
             return name_to_login[git_author_name.lower()]
         # 5. Git committer name (same two checks)
@@ -1568,19 +1583,15 @@ def _do_github_sync(conn) -> tuple:
             return login_canonical[git_committer_name.lower()]
         if git_committer_name and name_to_login.get(git_committer_name.lower()):
             return name_to_login[git_committer_name.lower()]
-        # 6. Co-authored-by trailers in commit message (e.g. Lovable/bot commits)
-        #    Format: "Co-authored-by: Name <email@host>"
+        # 6. Co-authored-by trailers in commit message (Lovable pattern)
         message = (cmt.get("message") or "")
         for m in re.finditer(r"(?im)^co-authored-by:\s*(.+?)\s*<([^>]+)>", message):
             co_name  = m.group(1).strip()
             co_email = m.group(2).strip()
-            # a) co-author display name matches a GitHub login
             if co_name and login_canonical.get(co_name.lower()):
                 return login_canonical[co_name.lower()]
-            # b) co-author display name matches an engineer name
             if co_name and name_to_login.get(co_name.lower()):
                 return name_to_login[co_name.lower()]
-            # c) local-part of email matches a GitHub login (e.g. droonpog@...)
             local = co_email.split("@")[0].lower() if "@" in co_email else ""
             if local and login_canonical.get(local):
                 return login_canonical[local]
@@ -1762,20 +1773,31 @@ def _do_github_backfill(conn, weeks: int = 8) -> tuple:
     }
 
     def resolve_login(entry: dict) -> str:
-        """Return canonical username_map login for a commit entry, or ''."""
-        gh = ((entry.get("author")    or {}).get("login") or "").strip()
-        if gh and login_canonical.get(gh.lower()):
-            return login_canonical[gh.lower()]
-        gh = ((entry.get("committer") or {}).get("login") or "").strip()
-        if gh and login_canonical.get(gh.lower()):
-            return login_canonical[gh.lower()]
+        """Return canonical username_map login for a commit entry, or ''.
+        Mirrors _resolve_login in _do_github_sync — see that function for docs.
+        """
+        gh_author = ((entry.get("author") or {}).get("login") or "").strip()
+        is_bot = gh_author.endswith("[bot]")
+
+        if not is_bot and gh_author and login_canonical.get(gh_author.lower()):
+            return login_canonical[gh_author.lower()]
+
+        gh_committer = ((entry.get("committer") or {}).get("login") or "").strip()
+        if gh_committer and not gh_committer.endswith("[bot]") \
+                and login_canonical.get(gh_committer.lower()):
+            return login_canonical[gh_committer.lower()]
+
         cmt = entry.get("commit") or {}
         name = ((cmt.get("author") or {}).get("name") or "").strip()
         if name and login_canonical.get(name.lower()):
             return login_canonical[name.lower()]
         if name and name_to_login.get(name.lower()):
             return name_to_login[name.lower()]
-        # Co-authored-by trailers
+        git_committer_name = ((cmt.get("committer") or {}).get("name") or "").strip()
+        if git_committer_name and login_canonical.get(git_committer_name.lower()):
+            return login_canonical[git_committer_name.lower()]
+        if git_committer_name and name_to_login.get(git_committer_name.lower()):
+            return name_to_login[git_committer_name.lower()]
         message = cmt.get("message") or ""
         for m in re.finditer(r"(?im)^co-authored-by:\s*(.+?)\s*<([^>]+)>", message):
             co_name = m.group(1).strip()
