@@ -342,6 +342,155 @@ function WeeklyTasksPanel({ engineerId, stream, initialWeek, initialYear }) {
   )
 }
 
+// ── Commits timeline ──────────────────────────────────────────────────────────
+
+function CommitsTimeline({ engineerId }) {
+  const [commits, setCommits] = useState(null)
+  const [error, setError] = useState(null)
+
+  useEffect(() => {
+    api.get(`/engineers/${engineerId}/commits`)
+      .then(setCommits)
+      .catch(e => setError(e.message))
+  }, [engineerId])
+
+  if (error) {
+    return (
+      <div className="card" style={{ padding: '14px 16px', fontSize: 13, color: 'var(--danger)' }}>
+        Failed to load commits: {error}
+      </div>
+    )
+  }
+
+  if (commits === null) {
+    return (
+      <div className="card" style={{ padding: 24, display: 'flex', justifyContent: 'center' }}>
+        <div className="spinner" />
+      </div>
+    )
+  }
+
+  // Group: dateKey → repo → [commit, ...]
+  const groupedByDate = {}
+  for (const c of commits) {
+    const dateKey = (c.committed_at || '').slice(0, 10)
+    if (!dateKey) continue
+    if (!groupedByDate[dateKey]) groupedByDate[dateKey] = {}
+    if (!groupedByDate[dateKey][c.repo]) groupedByDate[dateKey][c.repo] = []
+    groupedByDate[dateKey][c.repo].push(c)
+  }
+  const dateKeys = Object.keys(groupedByDate).sort((a, b) => b.localeCompare(a))
+
+  const formatDate = (s) => {
+    const d = new Date(s + 'T12:00:00Z')
+    return d.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' })
+  }
+  const firstLine = (msg) => (msg || '').split('\n')[0].trim()
+
+  return (
+    <div className="card" style={{ padding: '18px 20px' }}>
+      <div style={{
+        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+        marginBottom: 16,
+      }}>
+        <div style={{
+          fontSize: 11, color: 'var(--muted)',
+          textTransform: 'uppercase', letterSpacing: '0.08em',
+        }}>
+          Commits · last 8 weeks
+        </div>
+        <div style={{ fontSize: 11, color: 'var(--muted)' }}>
+          {commits.length} commit{commits.length === 1 ? '' : 's'}
+        </div>
+      </div>
+
+      {dateKeys.length === 0 ? (
+        <div style={{ color: 'var(--muted)', fontSize: 13, padding: '12px 0', textAlign: 'center' }}>
+          No commits recorded
+        </div>
+      ) : (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
+          {dateKeys.map(date => {
+            const repos = groupedByDate[date]
+            const totalForDay = Object.values(repos).reduce((a, list) => a + list.length, 0)
+            return (
+              <div key={date} style={{ display: 'flex', gap: 14, position: 'relative' }}>
+                {/* Timeline dot + line */}
+                <div style={{
+                  flexShrink: 0, width: 10, paddingTop: 4,
+                  display: 'flex', flexDirection: 'column', alignItems: 'center',
+                }}>
+                  <div style={{
+                    width: 10, height: 10, borderRadius: '50%',
+                    background: 'var(--accent1)',
+                    boxShadow: '0 0 0 3px rgba(0,207,255,0.15)',
+                  }} />
+                  <div style={{
+                    width: 2, flex: 1, background: 'var(--border)', marginTop: 4,
+                  }} />
+                </div>
+
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  {/* Date header */}
+                  <div style={{
+                    display: 'flex', alignItems: 'baseline', gap: 8, marginBottom: 8,
+                  }}>
+                    <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text)' }}>
+                      {formatDate(date)}
+                    </span>
+                    <span style={{ fontSize: 11, color: 'var(--muted)' }}>
+                      {totalForDay} commit{totalForDay === 1 ? '' : 's'}
+                    </span>
+                  </div>
+
+                  {/* Repo groups */}
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                    {Object.entries(repos).map(([repo, list]) => (
+                      <div key={repo}>
+                        <div style={{
+                          fontSize: 11, fontWeight: 600, color: 'var(--accent2)',
+                          marginBottom: 5, fontFamily: 'ui-monospace, SFMono-Regular, monospace',
+                        }}>
+                          {repo}
+                        </div>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                          {list.map(c => (
+                            <div key={c.sha} style={{
+                              display: 'flex', alignItems: 'flex-start', gap: 10,
+                              padding: '6px 10px',
+                              background: 'var(--card2)', borderRadius: 6,
+                              border: '1px solid var(--border)',
+                              fontSize: 12,
+                            }}>
+                              <code style={{
+                                color: 'var(--muted)', fontSize: 11,
+                                flexShrink: 0, paddingTop: 1,
+                              }}>
+                                {(c.sha || '').slice(0, 7)}
+                              </code>
+                              <span style={{
+                                flex: 1, lineHeight: 1.5, color: 'var(--text)',
+                                overflow: 'hidden', textOverflow: 'ellipsis',
+                                whiteSpace: 'nowrap',
+                              }}>
+                                {firstLine(c.message) || '(no message)'}
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            )
+          })}
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ── Page ──────────────────────────────────────────────────────────────────────
 
 export default function EngineerProfile() {
@@ -404,14 +553,15 @@ export default function EngineerProfile() {
           <ProfileCard profile={profile} />
         </div>
 
-        {/* Right: weekly tasks */}
-        <div>
+        {/* Right: weekly tasks + commits timeline */}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 28 }}>
           <WeeklyTasksPanel
             engineerId={id}
             stream={profile.stream}
             initialWeek={profile.current_week}
             initialYear={profile.current_year}
           />
+          <CommitsTimeline engineerId={id} />
         </div>
       </div>
     </div>
