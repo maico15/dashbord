@@ -267,6 +267,11 @@ def init_db():
         conn.commit()
     except Exception:
         pass
+    try:
+        conn.execute("ALTER TABLE team_members ADD COLUMN position TEXT DEFAULT ''")
+        conn.commit()
+    except Exception:
+        pass
     conn.close()
 
 
@@ -2003,6 +2008,7 @@ class MemberUpdate(BaseModel):
     streams: Optional[list] = None
     stream: Optional[str] = None  # backward compat
     avatar_color: Optional[str] = None
+    position: Optional[str] = None
 
 
 @app.post("/api/team")
@@ -2036,9 +2042,16 @@ def update_member(member_id: int, data: MemberUpdate, password: str = ""):
                   (json_lib.dumps([data.stream]), member_id))
     if data.avatar_color is not None:
         c.execute("UPDATE team_members SET avatar_color=? WHERE id=?", (data.avatar_color, member_id))
+    if data.position is not None:
+        c.execute("UPDATE team_members SET position=? WHERE id=?", (data.position, member_id))
     conn.commit()
     conn.close()
     return {"ok": True}
+
+
+@app.patch("/api/engineers/{member_id}")
+def patch_engineer(member_id: int, data: MemberUpdate, password: str = ""):
+    return update_member(member_id, data, password)
 
 
 @app.delete("/api/team/{member_id}")
@@ -2326,6 +2339,34 @@ def update_config(data: ConfigUpdate, password: str = ""):
     c = conn.cursor()
     for k, v in data.dict(exclude_none=True).items():
         c.execute("INSERT OR REPLACE INTO config (key,value) VALUES (?,?)", (k, str(v)))
+    conn.commit()
+    conn.close()
+    return {"ok": True}
+
+
+@app.get("/api/config/repos/display_names")
+def get_repo_display_names():
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT value FROM config WHERE key='repo_display_names'")
+    row = c.fetchone()
+    conn.close()
+    try:
+        return json_lib.loads(row["value"] if row and row["value"] else "{}")
+    except Exception:
+        return {}
+
+
+@app.put("/api/config/repos/display_names")
+def set_repo_display_names(body: Dict[str, str], password: str = ""):
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    conn = get_db()
+    c = conn.cursor()
+    c.execute(
+        "INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)",
+        ("repo_display_names", json_lib.dumps(body)),
+    )
     conn.commit()
     conn.close()
     return {"ok": True}
@@ -2631,6 +2672,155 @@ def get_reports(date: str = None):
         })
     conn.close()
     return result
+
+
+@app.get("/api/reports/weekly")
+def get_weekly_report(week: Optional[int] = None, year: Optional[int] = None):
+    conn = get_db()
+    c = conn.cursor()
+    if week is None or year is None:
+        cw, cy = current_week_year(conn)
+        if week is None:
+            week = cw
+        if year is None:
+            year = cy
+
+    c.execute("SELECT value FROM config WHERE key='repo_display_names'")
+    dn_row = c.fetchone()
+    display_names: dict = {}
+    try:
+        display_names = json_lib.loads(dn_row["value"] if dn_row and dn_row["value"] else "{}")
+    except Exception:
+        pass
+
+    c.execute("SELECT * FROM team_members ORDER BY name")
+    members = [dict(r) for r in c.fetchall()]
+
+    engineers_out = []
+    for member in members:
+        mid = member["id"]
+
+        c.execute(
+            "SELECT pr_number, title, additions, deletions, changed_files, merged_at, repo, commits "
+            "FROM pr_log WHERE member_id=? AND week=? AND year=?",
+            (mid, week, year),
+        )
+        prs = []
+        pr_commit_shas: set = set()
+        for row in c.fetchall():
+            d = dict(row)
+            try:
+                d["commits"] = json_lib.loads(d.get("commits") or "[]")
+            except Exception:
+                d["commits"] = []
+            for pc in d["commits"]:
+                pr_commit_shas.add(pc.get("sha", ""))
+            prs.append(d)
+
+        c.execute(
+            "SELECT repo, sha, message, committed_at FROM commit_log "
+            "WHERE member_id=? AND week=? AND year=? ORDER BY committed_at DESC",
+            (mid, week, year),
+        )
+        all_commits = [dict(r) for r in c.fetchall()]
+        loose_commits = [
+            cm for cm in all_commits
+            if (cm.get("sha") or "")[:7] not in pr_commit_shas
+        ]
+
+        if not prs and not loose_commits:
+            continue
+
+        repos_data: dict = {}
+        for pr in prs:
+            short = pr["repo"].split("/")[-1] if "/" in pr["repo"] else pr["repo"]
+            if short not in repos_data:
+                repos_data[short] = {"full_repo": pr["repo"], "prs": [], "loose": []}
+            repos_data[short]["prs"].append(pr)
+        for cm in loose_commits:
+            short = cm["repo"].split("/")[-1] if "/" in cm["repo"] else cm["repo"]
+            if short not in repos_data:
+                repos_data[short] = {"full_repo": cm["repo"], "prs": [], "loose": []}
+            repos_data[short]["loose"].append(cm)
+
+        projects = []
+        total_commits = 0
+        total_prs = 0
+        total_added = 0
+        total_deleted = 0
+
+        for short_repo, rdata in repos_data.items():
+            rprs = rdata["prs"]
+            rloose = rdata["loose"]
+            full_repo = rdata["full_repo"]
+            repo_added   = sum(p.get("additions", 0) for p in rprs)
+            repo_deleted = sum(p.get("deletions", 0) for p in rprs)
+            repo_commits = sum(len(p["commits"]) for p in rprs) + len(rloose)
+
+            activity = []
+            for pr in sorted(rprs, key=lambda x: x.get("merged_at") or "", reverse=True):
+                merged_date = (pr.get("merged_at") or "")[:10]
+                activity.append({
+                    "type": "pr",
+                    "pr_number": pr["pr_number"],
+                    "title": pr.get("title", ""),
+                    "merged_at": merged_date,
+                    "lines_added": pr.get("additions", 0),
+                    "lines_deleted": pr.get("deletions", 0),
+                    "changed_files": pr.get("changed_files", 0),
+                    "commits": [
+                        {"sha": pc.get("sha", ""), "message": pc.get("message", ""), "date": merged_date}
+                        for pc in pr["commits"]
+                    ],
+                })
+
+            day_groups: dict = {}
+            for cm in rloose:
+                committed_at = cm.get("committed_at", "")
+                date_key = committed_at[:10] if committed_at else "unknown"
+                time_str = committed_at[11:16] if len(committed_at) > 15 else ""
+                if date_key not in day_groups:
+                    day_groups[date_key] = []
+                day_groups[date_key].append({
+                    "type": "commit",
+                    "sha": (cm.get("sha") or "")[:7],
+                    "message": cm.get("message", ""),
+                    "date": date_key,
+                    "time": time_str,
+                })
+            for dk in sorted(day_groups, reverse=True):
+                activity.extend(day_groups[dk])
+
+            dn = display_names.get(full_repo) or display_names.get(short_repo) or ""
+            projects.append({
+                "repo": short_repo,
+                "display_name": dn,
+                "commits": repo_commits,
+                "prs": len(rprs),
+                "lines_added": repo_added,
+                "lines_deleted": repo_deleted,
+                "activity": activity,
+            })
+            total_commits += repo_commits
+            total_prs    += len(rprs)
+            total_added  += repo_added
+            total_deleted += repo_deleted
+
+        if projects:
+            engineers_out.append({
+                "id": member["id"],
+                "name": member["name"],
+                "position": member.get("position") or "",
+                "color": member.get("avatar_color") or "#00cfff",
+                "total_commits": total_commits,
+                "total_prs": total_prs,
+                "lines_added": total_added,
+                "lines_deleted": total_deleted,
+                "projects": projects,
+            })
+
+    conn.close()
+    return {"week": week, "year": year, "engineers": engineers_out}
 
 
 @app.get("/api/reports/engineer/{engineer_id}")

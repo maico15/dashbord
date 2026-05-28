@@ -526,6 +526,7 @@ function TeamSection({ pw }) {
   const handleSaveEdit = async () => {
     await api.put(`/team/${editing.id}`, {
       name: editing.name, streams: editing.streams, avatar_color: editing.avatar_color,
+      position: editing.position || '',
     }, pw)
     setEditing(null)
     load()
@@ -547,6 +548,9 @@ function TeamSection({ pw }) {
               <div style={{ display: 'flex', gap: 8, padding: '10px 14px', alignItems: 'center', flexWrap: 'wrap' }}>
                 <input value={editing.name} onChange={(e) => setEditing({ ...editing, name: e.target.value })}
                   style={{ flex: 1, minWidth: 140, background: 'var(--card2)', border: '1px solid var(--border)', borderRadius: 5, color: 'var(--text)', padding: '5px 8px', fontSize: 13 }} />
+                <input value={editing.position || ''} onChange={(e) => setEditing({ ...editing, position: e.target.value })}
+                  placeholder="Position (e.g. Dev Lead)"
+                  style={{ flex: 1, minWidth: 140, background: 'var(--card2)', border: '1px solid var(--border)', borderRadius: 5, color: 'var(--text)', padding: '5px 8px', fontSize: 13 }} />
                 <StreamCheckboxes
                   selected={editing.streams || [editing.stream]}
                   onChange={(v) => setEditing({ ...editing, streams: v })}
@@ -563,7 +567,10 @@ function TeamSection({ pw }) {
                 <div style={{ width: 28, height: 28, borderRadius: '50%', background: m.avatar_color, flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 11, fontWeight: 700, color: '#080d1f' }}>
                   {m.name.split(' ').slice(0, 2).map(w => w[0]).join('')}
                 </div>
-                <span style={{ flex: 1, fontSize: 14, fontWeight: 500 }}>{m.name}</span>
+                <div style={{ flex: 1 }}>
+                  <span style={{ fontSize: 14, fontWeight: 500 }}>{m.name}</span>
+                  {m.position && <span style={{ fontSize: 12, color: 'var(--muted)', marginLeft: 8, fontWeight: 400 }}>{m.position}</span>}
+                </div>
                 <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
                   {(m.streams || [m.stream]).map(s => (
                     <span key={s} className={`tag tag-${s}`}>{STREAM_LABELS[s]}</span>
@@ -1131,7 +1138,9 @@ function IntegrationsSection({ pw }) {
   const [githubSaved,      setGithubSaved]        = useState(false)
   const [jiraLogTrigger,   setJiraLogTrigger]    = useState(0)
   const [slackLogTrigger,  setSlackLogTrigger]   = useState(0)
-  const [githubLogTrigger, setGithubLogTrigger]  = useState(0)
+  const [githubLogTrigger,   setGithubLogTrigger]   = useState(0)
+  const [repoDisplayNames,   setRepoDisplayNames]   = useState({})
+  const [displayNamesSaved,  setDisplayNamesSaved]  = useState(false)
 
   const loadStatus = () => {
     api.get(`/sync/jira/status?password=${encodeURIComponent(pw)}`)
@@ -1183,6 +1192,7 @@ function IntegrationsSection({ pw }) {
       .then(setSlackLastSync).catch(() => {})
     api.get(`/sync/github/status?password=${encodeURIComponent(pw)}`)
       .then(setGithubLastSync).catch(() => {})
+    api.get('/config/repos/display_names').then(setRepoDisplayNames).catch(() => {})
   }, [])
 
   const handleSave = async () => {
@@ -1496,6 +1506,46 @@ function IntegrationsSection({ pw }) {
             <input value={githubRepos} onChange={e => setGithubRepos(e.target.value)} placeholder="apollo, callcenter-admin, maico15/dashbord" />
           </div>
         </div>
+
+        {githubRepos.trim() && (
+          <div style={{ marginBottom: 14 }}>
+            <div style={{ fontSize: 12, color: 'var(--muted)', marginBottom: 8 }}>
+              Project display names (shown in Weekly Report)
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              {githubRepos.split(',').map(r => r.trim()).filter(Boolean).map(repo => {
+                const short = repo.includes('/') ? repo.split('/').pop() : repo
+                return (
+                  <div key={repo} style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                    <code style={{
+                      fontSize: 12, color: 'var(--muted)', minWidth: 160, flexShrink: 0,
+                      fontFamily: 'ui-monospace, SFMono-Regular, monospace',
+                    }}>
+                      {short}
+                    </code>
+                    <input
+                      value={repoDisplayNames[short] || ''}
+                      onChange={e => setRepoDisplayNames(prev => ({ ...prev, [short]: e.target.value }))}
+                      placeholder="e.g. Tech App"
+                      style={{ flex: 1, background: 'var(--card2)', border: '1px solid var(--border)', borderRadius: 5, color: 'var(--text)', padding: '4px 8px', fontSize: 13 }}
+                    />
+                  </div>
+                )
+              })}
+            </div>
+            <button
+              className="btn btn-ghost"
+              style={{ marginTop: 8, padding: '4px 12px', fontSize: 12 }}
+              onClick={async () => {
+                await api.put('/config/repos/display_names', repoDisplayNames, pw)
+                setDisplayNamesSaved(true)
+                setTimeout(() => setDisplayNamesSaved(false), 2000)
+              }}
+            >
+              {displayNamesSaved ? '✓ Saved' : 'Save Names'}
+            </button>
+          </div>
+        )}
 
         <div style={{ margin: '16px 0 8px', fontSize: 12, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
           GitHub Username → Engineer Name Mapping

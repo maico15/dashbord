@@ -22,8 +22,9 @@ async function req(method, path, body, password) {
 }
 
 export const api = {
-  get: (path) => req('GET', path),
-  put: (path, body, pw) => req('PUT', path, body, pw),
-  post: (path, body, pw) => req('POST', path, body, pw),
-  del: (path, pw) => req('DELETE', path, null, pw),
+  get:   (path) => req('GET', path),
+  put:   (path, body, pw) => req('PUT',   path, body, pw),
+  patch: (path, body, pw) => req('PATCH', path, body, pw),
+  post:  (path, body, pw) => req('POST',  path, body, pw),
+  del:   (path, pw)       => req('DELETE', path, null, pw),
 }

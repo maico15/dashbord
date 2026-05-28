@@ -6,12 +6,14 @@ import BottleneckBars from '../components/BottleneckBars'
 import XPChart from '../components/XPChart'
 import Leaderboard from '../components/Leaderboard'
 import AIUsageTab from './AIUsageTab'
+import WeeklyReportTab from './WeeklyReportTab'
 
 const TABS = [
-  { key: 'dev', label: 'Development' },
+  { key: 'dev',    label: 'Development' },
   // { key: 'support', label: 'Support' },
   // { key: 'docs', label: 'Documentation' },
-  { key: 'ai', label: '⬡ AI Usage' },
+  { key: 'ai',     label: '⬡ AI Usage' },
+  { key: 'report', label: '📋 Weekly Report' },
 ]
 
 function DevTab({ data }) {
@@ -187,6 +189,7 @@ export default function Dashboard() {
         {activeTab === 'support' && <SupportTab data={tabData.support} />}
         {activeTab === 'docs'    && <DocsTab data={tabData.docs} />}
         {activeTab === 'ai'      && <AIUsageTab data={tabData.ai} />}
+        {activeTab === 'report'  && <WeeklyReportTab />}
 
         <Leaderboard data={leaderboard} />
       </div>
