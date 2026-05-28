@@ -1353,7 +1353,7 @@ def _do_github_sync(conn) -> tuple:
 
     print(f"[GitHub sync] PR counts by login: {pr_counts}")
 
-    # Fetch commits to main branch per engineer, filtered to current week
+    # Fetch commits to each repo's default branch per engineer, filtered to current week
     commit_counts = {}  # github_login -> count
     since_iso = f"{week_monday.isoformat()}T00:00:00Z"
     until_iso = f"{week_sunday.isoformat()}T23:59:59Z"
@@ -1374,8 +1374,8 @@ def _do_github_sync(conn) -> tuple:
                 break
             page = 1
             while True:
+                # Omit `sha` so GitHub uses each repo's default branch (main, master, etc.)
                 qs = urllib.parse.urlencode({
-                    "sha": "main",
                     "since": since_iso,
                     "until": until_iso,
                     "author": login,
@@ -1386,9 +1386,9 @@ def _do_github_sync(conn) -> tuple:
                 try:
                     page_data = gh_get(url)
                 except ValueError as e:
-                    # 404 → no 'main' branch; 409 → empty repo. Skip commits for this repo.
+                    # 409 → empty repo; 404 → repo gone (already validated by PR loop above)
                     if "404" in str(e) or "409" in str(e):
-                        print(f"[GitHub sync] {owner_repo}: no 'main' branch or empty — skipping commits")
+                        print(f"[GitHub sync] {owner_repo}: empty or inaccessible — skipping commits")
                         repo_skipped = True
                     break
                 if not isinstance(page_data, list) or not page_data:
