@@ -116,6 +116,7 @@ def init_db():
             features_completed INTEGER DEFAULT 0,
             deploys INTEGER DEFAULT 0,
             blocked_count INTEGER DEFAULT 0,
+            commits_count INTEGER DEFAULT 0,
             UNIQUE(member_id, week, year)
         );
 
@@ -221,6 +222,18 @@ def init_db():
             created_at TEXT NOT NULL DEFAULT (datetime('now')),
             UNIQUE(engineer_id, report_date)
         );
+
+        CREATE TABLE IF NOT EXISTS commit_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            member_id INTEGER REFERENCES team_members(id) ON DELETE CASCADE,
+            week INTEGER NOT NULL,
+            year INTEGER NOT NULL,
+            repo TEXT NOT NULL,
+            sha TEXT NOT NULL,
+            message TEXT NOT NULL DEFAULT '',
+            committed_at TEXT NOT NULL,
+            UNIQUE(repo, sha)
+        );
     """)
     conn.commit()
     # Add blocked_count for existing SQLite databases that pre-date this column
@@ -231,6 +244,12 @@ def init_db():
         if "blocked_count" not in cols:
             conn.execute("ALTER TABLE dev_metrics ADD COLUMN blocked_count INTEGER DEFAULT 0")
             conn.commit()
+    # Add commits_count for existing databases (works for SQLite and Postgres)
+    try:
+        conn.execute("ALTER TABLE dev_metrics ADD COLUMN commits_count INTEGER DEFAULT 0")
+        conn.commit()
+    except Exception:
+        pass
     conn.close()
 
 
@@ -1333,11 +1352,80 @@ def _do_github_sync(conn) -> tuple:
                 total_prs += 1
 
     print(f"[GitHub sync] PR counts by login: {pr_counts}")
-    # Map logins → engineers and write to dev_metrics
+
+    # Fetch commits to main branch per engineer, filtered to current week
+    commit_counts = {}  # github_login -> count
+    since_iso = f"{week_monday.isoformat()}T00:00:00Z"
+    until_iso = f"{week_sunday.isoformat()}T23:59:59Z"
+
+    # Resolve login → member_id once for commit_log inserts
+    login_to_member = {}
+    for login, eng_name in username_map.items():
+        c.execute("SELECT id FROM team_members WHERE name=?", (eng_name,))
+        row = c.fetchone()
+        if row:
+            login_to_member[login] = row["id"]
+
+    for repo in repos:
+        owner_repo = repo if "/" in repo else f"{org}/{repo}"
+        repo_skipped = False
+        for login in username_map.keys():
+            if repo_skipped:
+                break
+            page = 1
+            while True:
+                qs = urllib.parse.urlencode({
+                    "sha": "main",
+                    "since": since_iso,
+                    "until": until_iso,
+                    "author": login,
+                    "per_page": 100,
+                    "page": page,
+                })
+                url = f"https://api.github.com/repos/{owner_repo}/commits?{qs}"
+                try:
+                    page_data = gh_get(url)
+                except ValueError as e:
+                    # 404 → no 'main' branch; 409 → empty repo. Skip commits for this repo.
+                    if "404" in str(e) or "409" in str(e):
+                        print(f"[GitHub sync] {owner_repo}: no 'main' branch or empty — skipping commits")
+                        repo_skipped = True
+                    break
+                if not isinstance(page_data, list) or not page_data:
+                    break
+                commit_counts[login] = commit_counts.get(login, 0) + len(page_data)
+                member_id = login_to_member.get(login)
+                if member_id:
+                    for entry in page_data:
+                        sha = entry.get("sha") or ""
+                        cmt = entry.get("commit") or {}
+                        msg = (cmt.get("message") or "").strip()
+                        committed_at = (cmt.get("committer") or {}).get("date") or ""
+                        if sha and committed_at:
+                            try:
+                                c.execute(
+                                    "INSERT OR IGNORE INTO commit_log "
+                                    "(member_id, week, year, repo, sha, message, committed_at) "
+                                    "VALUES (?,?,?,?,?,?,?)",
+                                    (member_id, week, year, owner_repo, sha, msg, committed_at),
+                                )
+                            except Exception as ex:
+                                print(f"[GitHub sync] commit_log insert failed for {sha[:7]}: {ex}")
+                if len(page_data) < 100:
+                    break
+                page += 1
+
+    total_commits = sum(commit_counts.values())
+    print(f"[GitHub sync] Commit counts by login: {commit_counts}")
+
+    # Map logins → engineers and write PRs + commits to dev_metrics
     records_updated = 0
-    for login, count in pr_counts.items():
+    all_logins = set(pr_counts.keys()) | set(commit_counts.keys())
+    for login in all_logins:
         eng_name = username_map.get(login)
-        print(f"[GitHub sync] {login!r} → engineer {eng_name!r} ({count} PR(s))")
+        pr_n = pr_counts.get(login, 0)
+        cm_n = commit_counts.get(login, 0)
+        print(f"[GitHub sync] {login!r} → engineer {eng_name!r} ({pr_n} PR(s), {cm_n} commit(s))")
         if not eng_name:
             continue
         c.execute("SELECT id FROM team_members WHERE name=?", (eng_name,))
@@ -1346,30 +1434,34 @@ def _do_github_sync(conn) -> tuple:
             continue
         member_id = row["id"]
         c.execute(
-            "SELECT prs_merged FROM dev_metrics WHERE member_id=? AND week=? AND year=?",
+            "SELECT id FROM dev_metrics WHERE member_id=? AND week=? AND year=?",
             (member_id, week, year),
         )
         existing = c.fetchone()
         if existing:
             c.execute(
-                "UPDATE dev_metrics SET prs_merged=? WHERE member_id=? AND week=? AND year=?",
-                (count, member_id, week, year),
+                "UPDATE dev_metrics SET prs_merged=?, commits_count=? "
+                "WHERE member_id=? AND week=? AND year=?",
+                (pr_n, cm_n, member_id, week, year),
             )
         else:
             c.execute(
                 "INSERT INTO dev_metrics "
-                "(member_id, week, year, prs_merged, tickets_closed, cycle_time_days, features_completed, deploys) "
-                "VALUES (?,?,?,?,?,?,?,?)",
-                (member_id, week, year, count, 0, 0.0, 0, 0),
+                "(member_id, week, year, prs_merged, tickets_closed, cycle_time_days, features_completed, deploys, commits_count) "
+                "VALUES (?,?,?,?,?,?,?,?,?)",
+                (member_id, week, year, pr_n, 0, 0.0, 0, 0, cm_n),
             )
         records_updated += 1
 
     conn.commit()
 
-    if total_prs == 0:
-        msg = f"No merged PRs found in week {week} across {len(repos)} repo(s)"
+    if total_prs == 0 and total_commits == 0:
+        msg = f"No PRs or commits found in week {week} across {len(repos)} repo(s)"
     else:
-        msg = f"Synced {total_prs} merged PR(s) → {records_updated} engineer(s) updated (week {week})"
+        msg = (
+            f"Synced {total_prs} merged PR(s), {total_commits} commit(s) "
+            f"→ {records_updated} engineer(s) updated (week {week})"
+        )
     return records_updated, msg
 
 
@@ -2080,6 +2172,26 @@ def delete_engineer_tasks(member_id: int, task_id: int, password: str = ""):
     conn.commit()
     conn.close()
     return {"ok": True}
+
+
+@app.get("/api/engineers/{member_id}/commits")
+def get_engineer_commits(member_id: int):
+    """Return commits for an engineer across the last 8 ISO weeks, newest first."""
+    conn = get_db()
+    c = conn.cursor()
+    week, year = current_week_year(conn)
+    weeks = _weeks_range(week)
+    placeholders = ",".join(["?"] * len(weeks))
+    c.execute(
+        f"SELECT repo, sha, message, committed_at "
+        f"FROM commit_log "
+        f"WHERE member_id=? AND year=? AND week IN ({placeholders}) "
+        f"ORDER BY committed_at DESC",
+        (member_id, year, *weeks),
+    )
+    rows = [dict(r) for r in c.fetchall()]
+    conn.close()
+    return rows
 
 
 # ── Config ─────────────────────────────────────────────────────────────────────
