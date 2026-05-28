@@ -1779,6 +1779,17 @@ class ReportCreate(BaseModel):
     source: str = "manual"
 
 
+class ReportBulkItem(BaseModel):
+    engineer_name: str
+    report_date: str
+    completed: list = []
+    invisible_work: list = []
+    next_tasks: list = []
+    delayed_risks: list = []
+    raw_text: str = ""
+    source: str = "manual"
+
+
 class ReportUpdate(BaseModel):
     completed: Optional[list] = None
     invisible_work: Optional[list] = None
@@ -2482,17 +2493,30 @@ def create_report(data: ReportCreate, password: str = ""):
 
 
 @app.post("/api/reports/bulk")
-def create_reports_bulk(data: List[ReportCreate], password: str = ""):
+def create_reports_bulk(data: List[ReportBulkItem], password: str = ""):
     if password != ADMIN_PASSWORD:
         raise HTTPException(403, "Unauthorized")
     conn = get_db()
     c = conn.cursor()
+    c.execute("SELECT id, name FROM team_members")
+    members = {r["name"]: r["id"] for r in c.fetchall()}
+
     inserted = 0
     skipped = 0
+    unmatched = []
     for report in data:
+        # Fuzzy name match — same logic as Slack sync
+        engineer_id = None
+        for mname, mid in members.items():
+            if report.engineer_name.lower() in mname.lower() or mname.lower() in report.engineer_name.lower():
+                engineer_id = mid
+                break
+        if not engineer_id:
+            unmatched.append(report.engineer_name)
+            continue
         c.execute(
             "SELECT id FROM daily_reports WHERE engineer_id=? AND report_date=?",
-            (report.engineer_id, report.report_date),
+            (engineer_id, report.report_date),
         )
         if c.fetchone():
             skipped += 1
@@ -2501,7 +2525,7 @@ def create_reports_bulk(data: List[ReportCreate], password: str = ""):
             "INSERT INTO daily_reports (engineer_id, report_date, raw_text, completed, "
             "invisible_work, next_tasks, delayed_risks, source) VALUES (?,?,?,?,?,?,?,?)",
             (
-                report.engineer_id, report.report_date, report.raw_text,
+                engineer_id, report.report_date, report.raw_text,
                 json_lib.dumps(report.completed, ensure_ascii=False),
                 json_lib.dumps(report.invisible_work, ensure_ascii=False),
                 json_lib.dumps(report.next_tasks, ensure_ascii=False),
@@ -2512,7 +2536,7 @@ def create_reports_bulk(data: List[ReportCreate], password: str = ""):
         inserted += 1
     conn.commit()
     conn.close()
-    return {"ok": True, "inserted": inserted, "skipped": skipped}
+    return {"ok": True, "inserted": inserted, "skipped": skipped, "unmatched": unmatched}
 
 
 @app.put("/api/reports/{report_id}")
