@@ -1432,17 +1432,47 @@ def _do_github_sync(conn) -> tuple:
         except Exception as ex:
             print(f"[GitHub sync] pr_log insert failed for PR #{pr_number}: {ex}")
 
-    # Build case-insensitive login → member_id lookup
+    # Build case-insensitive lookup tables
     login_to_member_ci = {k.lower(): v for k, v in login_to_member.items()}
-    # Canonical casing: lower → original key in username_map
-    login_canonical = {k.lower(): k for k in login_to_member}
+    login_canonical    = {k.lower(): k for k in login_to_member}
+    # Reverse: engineer name (lower) → canonical login  (for git-name fallback)
+    name_to_login = {
+        eng_name.lower(): login
+        for login, eng_name in username_map.items()
+        if login in login_to_member
+    }
+    print(f"[GitHub sync] username_map in use: {username_map}")
+
+    def _resolve_login(entry: dict) -> str:
+        """Return the canonical username_map login for a commit entry, or ''."""
+        # 1. GitHub-linked author object (most reliable)
+        gh = ((entry.get("author") or {}).get("login") or "").strip()
+        if gh and login_canonical.get(gh.lower()):
+            return login_canonical[gh.lower()]
+        # 2. GitHub-linked committer object (merge commits often have author=null)
+        gh = ((entry.get("committer") or {}).get("login") or "").strip()
+        if gh and login_canonical.get(gh.lower()):
+            return login_canonical[gh.lower()]
+        cmt = entry.get("commit") or {}
+        # 3. Git author name matches a GitHub login directly (e.g. name == "KlimMalgin")
+        git_author_name = ((cmt.get("author") or {}).get("name") or "").strip()
+        if git_author_name and login_canonical.get(git_author_name.lower()):
+            return login_canonical[git_author_name.lower()]
+        # 4. Git author name matches an engineer's display name
+        if git_author_name and name_to_login.get(git_author_name.lower()):
+            return name_to_login[git_author_name.lower()]
+        # 5. Git committer name (same two checks)
+        git_committer_name = ((cmt.get("committer") or {}).get("name") or "").strip()
+        if git_committer_name and login_canonical.get(git_committer_name.lower()):
+            return login_canonical[git_committer_name.lower()]
+        if git_committer_name and name_to_login.get(git_committer_name.lower()):
+            return name_to_login[git_committer_name.lower()]
+        return ""
 
     for repo in repos:
         owner_repo = repo if "/" in repo else f"{org}/{repo}"
         page = 1
         while True:
-            # Fetch all commits in the week — no author filter; match by entry["author"]["login"]
-            # instead of the git commit author email (which may differ from GitHub login).
             qs = urllib.parse.urlencode({
                 "since": since_iso,
                 "until": until_iso,
@@ -1459,18 +1489,22 @@ def _do_github_sync(conn) -> tuple:
             if not isinstance(page_data, list) or not page_data:
                 break
             for entry in page_data:
-                # entry["author"] is the GitHub user object — reliable login attribution
-                gh_login = ((entry.get("author") or {}).get("login") or "").strip()
-                if not gh_login:
-                    continue
-                canonical = login_canonical.get(gh_login.lower())
+                sha_short = (entry.get("sha") or "")[:7]
+                cmt       = entry.get("commit") or {}
+                gh_author_login     = ((entry.get("author")    or {}).get("login") or "")
+                gh_committer_login  = ((entry.get("committer") or {}).get("login") or "")
+                git_author_name     = ((cmt.get("author")      or {}).get("name")  or "")
+                print(f"[GitHub sync] {owner_repo} {sha_short}: "
+                      f"author.login={gh_author_login!r} "
+                      f"committer.login={gh_committer_login!r} "
+                      f"git_name={git_author_name!r}")
+                canonical = _resolve_login(entry)
                 if not canonical:
                     continue
-                member_id = login_to_member_ci[gh_login.lower()]
+                member_id = login_to_member_ci[canonical.lower()]
                 commit_counts[canonical] = commit_counts.get(canonical, 0) + 1
-                sha = entry.get("sha") or ""
-                cmt = entry.get("commit") or {}
-                msg = (cmt.get("message") or "").strip()
+                sha          = entry.get("sha") or ""
+                msg          = (cmt.get("message") or "").strip()
                 committed_at = (cmt.get("committer") or {}).get("date") or ""
                 if sha and committed_at:
                     try:
@@ -3140,6 +3174,92 @@ def github_sync_debug():
         },
         "api_test": api_test,
         "recent_sync_log": logs,
+    }
+
+
+@app.get("/api/sync/github/commits-debug")
+def github_commits_debug(repo: str = "", since: str = "", until: str = ""):
+    """
+    No-auth debug endpoint. Fetches up to 30 commits from the given repo
+    and shows author.login, committer.login, and git author name for each.
+    Useful for diagnosing attribution mismatches.
+
+    Query params:
+      repo  — short name (e.g. apollo) or owner/repo; defaults to first configured repo
+      since — ISO date, e.g. 2026-05-19; defaults to start of current ISO week
+      until — ISO date, e.g. 2026-05-25; defaults to end of current ISO week
+    """
+    conn = get_db()
+    c = conn.cursor()
+    c.execute(
+        "SELECT key, value FROM config WHERE key IN "
+        "('github_token','github_org','github_repos','github_username_map')"
+    )
+    cfg = {r["key"]: r["value"] for r in c.fetchall()}
+    week, year = current_week_year(conn)
+    conn.close()
+
+    token = (cfg.get("github_token") or "").strip()
+    org   = (cfg.get("github_org")   or "homealliance").strip()
+    repos_cfg = [r.strip() for r in (cfg.get("github_repos") or "").split(",") if r.strip()]
+    try:
+        username_map = json_lib.loads(cfg.get("github_username_map") or "{}")
+    except Exception:
+        username_map = {}
+
+    if not token:
+        return {"error": "github_token not configured"}
+
+    # Default repo = first configured repo
+    if not repo:
+        repo = repos_cfg[0] if repos_cfg else ""
+    if not repo:
+        return {"error": "No repo specified and none configured"}
+    owner_repo = repo if "/" in repo else f"{org}/{repo}"
+
+    # Default date range = current ISO week
+    if not since or not until:
+        jan4 = datetime(year, 1, 4).date()
+        week1_monday = jan4 - timedelta(days=jan4.weekday())
+        week_monday  = week1_monday + timedelta(weeks=week - 1)
+        week_sunday  = week_monday  + timedelta(days=6)
+        since = since or f"{week_monday.isoformat()}T00:00:00Z"
+        until = until or f"{week_sunday.isoformat()}T23:59:59Z"
+
+    def gh_get_debug(url):
+        req = urllib.request.Request(url, headers={
+            "Authorization": f"token {token}",
+            "Accept": "application/vnd.github.v3+json",
+            "User-Agent": "dashboard-sync/1.0",
+        })
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            return json_lib.loads(resp.read())
+
+    qs = urllib.parse.urlencode({"since": since, "until": until, "per_page": 30})
+    try:
+        commits = gh_get_debug(f"https://api.github.com/repos/{owner_repo}/commits?{qs}")
+    except Exception as e:
+        return {"error": str(e), "repo": owner_repo}
+
+    rows = []
+    for entry in (commits if isinstance(commits, list) else []):
+        cmt = entry.get("commit") or {}
+        rows.append({
+            "sha":               (entry.get("sha") or "")[:7],
+            "author_login":      ((entry.get("author")    or {}).get("login") or None),
+            "committer_login":   ((entry.get("committer") or {}).get("login") or None),
+            "git_author_name":   ((cmt.get("author")      or {}).get("name")  or None),
+            "git_author_email":  ((cmt.get("author")      or {}).get("email") or None),
+            "message":           (cmt.get("message") or "").split("\n")[0][:80],
+        })
+
+    return {
+        "repo": owner_repo,
+        "since": since,
+        "until": until,
+        "username_map": username_map,
+        "commit_count": len(rows),
+        "commits": rows,
     }
 
 
