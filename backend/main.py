@@ -1882,12 +1882,25 @@ def metrics_dev():
 
     ct_list = totals["cycle_time_days"]
     avg_ct = round(sum(ct_list) / len(ct_list), 1) if ct_list else 0
+
+    # Avg PR size: (additions + deletions) per merged PR this week from pr_log
+    c.execute(
+        "SELECT COALESCE(SUM(additions + deletions), 0) AS total_lines, "
+        "COUNT(*) AS pr_count FROM pr_log WHERE week=? AND year=?",
+        (week, year),
+    )
+    pr_size_row = c.fetchone()
+    total_lines = pr_size_row["total_lines"] if pr_size_row else 0
+    pr_count    = pr_size_row["pr_count"]    if pr_size_row else 0
+    avg_pr_size = round(total_lines / pr_count) if pr_count else 0
+
     conn.close()
     return {
         "totals": {
             "prs_merged": totals["prs_merged"],
             "tickets_closed": totals["tickets_closed"],
             "avg_cycle_time": avg_ct,
+            "avg_pr_size": avg_pr_size,
             "features_completed": totals["features_completed"],
             "deploys": totals["deploys"],
             "deploy_frequency": round(totals["deploys"] / max(len(members), 1), 1),

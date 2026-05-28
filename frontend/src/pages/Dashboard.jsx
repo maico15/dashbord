@@ -27,11 +27,11 @@ function DevTab({ data }) {
         <MetricCard label="Commits" value={totals.commits_count} sub="this week" accent="accent2"
           tooltip="Commits pushed this week across all tracked repositories." />
         <MetricCard
-          label="Avg cycle time"
-          value={`${totals.avg_cycle_time}d`}
-          sub={totals.avg_cycle_time < 2 ? '✓ below target' : '⚠ above 2d'}
-          accent={totals.avg_cycle_time < 2 ? 'success' : 'warning'}
-          tooltip="Average time from PR open to merge, in days. Target is under 2 days. Lower is better."
+          label="Avg PR size"
+          value={totals.avg_pr_size > 0 ? `+${totals.avg_pr_size} lines avg` : '—'}
+          sub="additions + deletions"
+          accent={totals.avg_pr_size < 400 ? 'success' : 'warning'}
+          tooltip="Average lines changed (additions + deletions) per merged PR this week. Smaller PRs are easier to review."
         />
       </div>
 
