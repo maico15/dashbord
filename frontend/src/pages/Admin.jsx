@@ -619,7 +619,7 @@ function MetricsSection({ pw }) {
   const [saving, setSaving] = useState({})
 
   useEffect(() => {
-    api.get('/overview').then(d => setWeek(d.week || 1)).catch(() => {})
+    api.get('/overview').then(d => { if (d.week > 0) setWeek(d.week) }).catch(() => {})
   }, [])
 
   const loadMetrics = () => {
