@@ -334,6 +334,44 @@ def init_db():
         conn.commit()
     except Exception:
         pass
+
+    # ── One-time: fix score_rules to real-data formula ────────────────────────
+    # Runs on every deploy but is idempotent after the first time.
+    try:
+        conn.execute("UPDATE score_rules SET points=100 WHERE rule_key='pr_merged'")
+        conn.execute("UPDATE score_rules SET points=0   WHERE rule_key='ticket_closed'")
+        conn.execute("UPDATE score_rules SET points=0   WHERE rule_key='fast_cycle'")
+        conn.execute(
+            "INSERT OR IGNORE INTO score_rules (stream,rule_key,label,points) "
+            "VALUES ('dev','commit','Commit',10)"
+        )
+        conn.commit()
+    except Exception:
+        pass
+
+    # ── One-time: purge fake manually-entered metric data ─────────────────────
+    # Uses a config flag so this only runs once per database.
+    c = conn.cursor()
+    c.execute("SELECT value FROM config WHERE key='_metrics_cleaned_v1'")
+    if not c.fetchone():
+        try:
+            conn.execute("DELETE FROM support_metrics")
+            conn.execute("DELETE FROM docs_metrics")
+            # Reset manual-only columns in dev_metrics; preserve real sync data
+            conn.execute(
+                "UPDATE dev_metrics SET "
+                "tickets_closed=0, cycle_time_days=0.0, "
+                "features_completed=0, deploys=0, blocked_count=0"
+            )
+            conn.execute(
+                "INSERT OR REPLACE INTO config (key,value) "
+                "VALUES ('_metrics_cleaned_v1','1')"
+            )
+            conn.commit()
+            print("[init] Fake metric data cleaned; score rules updated.")
+        except Exception as ex:
+            print(f"[init] Fake data cleanup error: {ex}")
+
     conn.close()
 
 
@@ -360,14 +398,15 @@ def seed_data():
     current_year = now[0]
 
     rules = [
-        ("dev", "pr_merged", "PR merged", 50, None),
-        ("dev", "ticket_closed", "Ticket closed", 40, None),
-        ("dev", "fast_cycle", "Cycle time < 2 days (bonus)", 30, '{"metric":"cycle_time_days","lt":2}'),
+        ("dev", "pr_merged",        "PR merged",   100, None),
+        ("dev", "commit",           "Commit",        10, None),
+        ("dev", "ticket_closed",    "Ticket closed",  0, None),
+        ("dev", "fast_cycle",       "Cycle time bonus", 0, '{"metric":"cycle_time_days","lt":2}'),
         ("support", "incident_resolved", "Incident resolved", 80, None),
         ("support", "fast_resolve", "Resolved < 2h (bonus)", 50, '{"metric":"avg_resolution_hours","lt":2}'),
         ("support", "sla_breached", "SLA breached", -40, None),
-        ("docs", "doc_created", "Doc created", 30, None),
-        ("docs", "doc_updated", "Doc updated", 15, None),
+        ("docs", "doc_created",     "Doc created",   30, None),
+        ("docs", "doc_updated",     "Doc updated",   15, None),
         ("docs", "no_docs_penalty", "Project without docs > 2w", -20, None),
     ]
     c.executemany(
@@ -453,9 +492,9 @@ def parse_streams(stream_val) -> list:
 def calc_dev(m, rules):
     pts = 0
     bd = {}
+    # Score only from real GitHub sync data — PRs and commits
     bd["pr_merged"] = m["prs_merged"] * rule_pts(rules, "pr_merged")
-    bd["ticket_closed"] = m["tickets_closed"] * rule_pts(rules, "ticket_closed")
-    bd["fast_cycle"] = rule_pts(rules, "fast_cycle") if m["cycle_time_days"] < 2 else 0
+    bd["commit"]    = m.get("commits_count", 0) * rule_pts(rules, "commit")
     for v in bd.values():
         pts += v
     return pts, bd
