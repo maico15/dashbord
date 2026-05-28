@@ -15,7 +15,6 @@ import hashlib
 import json
 import os
 import pathlib
-import subprocess
 import sys
 import time
 from datetime import datetime, timezone
@@ -34,7 +33,9 @@ CLAUDE_DIR      = pathlib.Path.home() / ".claude"
 CONFIG_PATH     = CLAUDE_DIR / "telemetry_config.json"
 BUFFER_PATH     = CLAUDE_DIR / "telemetry_buffer.jsonl"
 SEEN_PATH       = CLAUDE_DIR / ".telemetry_seen"
-SESSIONS_GLOB   = "projects/*/sessions/*.jsonl"
+# Recursive glob: catches both the legacy  projects/*/sessions/*.jsonl layout
+# and the current  projects/<project>/<session>/subagents/agent-*.jsonl layout.
+SESSIONS_GLOB   = "projects/**/agent-*.jsonl"
 
 MAX_SEEN        = 10_000
 POLL_INTERVAL   = 30   # seconds
@@ -116,20 +117,14 @@ def append_buffer(events: list) -> None:
             f.write(json.dumps(ev) + "\n")
 
 # ---------------------------------------------------------------------------
-# Repo detection
+# Repo detection — derived from the cwd field embedded in each record
 # ---------------------------------------------------------------------------
 
-def detect_repo() -> str:
-    try:
-        result = subprocess.run(
-            ["git", "rev-parse", "--show-toplevel"],
-            capture_output=True, text=True, timeout=3,
-        )
-        if result.returncode == 0:
-            return pathlib.Path(result.stdout.strip()).name
-    except Exception:
-        pass
-    return "unknown"
+def repo_from_cwd(cwd: str) -> str:
+    """Return the final directory component of cwd (= repo/project name)."""
+    if not cwd:
+        return "unknown"
+    return pathlib.Path(cwd).name or "unknown"
 
 # ---------------------------------------------------------------------------
 # Event ID
@@ -145,12 +140,12 @@ def make_event_id(session_id: str, timestamp: str, tokens_in: int, tokens_out: i
 
 def parse_session_file(path: pathlib.Path, seen: set) -> list:
     """
-    Parse a Claude Code session JSONL file.
+    Parse a Claude Code agent JSONL file.
+    Only processes records where type=="assistant" — those are the only ones
+    that carry message.usage token counts.
     Returns a list of telemetry event dicts (metadata only, no content).
     """
     events = []
-    # Derive session_id from parent directory name or file stem
-    session_id = path.parent.name or path.stem
 
     try:
         lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
@@ -166,8 +161,11 @@ def parse_session_file(path: pathlib.Path, seen: set) -> list:
         except Exception:
             continue
 
-        # Accept records that carry a message with usage
-        msg = record.get("message") or {}
+        # Only assistant records carry usage data; skip everything else.
+        if record.get("type") != "assistant":
+            continue
+
+        msg   = record.get("message") or {}
         usage = msg.get("usage") or {}
 
         tokens_input  = int(usage.get("input_tokens", 0) or 0)
@@ -175,11 +173,10 @@ def parse_session_file(path: pathlib.Path, seen: set) -> list:
         cache_read    = int(usage.get("cache_read_input_tokens", 0) or 0)
         cache_write   = int(usage.get("cache_creation_input_tokens", 0) or 0)
 
-        # Skip records with no token data
         if tokens_input == 0 and tokens_output == 0:
             continue
 
-        model     = str(msg.get("model") or record.get("model") or "unknown")
+        model     = str(msg.get("model") or "unknown")
         timestamp = str(record.get("timestamp") or "")
         if not timestamp:
             timestamp = datetime.now(timezone.utc).isoformat()
@@ -191,7 +188,10 @@ def parse_session_file(path: pathlib.Path, seen: set) -> list:
         except Exception:
             pass
 
-        sid = str(record.get("sessionId") or session_id)
+        # sessionId is a top-level field in every record
+        sid      = str(record.get("sessionId") or path.parts[-3] or path.stem)
+        # repo is derived from the cwd field embedded in each record
+        repo     = repo_from_cwd(str(record.get("cwd") or ""))
         event_id = make_event_id(sid, timestamp, tokens_input, tokens_output)
 
         if event_id in seen:
@@ -206,24 +206,23 @@ def parse_session_file(path: pathlib.Path, seen: set) -> list:
             "tokens_output":      tokens_output,
             "tokens_cache_read":  cache_read,
             "tokens_cache_write": cache_write,
-            "repo":               None,  # filled in by caller
+            "repo":               repo,
         })
 
     return events
 
 # ---------------------------------------------------------------------------
-# Collect all new events from ~/.claude/projects/*/sessions/*.jsonl
+# Collect all new events from ~/.claude/projects/**/agent-*.jsonl
 # ---------------------------------------------------------------------------
 
 def collect_events(seen: set) -> list:
     if not CLAUDE_DIR.exists():
         return []
-    repo = detect_repo()
     events = []
-    for session_file in sorted(CLAUDE_DIR.glob(SESSIONS_GLOB)):
+    files = sorted(CLAUDE_DIR.glob(SESSIONS_GLOB))
+    print(f"[telemetry] found {len(files)} agent file(s) under {CLAUDE_DIR / 'projects'}")
+    for session_file in files:
         new = parse_session_file(session_file, seen)
-        for ev in new:
-            ev["repo"] = repo
         events.extend(new)
     return events
 
