@@ -391,9 +391,9 @@ function StreamCheckboxes({ selected, onChange }) {
 
 function TaskEditor({ member, pw, onClose }) {
   const currentWeek = (() => {
-    const d = new Date()
-    const s = new Date(d.getFullYear(), 0, 1)
-    return Math.ceil(((d - s) / 86400000 + s.getDay() + 1) / 7) || 1
+    const now = new Date()
+    const startOfYear = new Date(now.getFullYear(), 0, 1)
+    return Math.ceil(((now - startOfYear) / 86400000 + startOfYear.getDay() + 1) / 7)
   })()
 
   const [week, setWeek]       = useState(currentWeek)
@@ -610,11 +610,9 @@ function TeamSection({ pw }) {
 function MetricsSection({ pw }) {
   const [stream, setStream] = useState('dev')
   const [week, setWeek] = useState(() => {
-    const d = new Date()
-    const t = new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()))
-    t.setUTCDate(t.getUTCDate() + 4 - (t.getUTCDay() || 7))
-    const yearStart = new Date(Date.UTC(t.getUTCFullYear(), 0, 1))
-    return Math.ceil(((t - yearStart) / 86400000 + 1) / 7)
+    const now = new Date()
+    const startOfYear = new Date(now.getFullYear(), 0, 1)
+    return Math.ceil(((now - startOfYear) / 86400000 + startOfYear.getDay() + 1) / 7)
   })
   const [rows, setRows] = useState([])
   const [edits, setEdits] = useState({})
