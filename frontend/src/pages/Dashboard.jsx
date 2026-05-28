@@ -16,15 +16,75 @@ const TABS = [
   { key: 'report', label: '📋 Weekly Report' },
 ]
 
-function DevTab({ data }) {
+function calcCurrentWeek() {
+  const now = new Date()
+  const startOfYear = new Date(now.getFullYear(), 0, 1)
+  return Math.ceil(((now - startOfYear) / 86400000 + startOfYear.getDay() + 1) / 7)
+}
+
+function weekDateRange(week, year) {
+  const jan4 = new Date(year, 0, 4)
+  const dow = jan4.getDay() || 7
+  const week1Mon = new Date(jan4)
+  week1Mon.setDate(jan4.getDate() - (dow - 1))
+  const mon = new Date(week1Mon)
+  mon.setDate(week1Mon.getDate() + (week - 1) * 7)
+  const fri = new Date(mon)
+  fri.setDate(mon.getDate() + 4)
+  const fmt = d => d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+  return `${fmt(mon)} – ${fmt(fri)}`
+}
+
+function DevTab() {
+  const [week, setWeek] = useState(null)
+  const [year, setYear] = useState(null)
+  const [data, setData] = useState(null)
+
+  useEffect(() => {
+    api.get('/overview').then(d => {
+      setWeek(d.current_week || calcCurrentWeek())
+      setYear(d.current_year || new Date().getFullYear())
+    }).catch(() => {
+      setWeek(calcCurrentWeek())
+      setYear(new Date().getFullYear())
+    })
+  }, [])
+
+  useEffect(() => {
+    if (!week || !year) return
+    setData(null)
+    api.get(`/metrics/dev?week=${week}&year=${year}`).then(setData).catch(console.error)
+  }, [week, year])
+
+  const navigate = (delta) => {
+    let w = (week ?? 1) + delta
+    let y = year ?? new Date().getFullYear()
+    if (w < 1)  { w = 52; y-- }
+    if (w > 52) { w = 1;  y++ }
+    setWeek(w)
+    setYear(y)
+  }
+
+  const dateRange = week && year ? weekDateRange(week, year) : ''
+
   if (!data) return <div className="spinner" style={{ margin: '40px auto', display: 'block' }} />
+
   const { totals, weekly_chart, bottlenecks } = data
   return (
     <>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 16, marginBottom: 20 }}>
+        <button className="btn btn-ghost" onClick={() => navigate(-1)} style={{ padding: '5px 14px' }}>←</button>
+        <div style={{ textAlign: 'center', minWidth: 200 }}>
+          <div style={{ fontSize: 15, fontWeight: 700 }}>Week {week ?? '…'}</div>
+          {dateRange && <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 2 }}>{dateRange}, {year}</div>}
+        </div>
+        <button className="btn btn-ghost" onClick={() => navigate(+1)} style={{ padding: '5px 14px' }}>→</button>
+      </div>
+
       <div className="metric-grid">
-        <MetricCard label="PRs merged" value={totals.prs_merged} sub="this week" accent="accent1"
+        <MetricCard label="PRs merged" value={totals.prs_merged} sub={`Week ${week}`} accent="accent1"
           tooltip="Pull requests merged this week. Each PR earns XP based on the points configured in Admin → Rules." />
-        <MetricCard label="Commits" value={totals.commits_count} sub="this week" accent="accent2"
+        <MetricCard label="Commits" value={totals.commits_count} sub={`Week ${week}`} accent="accent2"
           tooltip="Commits pushed this week across all tracked repositories." />
         <MetricCard
           label="Avg PR size"
@@ -145,9 +205,10 @@ export default function Dashboard() {
   }, [])
 
   useEffect(() => {
+    // dev, ai, and report tabs manage their own data
+    if (activeTab === 'dev' || activeTab === 'ai' || activeTab === 'report') return
     if (tabData[activeTab]) return
-    const endpoint = activeTab === 'ai' ? '/ai-usage' : `/metrics/${activeTab}`
-    api.get(endpoint)
+    api.get(`/metrics/${activeTab}`)
       .then((d) => setTabData((prev) => ({ ...prev, [activeTab]: d })))
       .catch(console.error)
   }, [activeTab])
@@ -185,7 +246,7 @@ export default function Dashboard() {
           ))}
         </div>
 
-        {activeTab === 'dev'     && <DevTab data={tabData.dev} />}
+        {activeTab === 'dev'     && <DevTab />}
         {activeTab === 'support' && <SupportTab data={tabData.support} />}
         {activeTab === 'docs'    && <DocsTab data={tabData.docs} />}
         {activeTab === 'ai'      && <AIUsageTab />}

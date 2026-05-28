@@ -1841,11 +1841,13 @@ def _weeks_range(week):
 
 
 @app.get("/api/metrics/dev")
-def metrics_dev():
+def metrics_dev(week: Optional[int] = None, year: Optional[int] = None):
     conn = get_db()
     c = conn.cursor()
     rules = get_rules(conn)
-    week, year = current_week_year(conn)
+    cw, cy = current_week_year(conn)
+    if week is None: week = cw
+    if year is None: year = cy
 
     c.execute("SELECT * FROM team_members")
     members = [m for m in [dict(r) for r in c.fetchall()] if "dev" in parse_streams(m["stream"])]
