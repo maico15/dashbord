@@ -5,6 +5,7 @@ from fastapi import FastAPI, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional, Dict, Any, List
+import re
 import random
 import json as json_lib
 import time as time_lib
@@ -1518,6 +1519,22 @@ def _do_github_sync(conn) -> tuple:
             return login_canonical[git_committer_name.lower()]
         if git_committer_name and name_to_login.get(git_committer_name.lower()):
             return name_to_login[git_committer_name.lower()]
+        # 6. Co-authored-by trailers in commit message (e.g. Lovable/bot commits)
+        #    Format: "Co-authored-by: Name <email@host>"
+        message = (cmt.get("message") or "")
+        for m in re.finditer(r"(?im)^co-authored-by:\s*(.+?)\s*<([^>]+)>", message):
+            co_name  = m.group(1).strip()
+            co_email = m.group(2).strip()
+            # a) co-author display name matches a GitHub login
+            if co_name and login_canonical.get(co_name.lower()):
+                return login_canonical[co_name.lower()]
+            # b) co-author display name matches an engineer name
+            if co_name and name_to_login.get(co_name.lower()):
+                return name_to_login[co_name.lower()]
+            # c) local-part of email matches a GitHub login (e.g. droonpog@...)
+            local = co_email.split("@")[0].lower() if "@" in co_email else ""
+            if local and login_canonical.get(local):
+                return login_canonical[local]
         return ""
 
     for repo in repos:
