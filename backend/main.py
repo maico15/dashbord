@@ -1432,54 +1432,59 @@ def _do_github_sync(conn) -> tuple:
         except Exception as ex:
             print(f"[GitHub sync] pr_log insert failed for PR #{pr_number}: {ex}")
 
+    # Build case-insensitive login → member_id lookup
+    login_to_member_ci = {k.lower(): v for k, v in login_to_member.items()}
+    # Canonical casing: lower → original key in username_map
+    login_canonical = {k.lower(): k for k in login_to_member}
+
     for repo in repos:
         owner_repo = repo if "/" in repo else f"{org}/{repo}"
-        repo_skipped = False
-        for login in username_map.keys():
-            if repo_skipped:
+        page = 1
+        while True:
+            # Fetch all commits in the week — no author filter; match by entry["author"]["login"]
+            # instead of the git commit author email (which may differ from GitHub login).
+            qs = urllib.parse.urlencode({
+                "since": since_iso,
+                "until": until_iso,
+                "per_page": 100,
+                "page": page,
+            })
+            url = f"https://api.github.com/repos/{owner_repo}/commits?{qs}"
+            try:
+                page_data = gh_get(url)
+            except ValueError as e:
+                if "404" in str(e) or "409" in str(e):
+                    print(f"[GitHub sync] {owner_repo}: empty or inaccessible — skipping commits")
                 break
-            page = 1
-            while True:
-                # Omit `sha` so GitHub uses each repo's default branch (main, master, etc.)
-                qs = urllib.parse.urlencode({
-                    "since": since_iso,
-                    "until": until_iso,
-                    "author": login,
-                    "per_page": 100,
-                    "page": page,
-                })
-                url = f"https://api.github.com/repos/{owner_repo}/commits?{qs}"
-                try:
-                    page_data = gh_get(url)
-                except ValueError as e:
-                    # 409 → empty repo; 404 → repo gone (already validated by PR loop above)
-                    if "404" in str(e) or "409" in str(e):
-                        print(f"[GitHub sync] {owner_repo}: empty or inaccessible — skipping commits")
-                        repo_skipped = True
-                    break
-                if not isinstance(page_data, list) or not page_data:
-                    break
-                commit_counts[login] = commit_counts.get(login, 0) + len(page_data)
-                member_id = login_to_member.get(login)
-                if member_id:
-                    for entry in page_data:
-                        sha = entry.get("sha") or ""
-                        cmt = entry.get("commit") or {}
-                        msg = (cmt.get("message") or "").strip()
-                        committed_at = (cmt.get("committer") or {}).get("date") or ""
-                        if sha and committed_at:
-                            try:
-                                c.execute(
-                                    "INSERT OR IGNORE INTO commit_log "
-                                    "(member_id, week, year, repo, sha, message, committed_at) "
-                                    "VALUES (?,?,?,?,?,?,?)",
-                                    (member_id, week, year, owner_repo, sha, msg, committed_at),
-                                )
-                            except Exception as ex:
-                                print(f"[GitHub sync] commit_log insert failed for {sha[:7]}: {ex}")
-                if len(page_data) < 100:
-                    break
-                page += 1
+            if not isinstance(page_data, list) or not page_data:
+                break
+            for entry in page_data:
+                # entry["author"] is the GitHub user object — reliable login attribution
+                gh_login = ((entry.get("author") or {}).get("login") or "").strip()
+                if not gh_login:
+                    continue
+                canonical = login_canonical.get(gh_login.lower())
+                if not canonical:
+                    continue
+                member_id = login_to_member_ci[gh_login.lower()]
+                commit_counts[canonical] = commit_counts.get(canonical, 0) + 1
+                sha = entry.get("sha") or ""
+                cmt = entry.get("commit") or {}
+                msg = (cmt.get("message") or "").strip()
+                committed_at = (cmt.get("committer") or {}).get("date") or ""
+                if sha and committed_at:
+                    try:
+                        c.execute(
+                            "INSERT OR IGNORE INTO commit_log "
+                            "(member_id, week, year, repo, sha, message, committed_at) "
+                            "VALUES (?,?,?,?,?,?,?)",
+                            (member_id, week, year, owner_repo, sha, msg, committed_at),
+                        )
+                    except Exception as ex:
+                        print(f"[GitHub sync] commit_log insert failed for {sha[:7]}: {ex}")
+            if len(page_data) < 100:
+                break
+            page += 1
 
     total_commits = sum(commit_counts.values())
     print(f"[GitHub sync] Commit counts by login: {commit_counts}")
