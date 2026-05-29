@@ -383,6 +383,46 @@ def init_db():
         except Exception as ex:
             print(f"[init] Fake data cleanup error: {ex}")
 
+    # ── One-time: fix stream assignments per real engineer roles ──────────────
+    # seed_data() originally seeded all three with ["dev","support","docs"].
+    # That caused Vinogradov (docs only, no GitHub) to accumulate dev XP.
+    # Malyshev was added later via admin with an unknown stream; ensure "dev".
+    c.execute("SELECT value FROM config WHERE key='_streams_fixed_v1'")
+    if not c.fetchone():
+        try:
+            conn.execute("UPDATE team_members SET stream='[\"dev\"]'  WHERE name='Andrey Brunetkin'")
+            conn.execute("UPDATE team_members SET stream='[\"dev\"]'  WHERE name='Andrey Pogrebnyak'")
+            conn.execute("UPDATE team_members SET stream='[\"docs\"]' WHERE name='Evgeniy Vinogradov'")
+            conn.execute("UPDATE team_members SET stream='[\"dev\"]'  WHERE name='Aleksandr Malyshev'")
+            conn.execute(
+                "INSERT OR REPLACE INTO config (key,value) "
+                "VALUES ('_streams_fixed_v1','1')"
+            )
+            conn.commit()
+            print("[init] Stream assignments corrected for all engineers.")
+        except Exception as ex:
+            print(f"[init] Stream fix error: {ex}")
+
+    # ── One-time: remove fake bulk-inserted dev_metrics for weeks 14-21 ───────
+    # GitHub sync only writes to current_week. Weeks 14-21 were never the
+    # current week when a real sync ran, so their prs_merged / commits_count
+    # values come from the original mock seed — not real GitHub data.
+    # Week 22+ is real (GitHub sync or manual admin entry). Safe to delete old.
+    c.execute("SELECT value FROM config WHERE key='_fake_dev_weeks_removed_v1'")
+    if not c.fetchone():
+        try:
+            deleted = conn.execute(
+                "DELETE FROM dev_metrics WHERE year=2026 AND week BETWEEN 14 AND 21"
+            ).rowcount
+            conn.execute(
+                "INSERT OR REPLACE INTO config (key,value) "
+                "VALUES ('_fake_dev_weeks_removed_v1','1')"
+            )
+            conn.commit()
+            print(f"[init] Removed {deleted} fake dev_metrics rows (weeks 14-21 / 2026).")
+        except Exception as ex:
+            print(f"[init] Fake dev weeks removal error: {ex}")
+
     conn.close()
 
 
@@ -395,11 +435,11 @@ def seed_data():
         return
 
     # DO NOT CHANGE THESE NAMES
-    all_streams = json_lib.dumps(["dev", "support", "docs"])
     members = [
-        ("Andrey Brunetkin",   all_streams, "#00cfff"),
-        ("Andrey Pogrebnyak",  all_streams, "#7b61ff"),
-        ("Evgeniy Vinogradov", all_streams, "#00ff9d"),
+        ("Andrey Brunetkin",   '["dev"]',  "#00cfff"),
+        ("Andrey Pogrebnyak",  '["dev"]',  "#7b61ff"),
+        ("Evgeniy Vinogradov", '["docs"]', "#00ff9d"),
+        ("Aleksandr Malyshev", '["dev"]',  "#ff6b35"),
     ]
     c.executemany("INSERT INTO team_members (name, stream, avatar_color) VALUES (?,?,?)", members)
     conn.commit()
