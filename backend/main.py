@@ -335,6 +335,17 @@ def init_db():
     except Exception:
         pass
 
+    try:
+        conn.execute("ALTER TABLE weekly_tasks ADD COLUMN tasks TEXT NOT NULL DEFAULT ''")
+        conn.commit()
+    except Exception:
+        pass
+    try:
+        conn.execute("ALTER TABLE weekly_tasks ADD COLUMN updated_at TEXT NOT NULL DEFAULT (datetime('now'))")
+        conn.commit()
+    except Exception:
+        pass
+
     # ── One-time: fix score_rules to real-data formula ────────────────────────
     # Runs on every deploy but is idempotent after the first time.
     try:
@@ -3451,6 +3462,63 @@ def get_reports(date: str = None):
     return result
 
 
+@app.get("/api/weekly-tasks")
+def get_weekly_tasks_all(week: Optional[int] = None, year: Optional[int] = None):
+    conn = get_db()
+    c = conn.cursor()
+    if week is None or year is None:
+        cw, cy = current_week_year(conn)
+        if week is None:
+            week = cw
+        if year is None:
+            year = cy
+    c.execute("SELECT id, name, avatar_color, position FROM team_members ORDER BY id")
+    members = [dict(r) for r in c.fetchall()]
+    result = []
+    for m in members:
+        c.execute(
+            "SELECT tasks FROM weekly_tasks WHERE engineer_id=? AND week_number=? AND year=?",
+            (m["id"], week, year),
+        )
+        row = c.fetchone()
+        result.append({
+            "engineer_id": m["id"],
+            "name": m["name"],
+            "color": m.get("avatar_color") or "#00cfff",
+            "position": m.get("position") or "",
+            "tasks": (row["tasks"] if row and row["tasks"] else "") or "",
+        })
+    conn.close()
+    return {"week": week, "year": year, "tasks": result}
+
+
+class WeeklyTasksBody(BaseModel):
+    engineer_id: int
+    week: int
+    year: int
+    tasks: str = ""
+    password: str = ""
+
+
+@app.post("/api/weekly-tasks")
+def post_weekly_tasks(data: WeeklyTasksBody):
+    if data.password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    conn = get_db()
+    c = conn.cursor()
+    c.execute(
+        "INSERT INTO weekly_tasks "
+        "(engineer_id, week_number, year, what_was_done, next_week, stream, tasks, updated_at) "
+        "VALUES (?, ?, ?, '[]', '[]', 'dev', ?, datetime('now')) "
+        "ON CONFLICT(engineer_id, week_number, year) DO UPDATE SET "
+        "tasks=excluded.tasks, updated_at=datetime('now')",
+        (data.engineer_id, data.week, data.year, data.tasks),
+    )
+    conn.commit()
+    conn.close()
+    return {"ok": True}
+
+
 @app.get("/api/reports/weekly")
 def get_weekly_report(week: Optional[int] = None, year: Optional[int] = None):
     conn = get_db()
@@ -3478,35 +3546,47 @@ def get_weekly_report(week: Optional[int] = None, year: Optional[int] = None):
         mid = member["id"]
 
         c.execute(
-            "SELECT pr_number, title, additions, deletions, changed_files, merged_at, repo, commits "
-            "FROM pr_log WHERE member_id=? AND week=? AND year=?",
+            "SELECT tasks FROM weekly_tasks WHERE engineer_id=? AND week_number=? AND year=?",
             (mid, week, year),
         )
+        tasks_row = c.fetchone()
+        tasks_text = (tasks_row["tasks"] if tasks_row and tasks_row["tasks"] else "") or ""
+
         prs = []
         pr_commit_shas: set = set()
-        for row in c.fetchall():
-            d = dict(row)
-            try:
-                d["commits"] = json_lib.loads(d.get("commits") or "[]")
-            except Exception:
-                d["commits"] = []
-            for pc in d["commits"]:
-                pr_commit_shas.add(pc.get("sha", ""))
-            prs.append(d)
+        try:
+            c.execute(
+                "SELECT pr_number, title, additions, deletions, changed_files, merged_at, repo, commits "
+                "FROM pr_log WHERE member_id=? AND week=? AND year=?",
+                (mid, week, year),
+            )
+            for row in c.fetchall():
+                d = dict(row)
+                try:
+                    d["commits"] = json_lib.loads(d.get("commits") or "[]")
+                except Exception:
+                    d["commits"] = []
+                for pc in d["commits"]:
+                    pr_commit_shas.add(pc.get("sha", ""))
+                prs.append(d)
+        except Exception:
+            pass
 
-        c.execute(
-            "SELECT repo, sha, message, committed_at FROM commit_log "
-            "WHERE member_id=? AND week=? AND year=? ORDER BY committed_at DESC",
-            (mid, week, year),
-        )
-        all_commits = [dict(r) for r in c.fetchall()]
+        all_commits = []
+        try:
+            c.execute(
+                "SELECT repo, sha, message, committed_at FROM commit_log "
+                "WHERE member_id=? AND week=? AND year=? ORDER BY committed_at DESC",
+                (mid, week, year),
+            )
+            all_commits = [dict(r) for r in c.fetchall()]
+        except Exception:
+            pass
+
         loose_commits = [
             cm for cm in all_commits
             if (cm.get("sha") or "")[:7] not in pr_commit_shas
         ]
-
-        if not prs and not loose_commits:
-            continue
 
         repos_data: dict = {}
         for pr in prs:
@@ -3583,18 +3663,18 @@ def get_weekly_report(week: Optional[int] = None, year: Optional[int] = None):
             total_added  += repo_added
             total_deleted += repo_deleted
 
-        if projects:
-            engineers_out.append({
-                "id": member["id"],
-                "name": member["name"],
-                "position": member.get("position") or "",
-                "color": member.get("avatar_color") or "#00cfff",
-                "total_commits": total_commits,
-                "total_prs": total_prs,
-                "lines_added": total_added,
-                "lines_deleted": total_deleted,
-                "projects": projects,
-            })
+        engineers_out.append({
+            "id": member["id"],
+            "name": member["name"],
+            "position": member.get("position") or "",
+            "color": member.get("avatar_color") or "#00cfff",
+            "tasks": tasks_text,
+            "total_commits": total_commits,
+            "total_prs": total_prs,
+            "lines_added": total_added,
+            "lines_deleted": total_deleted,
+            "projects": projects,
+        })
 
     conn.close()
     return {"week": week, "year": year, "engineers": engineers_out}

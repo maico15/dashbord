@@ -959,6 +959,120 @@ function SecuritySection({ pw, onPasswordChange }) {
   )
 }
 
+// ── Weekly Tasks admin section ───────────────────────────────────────────────
+
+function WeeklyTasksAdminSection({ pw }) {
+  const [week, setWeek]     = useState(() => {
+    const now = new Date()
+    const startOfYear = new Date(now.getFullYear(), 0, 1)
+    return Math.ceil(((now - startOfYear) / 86400000 + startOfYear.getDay() + 1) / 7)
+  })
+  const [year, setYear]     = useState(new Date().getFullYear())
+  const [tasks, setTasks]   = useState([])   // [{ engineer_id, name, color, position, tasks }]
+  const [drafts, setDrafts] = useState({})   // { engineer_id: string }
+  const [saving, setSaving] = useState({})   // { engineer_id: bool }
+  const [saved,  setSaved]  = useState({})   // { engineer_id: bool }
+
+  const load = () => {
+    api.get(`/weekly-tasks?week=${week}&year=${year}`)
+      .then(d => {
+        setTasks(d.tasks || [])
+        const init = {}
+        for (const t of (d.tasks || [])) init[t.engineer_id] = t.tasks || ''
+        setDrafts(init)
+      })
+      .catch(() => {})
+  }
+
+  useEffect(() => { load() }, [week, year])
+
+  const handleSave = async (engineer_id) => {
+    setSaving(s => ({ ...s, [engineer_id]: true }))
+    try {
+      await api.post('/weekly-tasks', {
+        engineer_id, week, year, tasks: drafts[engineer_id] || '', password: pw,
+      })
+      setSaved(s => ({ ...s, [engineer_id]: true }))
+      setTimeout(() => setSaved(s => ({ ...s, [engineer_id]: false })), 2000)
+    } finally {
+      setSaving(s => ({ ...s, [engineer_id]: false }))
+    }
+  }
+
+  const navigate = (delta) => {
+    let w = week + delta
+    let y = year
+    if (w < 1)  { w = 52; y-- }
+    if (w > 52) { w = 1;  y++ }
+    setWeek(w)
+    setYear(y)
+  }
+
+  const textareaStyle = {
+    width: '100%', background: 'var(--card2)',
+    border: '1px solid var(--border)', borderRadius: 7,
+    color: 'var(--text)', padding: '8px 10px',
+    fontSize: 13, fontFamily: 'inherit', outline: 'none',
+    resize: 'vertical', minHeight: 80, boxSizing: 'border-box',
+  }
+
+  return (
+    <div className="admin-section">
+      <h2>Weekly Tasks</h2>
+      <div className="card">
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 20 }}>
+          <button className="btn btn-ghost" onClick={() => navigate(-1)} style={{ padding: '4px 12px' }}>←</button>
+          <div style={{ textAlign: 'center', minWidth: 100 }}>
+            <div style={{ fontSize: 14, fontWeight: 700 }}>Week {week}</div>
+            <div style={{ fontSize: 11, color: 'var(--muted)' }}>{year}</div>
+          </div>
+          <button className="btn btn-ghost" onClick={() => navigate(+1)} style={{ padding: '4px 12px' }}>→</button>
+        </div>
+
+        {tasks.length === 0 ? (
+          <div style={{ color: 'var(--muted)', padding: '8px 0' }}>Loading…</div>
+        ) : (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+            {tasks.map(t => (
+              <div key={t.engineer_id} style={{ display: 'grid', gridTemplateColumns: '180px 1fr auto', gap: 12, alignItems: 'flex-start' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, paddingTop: 6 }}>
+                  <div style={{
+                    width: 28, height: 28, borderRadius: '50%', background: t.color,
+                    display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    fontSize: 11, fontWeight: 700, color: '#080d1f', flexShrink: 0,
+                  }}>
+                    {t.name.split(' ').slice(0, 2).map(w => w[0]).join('')}
+                  </div>
+                  <div>
+                    <div style={{ fontSize: 13, fontWeight: 500 }}>{t.name}</div>
+                    {t.position && <div style={{ fontSize: 11, color: 'var(--muted)' }}>{t.position}</div>}
+                  </div>
+                </div>
+                <textarea
+                  style={textareaStyle}
+                  placeholder={`Tasks for ${t.name}…`}
+                  value={drafts[t.engineer_id] ?? ''}
+                  onChange={e => setDrafts(d => ({ ...d, [t.engineer_id]: e.target.value }))}
+                />
+                <div style={{ paddingTop: 6, display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <button
+                    className="btn btn-primary"
+                    style={{ padding: '5px 14px', fontSize: 13, whiteSpace: 'nowrap' }}
+                    onClick={() => handleSave(t.engineer_id)}
+                    disabled={saving[t.engineer_id]}
+                  >
+                    {saving[t.engineer_id] ? <span className="spinner" /> : saved[t.engineer_id] ? '✓ Saved' : 'Save'}
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
 // ── Reports admin section ────────────────────────────────────────────────────
 
 function ReportsAdminSection({ pw }) {
@@ -1953,7 +2067,7 @@ export default function Admin() {
           {section === 'metrics'      && <MetricsSection pw={pw} />}
           {section === 'rules'        && <RulesSection pw={pw} />}
           {section === 'integrations' && <IntegrationsSection pw={pw} />}
-          {section === 'reports'      && <ReportsAdminSection pw={pw} />}
+          {section === 'reports'      && <><WeeklyTasksAdminSection pw={pw} /><ReportsAdminSection pw={pw} /></>}
           {section === 'aikeys'       && <AIKeysSection pw={pw} />}
           {section === 'security'     && <SecuritySection pw={pw} onPasswordChange={setPw} />}
         </div>

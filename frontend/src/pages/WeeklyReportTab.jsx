@@ -149,10 +149,25 @@ function ProjectSection({ project }) {
 }
 
 function EngineerCard({ engineer }) {
+  const [tab, setTab] = useState('tasks')
   const initials = engineer.name.split(' ').slice(0, 2).map(w => w[0]).join('')
+
+  const tabBtnStyle = (active) => ({
+    background: 'none',
+    border: 'none',
+    cursor: 'pointer',
+    padding: '5px 14px',
+    fontSize: 13,
+    fontWeight: active ? 600 : 400,
+    color: active ? 'var(--accent1)' : 'var(--muted)',
+    borderBottom: active ? '2px solid var(--accent1)' : '2px solid transparent',
+    marginBottom: -1,
+    transition: 'color 0.15s',
+  })
+
   return (
     <div style={{ marginBottom: 32 }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 14, marginBottom: 16 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 14, marginBottom: 12 }}>
         <div style={{
           width: 44, height: 44, borderRadius: '50%',
           background: engineer.color, flexShrink: 0,
@@ -198,10 +213,49 @@ function EngineerCard({ engineer }) {
           </div>
         </div>
       </div>
+
       <div style={{ paddingLeft: 58 }}>
-        {engineer.projects.map((p, i) => (
-          <ProjectSection key={p.repo || i} project={p} />
-        ))}
+        <div style={{
+          display: 'flex', borderBottom: '1px solid var(--border)', marginBottom: 14,
+        }}>
+          <button style={tabBtnStyle(tab === 'tasks')} onClick={() => setTab('tasks')}>
+            Weekly tasks
+          </button>
+          <button style={tabBtnStyle(tab === 'activity')} onClick={() => setTab('activity')}>
+            Activity
+          </button>
+        </div>
+
+        {tab === 'tasks' && (
+          <div>
+            {engineer.tasks ? (
+              <p style={{
+                whiteSpace: 'pre-line', margin: 0,
+                fontSize: 14, lineHeight: 1.7, color: 'var(--text)',
+              }}>
+                {engineer.tasks}
+              </p>
+            ) : (
+              <p style={{ margin: 0, fontSize: 13, color: 'var(--muted)', fontStyle: 'italic' }}>
+                No tasks added for this week
+              </p>
+            )}
+          </div>
+        )}
+
+        {tab === 'activity' && (
+          <div>
+            {engineer.projects.length === 0 ? (
+              <p style={{ margin: 0, fontSize: 13, color: 'var(--muted)', fontStyle: 'italic' }}>
+                No GitHub activity this week
+              </p>
+            ) : (
+              engineer.projects.map((p, i) => (
+                <ProjectSection key={p.repo || i} project={p} />
+              ))
+            )}
+          </div>
+        )}
       </div>
     </div>
   )
@@ -269,24 +323,23 @@ export default function WeeklyReportTab() {
       {!loading && error && (
         <div className="card" style={{ padding: '20px 24px', color: 'var(--danger)', display: 'flex', alignItems: 'center', gap: 12 }}>
           <span>{error}</span>
-          <button className="btn btn-ghost" style={{ fontSize: 13 }} onClick={() => { setError(null); setLoading(true); api.get(`/reports/weekly?week=${week}&year=${year}`).then(d => { setReport(d); setLoading(false) }).catch(e => { setError('Failed to load weekly report'); setLoading(false) }) }}>↺ Retry</button>
+          <button
+            className="btn btn-ghost"
+            style={{ fontSize: 13 }}
+            onClick={() => {
+              setError(null)
+              setLoading(true)
+              api.get(`/reports/weekly?week=${week}&year=${year}`)
+                .then(d => { setReport(d); setLoading(false) })
+                .catch(() => { setError('Failed to load weekly report'); setLoading(false) })
+            }}
+          >
+            ↺ Retry
+          </button>
         </div>
       )}
 
-      {!loading && !error && (!report || report.engineers.length === 0) && (
-        <div style={{
-          textAlign: 'center', padding: '48px 24px',
-          background: 'var(--card)', border: '1px solid var(--border)', borderRadius: 12,
-        }}>
-          <div style={{ fontSize: 32, marginBottom: 12 }}>📋</div>
-          <div style={{ fontSize: 15, color: 'var(--muted)' }}>No activity for week {week}</div>
-          <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 4, opacity: 0.7 }}>
-            Commits and PRs appear here after the next GitHub sync
-          </div>
-        </div>
-      )}
-
-      {!loading && report && report.engineers.length > 0 && (
+      {!loading && !error && report && (
         <div>
           {report.engineers.map(eng => <EngineerCard key={eng.id} engineer={eng} />)}
         </div>
