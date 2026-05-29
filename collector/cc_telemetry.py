@@ -33,9 +33,12 @@ CLAUDE_DIR      = pathlib.Path.home() / ".claude"
 CONFIG_PATH     = CLAUDE_DIR / "telemetry_config.json"
 BUFFER_PATH     = CLAUDE_DIR / "telemetry_buffer.jsonl"
 SEEN_PATH       = CLAUDE_DIR / ".telemetry_seen"
-# Recursive glob: catches both the legacy  projects/*/sessions/*.jsonl layout
-# and the current  projects/<project>/<session>/subagents/agent-*.jsonl layout.
-SESSIONS_GLOB   = "projects/**/agent-*.jsonl"
+# Recursive glob — matches ALL session JSONL files:
+#   legacy:   projects/*/sessions/<session-id>.jsonl
+#   current:  projects/<project>/<session>/subagents/agent-*.jsonl
+#   new:      projects/<project>/<session-id>.jsonl  (main conversation files)
+# The parser skips non-assistant records, so extra files are harmless.
+SESSIONS_GLOB   = "projects/**/*.jsonl"
 
 MAX_SEEN        = 10_000
 POLL_INTERVAL   = 30   # seconds
