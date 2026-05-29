@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react'
 import { Link } from 'react-router-dom'
 import { api } from '../api/client'
 import LoadingSpinner from '../components/LoadingSpinner'
+import RichTextEditor from '../components/RichTextEditor'
 
 const STREAMS = ['dev', 'support', 'docs']
 const STREAM_LABELS = { dev: 'Development', support: 'Support', docs: 'Documentation' }
@@ -1012,14 +1013,6 @@ function WeeklyTasksAdminSection({ pw }) {
     setYear(y)
   }
 
-  const textareaStyle = {
-    width: '100%', background: 'var(--card2)',
-    border: '1px solid var(--border)', borderRadius: 7,
-    color: 'var(--text)', padding: '8px 10px',
-    fontSize: 13, fontFamily: 'inherit', outline: 'none',
-    resize: 'vertical', minHeight: 80, boxSizing: 'border-box',
-  }
-
   return (
     <div className="admin-section">
       <h2>Weekly Tasks</h2>
@@ -1036,10 +1029,10 @@ function WeeklyTasksAdminSection({ pw }) {
         {tasks.length === 0 ? (
           <div style={{ color: 'var(--muted)', padding: '8px 0' }}>Loading…</div>
         ) : (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
             {tasks.map(t => (
-              <div key={t.engineer_id} style={{ display: 'grid', gridTemplateColumns: '180px 1fr auto', gap: 12, alignItems: 'flex-start' }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8, paddingTop: 6 }}>
+              <div key={t.engineer_id}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
                   <div style={{
                     width: 28, height: 28, borderRadius: '50%', background: t.color,
                     display: 'flex', alignItems: 'center', justifyContent: 'center',
@@ -1052,16 +1045,15 @@ function WeeklyTasksAdminSection({ pw }) {
                     {t.position && <div style={{ fontSize: 11, color: 'var(--muted)' }}>{t.position}</div>}
                   </div>
                 </div>
-                <textarea
-                  style={textareaStyle}
-                  placeholder={`Tasks for ${t.name}…`}
+                <RichTextEditor
                   value={drafts[t.engineer_id] ?? ''}
-                  onChange={e => setDrafts(d => ({ ...d, [t.engineer_id]: e.target.value }))}
+                  onChange={html => setDrafts(d => ({ ...d, [t.engineer_id]: html }))}
+                  placeholder={`Tasks for ${t.name}…`}
                 />
-                <div style={{ paddingTop: 6, display: 'flex', flexDirection: 'column', gap: 4 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 6 }}>
                   <button
                     className="btn btn-primary"
-                    style={{ padding: '5px 14px', fontSize: 13, whiteSpace: 'nowrap' }}
+                    style={{ padding: '5px 14px', fontSize: 13 }}
                     onClick={() => handleSave(t.engineer_id)}
                     disabled={saving[t.engineer_id]}
                   >

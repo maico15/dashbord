@@ -1,4 +1,17 @@
 import { useState } from 'react'
+import DOMPurify from 'dompurify'
+
+// Detect whether stored value is rich HTML or legacy plain text
+const isHtml = s => typeof s === 'string' && /<[a-z]/i.test(s)
+
+function SafeHtml({ html }) {
+  return (
+    <div
+      className="rich-text-content"
+      dangerouslySetInnerHTML={{ __html: DOMPurify.sanitize(html, { USE_PROFILES: { html: true } }) }}
+    />
+  )
+}
 
 function CommitRow({ commit }) {
   return (
@@ -163,9 +176,11 @@ export default function EngineerWeeklyBlock({ engineer }) {
       {tab === 'tasks' && (
         <div>
           {engineer.tasks ? (
-            <p style={{ whiteSpace: 'pre-line', margin: 0, fontSize: 14, lineHeight: 1.7, color: 'var(--text)' }}>
-              {engineer.tasks}
-            </p>
+            isHtml(engineer.tasks)
+              ? <SafeHtml html={engineer.tasks} />
+              : <p style={{ whiteSpace: 'pre-line', margin: 0, fontSize: 14, lineHeight: 1.7, color: 'var(--text)' }}>
+                  {engineer.tasks}
+                </p>
           ) : (
             <p style={{ margin: 0, fontSize: 13, color: 'var(--muted)', fontStyle: 'italic' }}>
               No tasks added for this week
