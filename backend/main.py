@@ -3320,6 +3320,93 @@ def ingest_telemetry(payload: TelemetryPayload):
     return {"accepted": accepted, "duplicate": duplicate}
 
 
+@app.get("/api/telemetry/debug")
+def telemetry_debug(password: str = ""):
+    """Show actual engineer_ids in ai_events and ai_usage_daily.
+    Use this to diagnose mismatches between stored events and team_members.
+    """
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    conn = get_db()
+    c = conn.cursor()
+
+    c.execute("SELECT id, name FROM team_members ORDER BY id")
+    members = [dict(r) for r in c.fetchall()]
+
+    try:
+        c.execute("""
+            SELECT engineer_id,
+                   COUNT(*) AS events,
+                   SUM(tokens_input)  AS total_input,
+                   SUM(tokens_output) AS total_output,
+                   MIN(timestamp) AS first_event,
+                   MAX(timestamp) AS last_event
+            FROM ai_events
+            GROUP BY engineer_id
+            ORDER BY engineer_id
+        """)
+        events_by_eng = [dict(r) for r in c.fetchall()]
+    except Exception:
+        events_by_eng = []
+
+    try:
+        c.execute("""
+            SELECT engineer_id,
+                   COUNT(*) AS days,
+                   SUM(tokens_input)  AS total_input,
+                   SUM(tokens_output) AS total_output
+            FROM ai_usage_daily
+            GROUP BY engineer_id
+            ORDER BY engineer_id
+        """)
+        daily_by_eng = [dict(r) for r in c.fetchall()]
+    except Exception:
+        daily_by_eng = []
+
+    conn.close()
+    return {
+        "team_members":              members,
+        "ai_events_by_engineer":     events_by_eng,
+        "ai_usage_daily_by_engineer": daily_by_eng,
+    }
+
+
+@app.post("/api/telemetry/fix-attribution")
+def fix_telemetry_attribution(from_id: int, to_id: int, password: str = ""):
+    """Re-attribute all ai_events + ai_usage_daily from from_id → to_id.
+    Rebuilds ai_usage_daily for both IDs from ai_events to ensure accuracy.
+    """
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    conn = get_db()
+    c = conn.cursor()
+
+    # Move events to correct engineer
+    c.execute("UPDATE ai_events SET engineer_id=? WHERE engineer_id=?", (to_id, from_id))
+    events_updated = c.rowcount
+
+    # Rebuild ai_usage_daily for affected engineers from source-of-truth ai_events
+    c.execute("DELETE FROM ai_usage_daily WHERE engineer_id IN (?, ?)", (from_id, to_id))
+    c.execute("""
+        INSERT INTO ai_usage_daily (engineer_id, date, tokens_input, tokens_output, sessions_count)
+        SELECT
+            engineer_id,
+            DATE(timestamp) AS date,
+            SUM(tokens_input)           AS tokens_input,
+            SUM(tokens_output)          AS tokens_output,
+            COUNT(DISTINCT session_id)  AS sessions_count
+        FROM ai_events
+        WHERE engineer_id IN (?, ?)
+        GROUP BY engineer_id, DATE(timestamp)
+    """, (from_id, to_id))
+    days_rebuilt = c.rowcount
+
+    conn.commit()
+    conn.close()
+    print(f"[telemetry] fix-attribution: {events_updated} events moved {from_id}→{to_id}, {days_rebuilt} daily rows rebuilt")
+    return {"events_updated": events_updated, "days_rebuilt": days_rebuilt, "from_id": from_id, "to_id": to_id}
+
+
 def _iso_week_bounds(week: int, year: int):
     """Return (monday_date, sunday_date) for the given ISO week."""
     jan4 = datetime(year, 1, 4).date()
@@ -3343,22 +3430,28 @@ def get_ai_usage_weekly(week: Optional[int] = None, year: Optional[int] = None):
     date_from_s = date_from.isoformat()
     date_to_s   = date_to.isoformat()
 
-    # Per-engineer totals
+    # Per-engineer totals — query ai_events directly (source of truth).
+    # Using ai_events instead of ai_usage_daily makes this resilient to the
+    # common bug where events arrive first under the wrong engineer_id:
+    # ai_events.engineer_id can be corrected via POST /api/telemetry/fix-attribution,
+    # but ai_usage_daily may still be stale.  The timestamp bounds cover the
+    # full Monday–Sunday ISO week in UTC.
+    ts_from = date_from_s + "T00:00:00"
+    ts_to   = date_to_s   + "T23:59:59"
     c.execute("""
         SELECT
             t.id, t.name, t.avatar_color, COALESCE(t.position,'') AS position,
-            COALESCE(SUM(d.tokens_input),  0) AS tokens_input,
-            COALESCE(SUM(d.tokens_output), 0) AS tokens_output,
-            COALESCE(SUM(d.sessions_count), 0) AS sessions,
-            COUNT(DISTINCT CASE WHEN d.tokens_input > 0 OR d.tokens_output > 0
-                                THEN d.date END) AS active_days
+            COALESCE(SUM(e.tokens_input),  0) AS tokens_input,
+            COALESCE(SUM(e.tokens_output), 0) AS tokens_output,
+            COUNT(DISTINCT e.session_id)      AS sessions,
+            COUNT(DISTINCT DATE(e.timestamp)) AS active_days
         FROM team_members t
-        LEFT JOIN ai_usage_daily d
-               ON d.engineer_id = t.id
-              AND d.date >= ? AND d.date <= ?
+        LEFT JOIN ai_events e
+               ON e.engineer_id = t.id
+              AND e.timestamp >= ? AND e.timestamp <= ?
         GROUP BY t.id
         ORDER BY tokens_input DESC
-    """, (date_from_s, date_to_s))
+    """, (ts_from, ts_to))
     engineers_rows = [dict(r) for r in c.fetchall()]
 
     # Daily totals for the week
