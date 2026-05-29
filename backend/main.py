@@ -175,7 +175,9 @@ def init_db():
             what_was_done TEXT NOT NULL DEFAULT '[]',
             next_week TEXT NOT NULL DEFAULT '[]',
             stream TEXT NOT NULL DEFAULT 'dev',
+            tasks TEXT NOT NULL DEFAULT '',
             created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(engineer_id, week_number, year)
         );
 
@@ -340,8 +342,12 @@ def init_db():
         conn.commit()
     except Exception:
         pass
+    # Use CURRENT_TIMESTAMP (a constant keyword) instead of datetime('now') (a function
+    # call). ALTER TABLE ADD COLUMN requires a *constant* default in SQLite < 3.37.0;
+    # datetime('now') is rejected on those versions while CURRENT_TIMESTAMP is always
+    # accepted. Nullable (no NOT NULL) so existing rows get NULL → treated as '' in app.
     try:
-        conn.execute("ALTER TABLE weekly_tasks ADD COLUMN updated_at TEXT NOT NULL DEFAULT (datetime('now'))")
+        conn.execute("ALTER TABLE weekly_tasks ADD COLUMN updated_at TEXT DEFAULT CURRENT_TIMESTAMP")
         conn.commit()
     except Exception:
         pass
