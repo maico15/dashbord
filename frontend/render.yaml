@@ -6,4 +6,4 @@ services:
     startCommand: node node_modules/serve/build/main.js dist -p $PORT
     envVars:
       - key: VITE_API_URL
-        value: PLACEHOLDER
+        value: https://dashbord-5u0i.onrender.com

@@ -3543,17 +3543,23 @@ class WeeklyTasksBody(BaseModel):
 def post_weekly_tasks(data: WeeklyTasksBody, password: str = ""):
     if password != ADMIN_PASSWORD:
         raise HTTPException(403, "Unauthorized")
+    print(f"[weekly-tasks] save engineer_id={data.engineer_id} week={data.week} year={data.year} tasks_len={len(data.tasks)}")
     conn = get_db()
     c = conn.cursor()
-    c.execute(
-        "INSERT INTO weekly_tasks "
-        "(engineer_id, week_number, year, what_was_done, next_week, stream, tasks, updated_at) "
-        "VALUES (?, ?, ?, '[]', '[]', 'dev', ?, datetime('now')) "
-        "ON CONFLICT(engineer_id, week_number, year) DO UPDATE SET "
-        "tasks=excluded.tasks, updated_at=datetime('now')",
-        (data.engineer_id, data.week, data.year, data.tasks),
-    )
-    conn.commit()
+    try:
+        c.execute(
+            "INSERT INTO weekly_tasks "
+            "(engineer_id, week_number, year, what_was_done, next_week, stream, tasks, updated_at) "
+            "VALUES (?, ?, ?, '[]', '[]', 'dev', ?, datetime('now')) "
+            "ON CONFLICT(engineer_id, week_number, year) DO UPDATE SET "
+            "tasks=excluded.tasks, updated_at=datetime('now')",
+            (data.engineer_id, data.week, data.year, data.tasks),
+        )
+        conn.commit()
+    except Exception as ex:
+        conn.close()
+        print(f"[weekly-tasks] DB error: {ex}")
+        raise HTTPException(500, f"DB error: {ex}")
     conn.close()
     return {"ok": True}
 

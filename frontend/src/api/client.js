@@ -1,5 +1,9 @@
-const BASE = import.meta.env.VITE_API_URL
-  ? `${import.meta.env.VITE_API_URL}/api`
+const _rawApiUrl = import.meta.env.VITE_API_URL || ''
+// Guard: PLACEHOLDER or non-http values mean the env var was never properly set.
+// Fall back to same-origin /api (works with Vite proxy in dev; on production the
+// Render env var must be set to the actual backend URL).
+const BASE = (_rawApiUrl && _rawApiUrl.startsWith('http'))
+  ? `${_rawApiUrl}/api`
   : '/api'
 
 async function req(method, path, body, password) {
