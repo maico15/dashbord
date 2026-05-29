@@ -1,7 +1,8 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { api } from '../api/client'
 import LoadingSpinner from '../components/LoadingSpinner'
+import EngineerWeeklyBlock from '../components/EngineerWeeklyBlock'
 import {
   AreaChart, Area, XAxis, YAxis, CartesianGrid,
   Tooltip, ResponsiveContainer,
@@ -223,432 +224,50 @@ function WeekSelector({ week, year, onChange }) {
   )
 }
 
-// ── Task list ─────────────────────────────────────────────────────────────────
-
-const STREAM_PILL = { dev: 'tag-dev', support: 'tag-support', docs: 'tag-docs' }
-const STREAM_SHORT = { dev: 'Dev', support: 'Support', docs: 'Docs' }
-
-function TaskList({ title, items, stream, accent }) {
-  return (
-    <div>
-      <div style={{
-        fontSize: 11, fontWeight: 700, letterSpacing: '0.1em',
-        textTransform: 'uppercase', color: accent, marginBottom: 14,
-        display: 'flex', alignItems: 'center', gap: 8,
-      }}>
-        <span style={{ display: 'inline-block', width: 3, height: 14, background: accent, borderRadius: 2 }} />
-        {title}
-      </div>
-      {items.length === 0
-        ? <div style={{ color: 'var(--muted)', fontSize: 13, padding: '8px 0' }}>—</div>
-        : (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-            {items.map((task, i) => (
-              <div key={i} style={{
-                display: 'flex', alignItems: 'flex-start', gap: 10,
-                padding: '10px 14px',
-                background: 'var(--card2)', borderRadius: 8,
-                border: '1px solid var(--border)',
-              }}>
-                <span style={{ color: accent, marginTop: 1, flexShrink: 0, fontSize: 12 }}>◆</span>
-                <span style={{ fontSize: 14, lineHeight: 1.5, flex: 1 }}>{task}</span>
-                <span className={`tag ${STREAM_PILL[stream] || 'tag-dev'}`} style={{ flexShrink: 0, marginTop: 1 }}>
-                  {STREAM_SHORT[stream] || stream}
-                </span>
-              </div>
-            ))}
-          </div>
-        )
-      }
-    </div>
-  )
-}
-
-// ── Right column ──────────────────────────────────────────────────────────────
-
-function WeeklyTasksPanel({ engineerId, stream, initialWeek, initialYear }) {
-  const [week, setWeek]   = useState(initialWeek)
-  const [year, setYear]   = useState(initialYear)
-  const [tasks, setTasks] = useState(null)
-  const [loading, setLoading] = useState(false)
-
-  const streamColor = STREAM_COLOR[stream] || 'var(--accent1)'
-
-  const loadTasks = useCallback((w, y) => {
-    setLoading(true)
-    api.get(`/engineers/${engineerId}/tasks?week=${w}&year=${y}`)
-      .then(setTasks)
-      .catch(() => setTasks(null))
-      .finally(() => setLoading(false))
-  }, [engineerId])
-
-  useEffect(() => { loadTasks(week, year) }, [week, year, loadTasks])
-
-  const handleWeekChange = (w, y) => { setWeek(w); setYear(y) }
-
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 28 }}>
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-        <WeekSelector week={week} year={year} onChange={handleWeekChange} />
-        {tasks && (
-          <span style={{ fontSize: 11, color: 'var(--muted)' }}>
-            Stream: <span className={`tag ${STREAM_PILL[tasks.stream]}`}>{STREAM_SHORT[tasks.stream]}</span>
-          </span>
-        )}
-      </div>
-
-      {loading && (
-        <div style={{ display: 'flex', justifyContent: 'center', padding: 40 }}>
-          <LoadingSpinner />
-        </div>
-      )}
-
-      {!loading && !tasks && (
-        <div style={{
-          display: 'flex', flexDirection: 'column', alignItems: 'center',
-          justifyContent: 'center', padding: '48px 24px',
-          background: 'var(--card)', border: '1px solid var(--border)',
-          borderRadius: 12, gap: 10,
-        }}>
-          <div style={{ fontSize: 32 }}>📋</div>
-          <div style={{ fontSize: 15, color: 'var(--muted)', fontWeight: 500 }}>No data entered</div>
-          <div style={{ fontSize: 12, color: 'var(--muted)', opacity: 0.7 }}>
-            No tasks have been added for week {week} · {year}
-          </div>
-        </div>
-      )}
-
-      {!loading && tasks && (
-        <>
-          <div className="card" style={{ padding: '20px 24px' }}>
-            <TaskList
-              title="What was done"
-              items={tasks.what_was_done || []}
-              stream={tasks.stream}
-              accent={streamColor}
-            />
-          </div>
-
-          <div className="card" style={{ padding: '20px 24px' }}>
-            <TaskList
-              title="Next week plan"
-              items={tasks.next_week || []}
-              stream={tasks.stream}
-              accent="var(--accent2)"
-            />
-          </div>
-        </>
-      )}
-    </div>
-  )
-}
-
-// ── Commits timeline ──────────────────────────────────────────────────────────
-
-function CommitsTimeline({ engineerId }) {
-  const [commits, setCommits] = useState(null)
-  const [error, setError] = useState(null)
-
-  useEffect(() => {
-    api.get(`/engineers/${engineerId}/commits`)
-      .then(setCommits)
-      .catch(e => setError(e.message))
-  }, [engineerId])
-
-  if (error) {
-    return (
-      <div className="card" style={{ padding: '14px 16px', fontSize: 13, color: 'var(--danger)' }}>
-        Failed to load commits: {error}
-      </div>
-    )
-  }
-
-  if (commits === null) {
-    return (
-      <div className="card" style={{ padding: 24, display: 'flex', justifyContent: 'center' }}>
-        <LoadingSpinner />
-      </div>
-    )
-  }
-
-  // Group: dateKey → repo → [commit, ...]
-  const groupedByDate = {}
-  for (const c of commits) {
-    const dateKey = (c.committed_at || '').slice(0, 10)
-    if (!dateKey) continue
-    if (!groupedByDate[dateKey]) groupedByDate[dateKey] = {}
-    if (!groupedByDate[dateKey][c.repo]) groupedByDate[dateKey][c.repo] = []
-    groupedByDate[dateKey][c.repo].push(c)
-  }
-  const dateKeys = Object.keys(groupedByDate).sort((a, b) => b.localeCompare(a))
-
-  const formatDate = (s) => {
-    const d = new Date(s + 'T12:00:00Z')
-    return d.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' })
-  }
-  const firstLine = (msg) => (msg || '').split('\n')[0].trim()
-
-  return (
-    <div className="card" style={{ padding: '18px 20px' }}>
-      <div style={{
-        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-        marginBottom: 16,
-      }}>
-        <div style={{
-          fontSize: 11, color: 'var(--muted)',
-          textTransform: 'uppercase', letterSpacing: '0.08em',
-        }}>
-          Commits · last 8 weeks
-        </div>
-        <div style={{ fontSize: 11, color: 'var(--muted)' }}>
-          {commits.length} commit{commits.length === 1 ? '' : 's'}
-        </div>
-      </div>
-
-      {dateKeys.length === 0 ? (
-        <div style={{ color: 'var(--muted)', fontSize: 13, padding: '12px 0', textAlign: 'center' }}>
-          No commits recorded
-        </div>
-      ) : (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
-          {dateKeys.map(date => {
-            const repos = groupedByDate[date]
-            const totalForDay = Object.values(repos).reduce((a, list) => a + list.length, 0)
-            return (
-              <div key={date} style={{ display: 'flex', gap: 14, position: 'relative' }}>
-                {/* Timeline dot + line */}
-                <div style={{
-                  flexShrink: 0, width: 10, paddingTop: 4,
-                  display: 'flex', flexDirection: 'column', alignItems: 'center',
-                }}>
-                  <div style={{
-                    width: 10, height: 10, borderRadius: '50%',
-                    background: 'var(--accent1)',
-                    boxShadow: '0 0 0 3px rgba(0,207,255,0.15)',
-                  }} />
-                  <div style={{
-                    width: 2, flex: 1, background: 'var(--border)', marginTop: 4,
-                  }} />
-                </div>
-
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  {/* Date header */}
-                  <div style={{
-                    display: 'flex', alignItems: 'baseline', gap: 8, marginBottom: 8,
-                  }}>
-                    <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text)' }}>
-                      {formatDate(date)}
-                    </span>
-                    <span style={{ fontSize: 11, color: 'var(--muted)' }}>
-                      {totalForDay} commit{totalForDay === 1 ? '' : 's'}
-                    </span>
-                  </div>
-
-                  {/* Repo groups */}
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-                    {Object.entries(repos).map(([repo, list]) => (
-                      <div key={repo}>
-                        <div style={{
-                          fontSize: 11, fontWeight: 600, color: 'var(--accent2)',
-                          marginBottom: 5, fontFamily: 'ui-monospace, SFMono-Regular, monospace',
-                        }}>
-                          {repo}
-                        </div>
-                        <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-                          {list.map(c => (
-                            <div key={c.sha} style={{
-                              display: 'flex', alignItems: 'flex-start', gap: 10,
-                              padding: '6px 10px',
-                              background: 'var(--card2)', borderRadius: 6,
-                              border: '1px solid var(--border)',
-                              fontSize: 12,
-                            }}>
-                              <code style={{
-                                color: 'var(--muted)', fontSize: 11,
-                                flexShrink: 0, paddingTop: 1,
-                              }}>
-                                {(c.sha || '').slice(0, 7)}
-                              </code>
-                              <span style={{
-                                flex: 1, lineHeight: 1.5, color: 'var(--text)',
-                                overflow: 'hidden', textOverflow: 'ellipsis',
-                                whiteSpace: 'nowrap',
-                              }}>
-                                {firstLine(c.message) || '(no message)'}
-                              </span>
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              </div>
-            )
-          })}
-        </div>
-      )}
-    </div>
-  )
-}
-
-// ── PR activity tab ───────────────────────────────────────────────────────────
-
-function PRActivityTab({ engineerId }) {
-  const [prs, setPrs]     = useState(null)
-  const [error, setError] = useState(null)
-
-  useEffect(() => {
-    api.get(`/engineers/${engineerId}/prs`)
-      .then(setPrs)
-      .catch(e => setError(e.message))
-  }, [engineerId])
-
-  if (error) {
-    return (
-      <div className="card" style={{ padding: '14px 16px', fontSize: 13, color: 'var(--danger)' }}>
-        Failed to load activity: {error}
-      </div>
-    )
-  }
-  if (prs === null) {
-    return (
-      <div className="card" style={{ padding: 24, display: 'flex', justifyContent: 'center' }}>
-        <LoadingSpinner />
-      </div>
-    )
-  }
-
-  const grouped = {}
-  for (const pr of prs) {
-    const key = `${pr.year}-${String(pr.week).padStart(2, '0')}`
-    if (!grouped[key]) grouped[key] = { week: pr.week, year: pr.year, prs: [] }
-    grouped[key].prs.push(pr)
-  }
-  const weekKeys = Object.keys(grouped).sort((a, b) => b.localeCompare(a))
-
-  if (weekKeys.length === 0) {
-    return (
-      <div style={{
-        display: 'flex', flexDirection: 'column', alignItems: 'center',
-        justifyContent: 'center', padding: '48px 24px',
-        background: 'var(--card)', border: '1px solid var(--border)',
-        borderRadius: 12, gap: 10,
-      }}>
-        <div style={{ fontSize: 32 }}>🔀</div>
-        <div style={{ fontSize: 15, color: 'var(--muted)', fontWeight: 500 }}>No PR activity</div>
-        <div style={{ fontSize: 12, color: 'var(--muted)', opacity: 0.7 }}>
-          PRs will appear here after the next GitHub sync
-        </div>
-      </div>
-    )
-  }
-
-  const shortRepo = (repo) => (repo.includes('/') ? repo.split('/')[1] : repo)
-  const firstLine = (s) => (s || '').split('\n')[0].trim()
-
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
-      {weekKeys.map(key => {
-        const { week, year, prs: weekPrs } = grouped[key]
-        return (
-          <div key={key} className="card" style={{ padding: '18px 20px' }}>
-            <div style={{
-              display: 'flex', justifyContent: 'space-between',
-              fontSize: 11, color: 'var(--muted)',
-              textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 14,
-            }}>
-              <span>Week {week} · {year}</span>
-              <span>{weekPrs.length} PR{weekPrs.length !== 1 ? 's' : ''}</span>
-            </div>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-              {weekPrs.map((pr, i) => (
-                <div key={pr.pr_number ?? i} style={{
-                  background: 'var(--card2)', borderRadius: 8,
-                  border: '1px solid var(--border)', overflow: 'hidden',
-                }}>
-                  <div style={{ padding: '12px 14px' }}>
-                    <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10 }}>
-                      <span style={{ color: 'var(--accent1)', flexShrink: 0, fontSize: 14, marginTop: 1 }}>⊕</span>
-                      <div style={{ flex: 1, minWidth: 0 }}>
-                        <div style={{ fontSize: 14, fontWeight: 600, lineHeight: 1.4, marginBottom: 5 }}>
-                          {pr.title || `PR #${pr.pr_number}`}
-                        </div>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
-                          <code style={{
-                            fontSize: 11, color: 'var(--accent2)',
-                            fontFamily: 'ui-monospace, SFMono-Regular, monospace',
-                          }}>
-                            {shortRepo(pr.repo)}
-                          </code>
-                          <span style={{ fontSize: 11, color: 'var(--muted)' }}>#{pr.pr_number}</span>
-                          <span style={{ fontSize: 11, color: 'var(--success)', fontWeight: 600 }}>
-                            +{pr.additions}
-                          </span>
-                          <span style={{ fontSize: 11, color: 'var(--danger)', fontWeight: 600 }}>
-                            −{pr.deletions}
-                          </span>
-                          <span style={{ fontSize: 11, color: 'var(--muted)' }}>
-                            {pr.changed_files} file{pr.changed_files !== 1 ? 's' : ''}
-                          </span>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                  {pr.commits?.length > 0 && (
-                    <div style={{ borderTop: '1px solid var(--border)', padding: '8px 14px 12px' }}>
-                      <div style={{ fontSize: 11, color: 'var(--muted)', marginBottom: 6 }}>
-                        {pr.commits.length} commit{pr.commits.length !== 1 ? 's' : ''}
-                      </div>
-                      <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-                        {pr.commits.map((commit, ci) => (
-                          <div key={commit.sha || ci} style={{
-                            display: 'flex', alignItems: 'flex-start', gap: 8, fontSize: 12,
-                          }}>
-                            <code style={{
-                              color: 'var(--muted)', fontSize: 11, flexShrink: 0,
-                              fontFamily: 'ui-monospace, SFMono-Regular, monospace',
-                            }}>
-                              {commit.sha}
-                            </code>
-                            <span style={{ color: 'var(--text)', lineHeight: 1.4 }}>
-                              {firstLine(commit.message) || '(no message)'}
-                            </span>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-                </div>
-              ))}
-            </div>
-          </div>
-        )
-      })}
-    </div>
-  )
-}
-
 // ── Page ──────────────────────────────────────────────────────────────────────
 
 export default function EngineerProfile() {
-  const { id }    = useParams()
-  const navigate  = useNavigate()
-  const [profile,  setProfile]  = useState(null)
-  const [error,    setError]    = useState(null)
-  const [rightTab, setRightTab] = useState('tasks')
+  const { id }   = useParams()
+  const navigate = useNavigate()
 
+  const [profile,      setProfile]      = useState(null)
+  const [profileError, setProfileError] = useState(null)
+
+  const [week,          setWeek]          = useState(null)
+  const [year,          setYear]          = useState(null)
+  const [weekEngineer,  setWeekEngineer]  = useState(null)
+  const [weekLoading,   setWeekLoading]   = useState(false)
+
+  // Load profile
   useEffect(() => {
     api.get(`/engineers/${id}/profile`)
-      .then(setProfile)
-      .catch((e) => setError(e.message))
+      .then(p => {
+        setProfile(p)
+        setWeek(p.current_week)
+        setYear(p.current_year)
+      })
+      .catch(e => setProfileError(e.message))
   }, [id])
 
-  if (error) {
+  // Load weekly report whenever week/year/id changes
+  useEffect(() => {
+    if (!week || !year) return
+    setWeekLoading(true)
+    setWeekEngineer(null)
+    api.get(`/reports/weekly?week=${week}&year=${year}`)
+      .then(d => {
+        const found = (d.engineers || []).find(e => String(e.id) === String(id))
+        setWeekEngineer(found || null)
+      })
+      .catch(() => setWeekEngineer(null))
+      .finally(() => setWeekLoading(false))
+  }, [week, year, id])
+
+  if (profileError) {
     return (
       <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '100vh', gap: 16 }}>
         <div style={{ fontSize: 32 }}>⚠️</div>
-        <div style={{ color: 'var(--danger)' }}>{error}</div>
+        <div style={{ color: 'var(--danger)' }}>{profileError}</div>
         <button className="btn btn-ghost" onClick={() => navigate('/')}>← Back</button>
       </div>
     )
@@ -692,30 +311,40 @@ export default function EngineerProfile() {
           <ProfileCard profile={profile} />
         </div>
 
-        {/* Right: tabbed panel */}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 24 }}>
-          <div style={{ display: 'flex', gap: 4 }}>
-            {[['tasks', 'Weekly Tasks'], ['activity', 'Activity'], ['commits', 'Commits']].map(([key, label]) => (
-              <button
-                key={key}
-                onClick={() => setRightTab(key)}
-                className={`btn ${rightTab === key ? 'btn-primary' : 'btn-ghost'}`}
-                style={{ fontSize: 13 }}
-              >
-                {label}
-              </button>
-            ))}
-          </div>
-          {rightTab === 'tasks' && (
-            <WeeklyTasksPanel
-              engineerId={id}
-              stream={profile.stream}
-              initialWeek={profile.current_week}
-              initialYear={profile.current_year}
+        {/* Right: weekly block with week nav */}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+          {week && year && (
+            <WeekSelector
+              week={week}
+              year={year}
+              onChange={(w, y) => { setWeek(w); setYear(y) }}
             />
           )}
-          {rightTab === 'activity' && <PRActivityTab engineerId={id} />}
-          {rightTab === 'commits' && <CommitsTimeline engineerId={id} />}
+
+          {weekLoading && (
+            <div style={{ display: 'flex', justifyContent: 'center', padding: 40 }}>
+              <LoadingSpinner />
+            </div>
+          )}
+
+          {!weekLoading && weekEngineer && (
+            <EngineerWeeklyBlock engineer={weekEngineer} />
+          )}
+
+          {!weekLoading && !weekEngineer && week && (
+            <div style={{
+              display: 'flex', flexDirection: 'column', alignItems: 'center',
+              justifyContent: 'center', padding: '48px 24px',
+              background: 'var(--card)', border: '1px solid var(--border)',
+              borderRadius: 12, gap: 10,
+            }}>
+              <div style={{ fontSize: 32 }}>📋</div>
+              <div style={{ fontSize: 15, color: 'var(--muted)', fontWeight: 500 }}>No data for this week</div>
+              <div style={{ fontSize: 12, color: 'var(--muted)', opacity: 0.7 }}>
+                No tasks or GitHub activity recorded for week {week} · {year}
+              </div>
+            </div>
+          )}
         </div>
       </div>
     </div>
