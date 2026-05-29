@@ -219,6 +219,11 @@ export default function Dashboard() {
         setLoading(false)
       })
       .catch(console.error)
+
+    const refresh = setInterval(() => {
+      api.get('/leaderboard').then(setLeaderboard).catch(() => {})
+    }, 60_000)
+    return () => clearInterval(refresh)
   }, [])
 
   useEffect(() => {

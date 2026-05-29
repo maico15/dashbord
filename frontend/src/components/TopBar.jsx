@@ -1,16 +1,22 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useTheme, toggleTheme } from '../hooks/useTheme'
 
-function useCountUp(target, duration = 1800) {
-  const [count, setCount] = useState(0)
+function useCountUp(target, duration = 400) {
+  const [count, setCount] = useState(target)
+  const prevRef = useRef(target)
   useEffect(() => {
-    if (!target) return
-    let start = 0
-    const step = target / (duration / 16)
+    const prev = prevRef.current
+    prevRef.current = target
+    if (!target || target === prev) {
+      setCount(target)
+      return
+    }
+    let start = prev
+    const step = (target - prev) / (duration / 16)
     const id = setInterval(() => {
       start += step
-      if (start >= target) {
+      if ((step > 0 && start >= target) || (step < 0 && start <= target)) {
         setCount(target)
         clearInterval(id)
       } else {
