@@ -113,7 +113,7 @@ export default function WeeklyReportTab() {
 
   return (
     <div>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 16, marginBottom: 28 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 16, marginTop: 16, marginBottom: 28 }}>
         <button className="btn btn-ghost" onClick={() => navigate(-1)} style={{ padding: '5px 14px' }}>←</button>
         <div style={{ textAlign: 'center', minWidth: 180 }}>
           <div style={{ fontSize: 16, fontWeight: 700 }}>Week {week ?? '…'}</div>

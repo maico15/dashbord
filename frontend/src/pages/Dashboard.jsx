@@ -89,7 +89,7 @@ function DevTab() {
   const { totals, weekly_chart, bottlenecks } = data
   return (
     <>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 16, marginBottom: 20 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 16, marginTop: 16, marginBottom: 20 }}>
         <button className="btn btn-ghost" onClick={() => navigate(-1)} style={{ padding: '5px 14px' }}>←</button>
         <div style={{ textAlign: 'center', minWidth: 200 }}>
           <div style={{ fontSize: 15, fontWeight: 700 }}>Week {week ?? '…'}</div>
