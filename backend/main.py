@@ -3407,6 +3407,51 @@ def fix_telemetry_attribution(from_id: int, to_id: int, password: str = ""):
     return {"events_updated": events_updated, "days_rebuilt": days_rebuilt, "from_id": from_id, "to_id": to_id}
 
 
+@app.post("/api/telemetry/reprocess")
+def reprocess_telemetry(engineer_id: int, password: str = ""):
+    """Rebuild ai_usage_daily for one engineer from ai_events, using the
+    event's own timestamp for the date (not the server receive date).
+
+    Use this when ai_usage_daily.date is wrong — e.g. all rows show today
+    because the collector used datetime.now() as a fallback for events that
+    had no timestamp field in the session file.  ai_events.timestamp is the
+    source of truth; this query rebuilds the daily aggregate from it.
+    """
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    conn = get_db()
+    c = conn.cursor()
+
+    c.execute("DELETE FROM ai_usage_daily WHERE engineer_id=?", (engineer_id,))
+    deleted = c.rowcount
+
+    # Use substr(timestamp,1,10) — works in both SQLite and Postgres and
+    # avoids DATE() which can vary by locale/timezone settings.
+    c.execute("""
+        INSERT INTO ai_usage_daily
+            (engineer_id, date, tokens_input, tokens_output, sessions_count)
+        SELECT
+            engineer_id,
+            substr(timestamp, 1, 10)   AS date,
+            SUM(tokens_input)          AS tokens_input,
+            SUM(tokens_output)         AS tokens_output,
+            COUNT(DISTINCT session_id) AS sessions_count
+        FROM ai_events
+        WHERE engineer_id = ?
+        GROUP BY engineer_id, substr(timestamp, 1, 10)
+    """, (engineer_id,))
+    rebuilt = c.rowcount
+
+    conn.commit()
+    conn.close()
+    print(f"[telemetry] reprocess engineer_id={engineer_id}: deleted {deleted} stale daily rows, rebuilt {rebuilt} from ai_events")
+    return {
+        "engineer_id":      engineer_id,
+        "daily_rows_deleted": deleted,
+        "daily_rows_rebuilt": rebuilt,
+    }
+
+
 def _iso_week_bounds(week: int, year: int):
     """Return (monday_date, sunday_date) for the given ISO week."""
     jan4 = datetime(year, 1, 4).date()
