@@ -972,6 +972,7 @@ function WeeklyTasksAdminSection({ pw }) {
   const [drafts, setDrafts] = useState({})   // { engineer_id: string }
   const [saving, setSaving] = useState({})   // { engineer_id: bool }
   const [saved,  setSaved]  = useState({})   // { engineer_id: bool }
+  const [errors, setErrors] = useState({})   // { engineer_id: string }
 
   const load = () => {
     api.get(`/weekly-tasks?week=${week}&year=${year}`)
@@ -988,12 +989,15 @@ function WeeklyTasksAdminSection({ pw }) {
 
   const handleSave = async (engineer_id) => {
     setSaving(s => ({ ...s, [engineer_id]: true }))
+    setErrors(e => ({ ...e, [engineer_id]: null }))
     try {
-      await api.post('/weekly-tasks', {
-        engineer_id, week, year, tasks: drafts[engineer_id] || '', password: pw,
-      })
+      await api.post('/weekly-tasks', { engineer_id, week, year, tasks: drafts[engineer_id] || '' }, pw)
       setSaved(s => ({ ...s, [engineer_id]: true }))
       setTimeout(() => setSaved(s => ({ ...s, [engineer_id]: false })), 2000)
+    } catch (e) {
+      let msg = e.message || 'Save failed'
+      try { msg = JSON.parse(msg).detail || msg } catch {}
+      setErrors(er => ({ ...er, [engineer_id]: msg }))
     } finally {
       setSaving(s => ({ ...s, [engineer_id]: false }))
     }
@@ -1054,7 +1058,7 @@ function WeeklyTasksAdminSection({ pw }) {
                   value={drafts[t.engineer_id] ?? ''}
                   onChange={e => setDrafts(d => ({ ...d, [t.engineer_id]: e.target.value }))}
                 />
-                <div style={{ paddingTop: 6, display: 'flex', alignItems: 'center', gap: 8 }}>
+                <div style={{ paddingTop: 6, display: 'flex', flexDirection: 'column', gap: 4 }}>
                   <button
                     className="btn btn-primary"
                     style={{ padding: '5px 14px', fontSize: 13, whiteSpace: 'nowrap' }}
@@ -1063,6 +1067,9 @@ function WeeklyTasksAdminSection({ pw }) {
                   >
                     {saving[t.engineer_id] ? <span className="spinner" /> : saved[t.engineer_id] ? '✓ Saved' : 'Save'}
                   </button>
+                  {errors[t.engineer_id] && (
+                    <span style={{ fontSize: 11, color: 'var(--danger)' }}>{errors[t.engineer_id]}</span>
+                  )}
                 </div>
               </div>
             ))}

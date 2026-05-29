@@ -3497,12 +3497,11 @@ class WeeklyTasksBody(BaseModel):
     week: int
     year: int
     tasks: str = ""
-    password: str = ""
 
 
 @app.post("/api/weekly-tasks")
-def post_weekly_tasks(data: WeeklyTasksBody):
-    if data.password != ADMIN_PASSWORD:
+def post_weekly_tasks(data: WeeklyTasksBody, password: str = ""):
+    if password != ADMIN_PASSWORD:
         raise HTTPException(403, "Unauthorized")
     conn = get_db()
     c = conn.cursor()
