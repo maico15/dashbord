@@ -337,20 +337,31 @@ def init_db():
     except Exception:
         pass
 
-    try:
+    # ── weekly_tasks schema migration ────────────────────────────────────────
+    # Use PRAGMA table_info (not try/except) so failures are never swallowed.
+    # DEFAULT '' is the only value that is a constant literal in every SQLite
+    # version.  Both datetime('now') and CURRENT_TIMESTAMP were rejected as
+    # non-constant for ALTER TABLE ADD COLUMN in different SQLite versions:
+    #   • datetime('now')    – always a function call, rejected in all versions
+    #   • CURRENT_TIMESTAMP  – rejected since SQLite 3.38.0 (2022-02-22);
+    #                          Render's Python 3.11 ships with SQLite 3.39.2
+    # Therefore DEFAULT '' is the only cross-version-safe choice here.
+    print("[db] Running database migrations...")
+    _wt_cols = {row[1] for row in conn.execute("PRAGMA table_info(weekly_tasks)").fetchall()}
+
+    if "tasks" not in _wt_cols:
         conn.execute("ALTER TABLE weekly_tasks ADD COLUMN tasks TEXT NOT NULL DEFAULT ''")
         conn.commit()
-    except Exception:
-        pass
-    # Use CURRENT_TIMESTAMP (a constant keyword) instead of datetime('now') (a function
-    # call). ALTER TABLE ADD COLUMN requires a *constant* default in SQLite < 3.37.0;
-    # datetime('now') is rejected on those versions while CURRENT_TIMESTAMP is always
-    # accepted. Nullable (no NOT NULL) so existing rows get NULL → treated as '' in app.
-    try:
-        conn.execute("ALTER TABLE weekly_tasks ADD COLUMN updated_at TEXT DEFAULT CURRENT_TIMESTAMP")
+        print("[db] Added weekly_tasks.tasks column")
+    else:
+        print("[db] weekly_tasks.tasks already exists — skipping")
+
+    if "updated_at" not in _wt_cols:
+        conn.execute("ALTER TABLE weekly_tasks ADD COLUMN updated_at TEXT DEFAULT ''")
         conn.commit()
-    except Exception:
-        pass
+        print("[db] Added weekly_tasks.updated_at column")
+    else:
+        print("[db] weekly_tasks.updated_at already exists — skipping")
 
     # ── One-time: fix score_rules to real-data formula ────────────────────────
     # Runs on every deploy but is idempotent after the first time.
