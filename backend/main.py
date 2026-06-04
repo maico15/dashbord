@@ -64,6 +64,29 @@ def _ensure_github_username_map():
     conn.close()
 
 
+def _auto_advance_week():
+    """Every Monday sync config.current_week/year to the real ISO 8601 week.
+
+    Also called on every startup so that a Render cold start after a week
+    boundary doesn't leave config stale before the first GitHub sync runs.
+    """
+    conn = get_db()
+    try:
+        now = datetime.utcnow().isocalendar()
+        conn.execute(
+            "INSERT OR REPLACE INTO config (key, value) VALUES ('current_week', ?)",
+            (str(now[1]),),
+        )
+        conn.execute(
+            "INSERT OR REPLACE INTO config (key, value) VALUES ('current_year', ?)",
+            (str(now[0]),),
+        )
+        conn.commit()
+        print(f"[auto_advance_week] updated to week {now[1]} / {now[0]}")
+    finally:
+        conn.close()
+
+
 @asynccontextmanager
 async def lifespan(app):
     init_db()
@@ -79,8 +102,16 @@ async def lifespan(app):
     scheduler.add_job(_run_slack_reports_sync,'cron',     hour=20, minute=0,  id='slack_reports_sync', replace_existing=True)
     scheduler.add_job(_run_ai_usage_sync,    'cron',     hour=2,  minute=30, id='ai_usage_daily_sync', replace_existing=True)
     scheduler.add_job(_run_github_sync,      'interval', minutes=15,          id='github_interval_sync', replace_existing=True)
+    scheduler.add_job(
+        _auto_advance_week,
+        'cron',
+        day_of_week='mon', hour=0, minute=5,
+        id='auto_advance_week',
+        replace_existing=True,
+    )
     scheduler.start()
-    _run_github_sync()   # immediate run on startup
+    _auto_advance_week()  # sync config on every startup (handles cold starts after week boundary)
+    _run_github_sync()    # immediate run on startup
     yield
     scheduler.shutdown(wait=False)
 
@@ -1493,8 +1524,9 @@ def _do_github_sync(conn) -> tuple:
                 raise ValueError("Connection timeout")
             raise ValueError(f"Request failed: {e}")
 
-    # Determine current week date range (ISO week)
-    week, year = current_week_year(conn)
+    # Always use the real ISO week — config.current_week is for display/scoring only
+    _now = datetime.utcnow().isocalendar()
+    week, year = _now[1], _now[0]
     jan4 = datetime(year, 1, 4).date()
     week1_monday = jan4 - timedelta(days=jan4.weekday())
     week_monday  = week1_monday + timedelta(weeks=week - 1)
@@ -2136,12 +2168,12 @@ def overview():
     c = conn.cursor()
     c.execute("SELECT key,value FROM config")
     cfg = {r["key"]: r["value"] for r in c.fetchall()}
+    week, year = current_week_year(conn)
     conn.close()
-    _now = datetime.utcnow().isocalendar()
     return {
         "team_name": cfg.get("team_name", "Engineering Team"),
-        "current_week": _now[1],
-        "current_year": _now[0],
+        "current_week": week,
+        "current_year": year,
     }
 
 
