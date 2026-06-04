@@ -3,7 +3,9 @@ import { api } from '../api/client'
 import LoadingSpinner from '../components/LoadingSpinner'
 import EngineerWeeklyBlock from '../components/EngineerWeeklyBlock'
 
-function weekDateRange(week, year) {
+// ── Date helpers ───────────────────────────────────────────────────────────────
+
+function getWeekRange(week, year) {
   const jan4 = new Date(year, 0, 4)
   const dow = jan4.getDay() || 7
   const week1Mon = new Date(jan4)
@@ -12,9 +14,20 @@ function weekDateRange(week, year) {
   mon.setDate(week1Mon.getDate() + (week - 1) * 7)
   const fri = new Date(mon)
   fri.setDate(mon.getDate() + 4)
+  return { mon, fri }
+}
+
+function fmtDate(d) {
+  return d.toISOString().slice(0, 10)
+}
+
+function weekDateRange(week, year) {
+  const { mon, fri } = getWeekRange(week, year)
   const fmt = d => d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
   return `${fmt(mon)} – ${fmt(fri)}`
 }
+
+// ── Engineer row ───────────────────────────────────────────────────────────────
 
 function EngineerRow({ engineer }) {
   const initials = engineer.name.split(' ').slice(0, 2).map(w => w[0]).join('')
@@ -73,12 +86,17 @@ function EngineerRow({ engineer }) {
   )
 }
 
+// ── Main component ─────────────────────────────────────────────────────────────
+
 export default function WeeklyReportTab() {
-  const [week, setWeek]       = useState(null)
-  const [year, setYear]       = useState(null)
-  const [report, setReport]   = useState(null)
-  const [loading, setLoading] = useState(true)
-  const [error, setError]     = useState(null)
+  const [week, setWeek]         = useState(null)
+  const [year, setYear]         = useState(null)
+  const [report, setReport]     = useState(null)
+  const [loading, setLoading]   = useState(true)
+  const [error, setError]       = useState(null)
+  const [generating, setGenerating] = useState(false)
+  const [genError, setGenError]     = useState(null)
+  const [genDone, setGenDone]       = useState(false)
 
   useEffect(() => {
     api.get('/overview').then(d => {
@@ -95,6 +113,7 @@ export default function WeeklyReportTab() {
     setLoading(true)
     setError(null)
     setReport(null)
+    setGenDone(false)
     api.get(`/reports/weekly?week=${week}&year=${year}`)
       .then(d => { setReport(d); setLoading(false) })
       .catch(e => { console.error(e); setError('Failed to load weekly report'); setLoading(false) })
@@ -109,11 +128,118 @@ export default function WeeklyReportTab() {
     setYear(y)
   }
 
+  const handleGenerateSummary = async () => {
+    if (!report || !week || !year) return
+    setGenerating(true)
+    setGenError(null)
+    setGenDone(false)
+
+    // Admin password — needed to save tasks
+    let pw = localStorage.getItem('admin_password') || ''
+    if (!pw) {
+      const entered = window.prompt('Enter admin password to save summaries:')
+      if (!entered) { setGenerating(false); return }
+      pw = entered
+      localStorage.setItem('admin_password', pw)
+    }
+
+    // Anthropic API key — regular Messages API key (sk-ant-...), not the Admin key
+    let apiKey = localStorage.getItem('anthropic_api_key') || ''
+    if (!apiKey) {
+      const entered = window.prompt(
+        'Enter your Anthropic API key (sk-ant-...) for AI summaries.\n' +
+        'It will be stored in localStorage for future use.'
+      )
+      if (!entered) { setGenerating(false); return }
+      apiKey = entered.trim()
+      localStorage.setItem('anthropic_api_key', apiKey)
+    }
+
+    try {
+      const { mon, fri } = getWeekRange(week, year)
+      const fromDate = fmtDate(mon)
+      const toDate   = fmtDate(fri)
+
+      await Promise.all(report.engineers.map(async (eng) => {
+        // 1. Fetch daily reports for this engineer for the week
+        const dailyReports = await api.get(
+          `/reports/engineer/${eng.id}?from_date=${fromDate}&to_date=${toDate}`
+        )
+        if (!dailyReports || dailyReports.length === 0) return
+
+        // 2. Flatten all sections
+        const allCompleted  = dailyReports.flatMap(r => r.completed      || [])
+        const allInvisible  = dailyReports.flatMap(r => r.invisible_work || [])
+        const allNext       = dailyReports.flatMap(r => r.next_tasks     || [])
+        const allRisks      = dailyReports.flatMap(r => r.delayed_risks  || [])
+
+        if (allCompleted.length === 0 && allInvisible.length === 0) return
+
+        // 3. Build prompt
+        const prompt = [
+          `You are writing a weekly engineering summary for ${eng.name}.`,
+          ``,
+          `Based on their daily reports for the week of ${fromDate} to ${toDate}, write a concise weekly summary (3–6 bullet points). Focus on the most impactful completed work. Group related items. Skip trivial or repetitive items. Use past tense. Each bullet should be one clear sentence.`,
+          ``,
+          `Daily report data:`,
+          `COMPLETED:`,
+          ...allCompleted.map(i => `- ${i}`),
+          ...(allInvisible.length ? [``, `INVISIBLE WORK:`, ...allInvisible.map(i => `- ${i}`)] : []),
+          ...(allNext.length      ? [``, `NEXT:`,           ...allNext.map(i => `- ${i}`)]      : []),
+          ...(allRisks.length     ? [``, `RISKS:`,          ...allRisks.map(i => `- ${i}`)]     : []),
+          ``,
+          `Return ONLY the bullet points, one per line, starting with "- ". No intro, no outro, no headers.`,
+        ].join('\n')
+
+        // 4. Call Anthropic Messages API directly from browser
+        const resp = await fetch('https://api.anthropic.com/v1/messages', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-api-key': apiKey,
+            'anthropic-version': '2023-06-01',
+            'anthropic-dangerous-direct-browser-access': 'true',
+          },
+          body: JSON.stringify({
+            model: 'claude-haiku-4-5-20251001',
+            max_tokens: 1000,
+            messages: [{ role: 'user', content: prompt }],
+          }),
+        })
+
+        if (!resp.ok) {
+          const err = await resp.json().catch(() => ({}))
+          // Clear stored key if authentication failed
+          if (resp.status === 401) localStorage.removeItem('anthropic_api_key')
+          throw new Error(`Anthropic ${resp.status}: ${err.error?.message || resp.statusText}`)
+        }
+
+        const data = await resp.json()
+        const summary = data.content?.[0]?.text?.trim()
+        if (!summary) return
+
+        // 5. Save summary to weekly_tasks.tasks via POST /api/weekly-tasks
+        await api.post('/weekly-tasks', { engineer_id: eng.id, week, year, tasks: summary }, pw)
+      }))
+
+      // 6. Reload report so "Weekly tasks" sections refresh
+      const updated = await api.get(`/reports/weekly?week=${week}&year=${year}`)
+      setReport(updated)
+      setGenDone(true)
+    } catch (e) {
+      console.error(e)
+      setGenError(e.message || 'Failed to generate summary')
+    } finally {
+      setGenerating(false)
+    }
+  }
+
   const dateRange = week && year ? weekDateRange(week, year) : ''
 
   return (
     <div>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 16, marginTop: 16, marginBottom: 28 }}>
+      {/* Navigation + AI Summary button */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 16, marginTop: 16, marginBottom: 8 }}>
         <button className="btn btn-ghost" onClick={() => navigate(-1)} style={{ padding: '5px 14px' }}>←</button>
         <div style={{ textAlign: 'center', minWidth: 180 }}>
           <div style={{ fontSize: 16, fontWeight: 700 }}>Week {week ?? '…'}</div>
@@ -124,7 +250,31 @@ export default function WeeklyReportTab() {
           )}
         </div>
         <button className="btn btn-ghost" onClick={() => navigate(+1)} style={{ padding: '5px 14px' }}>→</button>
+
+        <button
+          className="btn btn-primary"
+          style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 6, padding: '6px 14px' }}
+          onClick={handleGenerateSummary}
+          disabled={generating || !report}
+        >
+          {generating ? <span className="spinner" style={{ animation: 'spin 0.7s linear infinite' }} /> : '✨'}
+          {generating ? 'Generating…' : 'AI Summary'}
+        </button>
       </div>
+
+      {/* Status messages */}
+      {genDone && !genError && (
+        <div style={{ fontSize: 12, color: 'var(--success)', marginBottom: 12 }}>
+          ✓ Summary generated — scroll down to see weekly tasks
+        </div>
+      )}
+      {genError && (
+        <div style={{ fontSize: 12, color: 'var(--danger)', marginBottom: 12 }}>
+          ✕ {genError}
+        </div>
+      )}
+
+      <div style={{ marginBottom: 20 }} />
 
       {loading && (
         <div style={{ display: 'flex', justifyContent: 'center', padding: 48 }}>
