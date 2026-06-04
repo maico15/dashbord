@@ -7,6 +7,7 @@ import XPChart from '../components/XPChart'
 import Leaderboard from '../components/Leaderboard'
 import AIUsageTab from './AIUsageTab'
 import WeeklyReportTab from './WeeklyReportTab'
+import TrendsTab from './TrendsTab'
 import LoadingSpinner from '../components/LoadingSpinner'
 
 const TABS = [
@@ -15,6 +16,7 @@ const TABS = [
   // { key: 'docs', label: 'Documentation' },
   { key: 'ai',     label: '⬡ AI Usage' },
   { key: 'report', label: '📋 Weekly Report' },
+  { key: 'trends', label: '📈 Trends' },
 ]
 
 function calcCurrentWeek() {
@@ -227,8 +229,8 @@ export default function Dashboard() {
   }, [])
 
   useEffect(() => {
-    // dev, ai, and report tabs manage their own data
-    if (activeTab === 'dev' || activeTab === 'ai' || activeTab === 'report') return
+    // dev, ai, report, and trends tabs manage their own data
+    if (activeTab === 'dev' || activeTab === 'ai' || activeTab === 'report' || activeTab === 'trends') return
     if (tabData[activeTab]) return
     api.get(`/metrics/${activeTab}`)
       .then((d) => setTabData((prev) => ({ ...prev, [activeTab]: d })))
@@ -273,6 +275,7 @@ export default function Dashboard() {
         {activeTab === 'docs'    && <DocsTab data={tabData.docs} />}
         {activeTab === 'ai'      && <AIUsageTab />}
         {activeTab === 'report'  && <WeeklyReportTab />}
+        {activeTab === 'trends'  && <TrendsTab />}
 
         <Leaderboard data={leaderboard} />
       </div>

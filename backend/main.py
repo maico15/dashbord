@@ -2303,7 +2303,7 @@ def metrics_dev(week: Optional[int] = None, year: Optional[int] = None):
     bottlenecks = []
 
     for i, w in enumerate(weeks):
-        wd = {"week": f"W{w}", "score": 0, "prs": 0, "tickets": 0, "deploys": 0}
+        wd = {"week": f"W{w}", "score": 0, "prs": 0, "tickets": 0, "deploys": 0, "commits": 0}
         for m in members:
             c.execute("SELECT * FROM dev_metrics WHERE member_id=? AND week=? AND year=?", (m["id"], w, year))
             row = c.fetchone()
@@ -2311,9 +2311,10 @@ def metrics_dev(week: Optional[int] = None, year: Optional[int] = None):
                 row = dict(row)
                 sc, _ = calc_dev(row, rules)
                 wd["score"] += sc
-                wd["prs"] += row["prs_merged"]
+                wd["prs"]     += row["prs_merged"]
                 wd["tickets"] += row["tickets_closed"]
                 wd["deploys"] += row["deploys"]
+                wd["commits"] += row.get("commits_count", 0)
                 if i == 7:
                     totals["prs_merged"] += row["prs_merged"]
                     totals["tickets_closed"] += row["tickets_closed"]
