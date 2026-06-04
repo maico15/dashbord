@@ -29,6 +29,7 @@ CLAUDE_DIR      = pathlib.Path.home() / ".claude"
 CONFIG_PATH     = CLAUDE_DIR / "telemetry_config.json"
 BUFFER_PATH     = CLAUDE_DIR / "telemetry_buffer.jsonl"
 SEEN_PATH       = CLAUDE_DIR / ".telemetry_seen"
+LOG_PATH        = CLAUDE_DIR / "telemetry.log"
 SESSIONS_GLOB   = "projects/**/*.jsonl"
 
 MAX_SEEN        = 1_000_000
@@ -246,14 +247,36 @@ def run_once(cfg: dict) -> None:
         save_seen(seen)
         append_buffer(new_events)
 
+def _redirect_to_log_if_no_console() -> None:
+    """When running via pythonw.exe (no console window), redirect stdout/stderr to log file.
+
+    pythonw.exe sets sys.stdout to None (or a non-seekable dummy), so print()
+    calls would silently fail or raise.  Redirecting to LOG_PATH lets the
+    scheduled task produce output without showing a terminal window.
+    Interactive runs (python.exe with a real TTY) are unaffected.
+    """
+    try:
+        if sys.stdout is None or not hasattr(sys.stdout, 'fileno'):
+            raise OSError
+        sys.stdout.fileno()  # raises OSError if no real console (pythonw.exe)
+    except OSError:
+        LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        log_file = open(LOG_PATH, "a", encoding="utf-8", buffering=1)
+        sys.stdout = log_file
+        sys.stderr = log_file
+
+
 def main():
     parser = argparse.ArgumentParser(description="Claude Code telemetry collector")
     parser.add_argument("--daemon", action="store_true", help="Run continuously, polling every 30 seconds")
     parser.add_argument("--once", action="store_true", help="Run one collection cycle and exit (default)")
     args = parser.parse_args()
 
+    _redirect_to_log_if_no_console()
+
     cfg = load_config()
-    print(f"[telemetry] engineer_id={cfg['engineer_id']} endpoint={cfg['endpoint']}")
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[{ts}] [telemetry] engineer_id={cfg['engineer_id']} endpoint={cfg['endpoint']}")
 
     if args.daemon:
         print(f"[telemetry] daemon mode — polling every {POLL_INTERVAL}s")
