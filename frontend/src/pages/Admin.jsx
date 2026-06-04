@@ -570,6 +570,7 @@ function TeamSection({ pw }) {
                 </div>
                 <div style={{ flex: 1 }}>
                   <span style={{ fontSize: 14, fontWeight: 500 }}>{m.name}</span>
+                  <span style={{ fontSize: 11, color: 'var(--muted)', marginLeft: 6, fontWeight: 400, opacity: 0.6 }}>#{m.id}</span>
                   {m.position && <span style={{ fontSize: 12, color: 'var(--muted)', marginLeft: 8, fontWeight: 400 }}>{m.position}</span>}
                 </div>
                 <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
