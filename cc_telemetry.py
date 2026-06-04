@@ -191,13 +191,13 @@ def _send_chunk(events: list, cfg: dict) -> bool:
         if resp.status_code == 200:
             result = resp.json()
             print(
-                f"[telemetry] sent {len(events)} event(s) → "
-                f"accepted={result.get('accepted', '?')} "
-                f"duplicate={result.get('duplicate', '?')}"
+                f"[telemetry] sent {len(events)} event(s) ->"
+                f" accepted={result.get('accepted', '?')}"
+                f" duplicate={result.get('duplicate', '?')}"
             )
             return True
         elif resp.status_code == 401:
-            print(f"[telemetry] ERROR 401: wrong secret — check {CONFIG_PATH}")
+            print(f"[telemetry] ERROR 401: wrong secret - check {CONFIG_PATH}")
             return False
         else:
             print(f"[telemetry] server error {resp.status_code}: {resp.text[:200]}")
