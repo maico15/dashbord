@@ -3653,6 +3653,88 @@ def get_ai_usage_engineer(
     }
 
 
+# ── AI weekly summary proxy ───────────────────────────────────────────────────
+
+class WeeklySummaryRequest(BaseModel):
+    engineer_name: str
+    completed: list
+    invisible_work: list = []
+    next_tasks: list = []
+    delayed_risks: list = []
+    week_label: str = ""
+
+
+@app.post("/api/ai/weekly-summary")
+def generate_weekly_summary(data: WeeklySummaryRequest, password: str = ""):
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT value FROM config WHERE key='anthropic_admin_key'")
+    row = c.fetchone()
+    conn.close()
+
+    api_key = (row["value"] if row else "").strip()
+    if not api_key:
+        raise HTTPException(400, "Anthropic API key not configured. Set it in Admin → Configuration.")
+
+    if not data.completed and not data.invisible_work:
+        return {"summary": ""}
+
+    lines = []
+    if data.completed:
+        lines.append("COMPLETED:\n" + "\n".join(f"- {i}" for i in data.completed))
+    if data.invisible_work:
+        lines.append("INVISIBLE WORK:\n" + "\n".join(f"- {i}" for i in data.invisible_work))
+    if data.next_tasks:
+        lines.append("NEXT:\n" + "\n".join(f"- {i}" for i in data.next_tasks))
+    if data.delayed_risks:
+        lines.append("RISKS:\n" + "\n".join(f"- {i}" for i in data.delayed_risks))
+
+    week_clause = f" for the week of {data.week_label}" if data.week_label else ""
+    prompt = (
+        f"You are writing a weekly engineering summary for {data.engineer_name}{week_clause}.\n\n"
+        "Based on their daily reports, write a concise weekly summary (3–6 bullet points). "
+        "Focus on the most impactful completed work. Group related items. Skip trivial or "
+        "repetitive items. Use past tense. Each bullet should be one clear sentence.\n\n"
+        + "\n\n".join(lines)
+        + "\n\nReturn ONLY the bullet points, one per line, starting with \"- \". "
+        "No intro, no outro, no headers."
+    )
+
+    payload = json_lib.dumps({
+        "model": "claude-sonnet-4-20250514",
+        "max_tokens": 1000,
+        "messages": [{"role": "user", "content": prompt}],
+    }).encode()
+
+    req = urllib.request.Request(
+        "https://api.anthropic.com/v1/messages",
+        data=payload,
+        headers={
+            "Content-Type": "application/json",
+            "x-api-key": api_key,
+            "anthropic-version": "2023-06-01",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            result = json_lib.loads(resp.read())
+        summary = (result.get("content") or [{}])[0].get("text", "").strip()
+        return {"summary": summary}
+    except urllib.error.HTTPError as e:
+        body = ""
+        try:
+            body = e.read().decode("utf-8", errors="replace")
+        except Exception:
+            pass
+        raise HTTPException(500, f"Anthropic API error {e.code}: {body[:200]}")
+    except Exception as e:
+        raise HTTPException(500, f"Anthropic API error: {str(e)}")
+
+
 # ── Daily reports endpoints ───────────────────────────────────────────────────
 
 def _deserialize_report(row: dict) -> dict:

@@ -134,25 +134,13 @@ export default function WeeklyReportTab() {
     setGenError(null)
     setGenDone(false)
 
-    // Admin password — needed to save tasks
+    // Admin password — used for both the proxy endpoint and saving tasks
     let pw = localStorage.getItem('admin_password') || ''
     if (!pw) {
-      const entered = window.prompt('Enter admin password to save summaries:')
+      const entered = window.prompt('Enter admin password:')
       if (!entered) { setGenerating(false); return }
       pw = entered
       localStorage.setItem('admin_password', pw)
-    }
-
-    // Anthropic API key — regular Messages API key (sk-ant-...), not the Admin key
-    let apiKey = localStorage.getItem('anthropic_api_key') || ''
-    if (!apiKey) {
-      const entered = window.prompt(
-        'Enter your Anthropic API key (sk-ant-...) for AI summaries.\n' +
-        'It will be stored in localStorage for future use.'
-      )
-      if (!entered) { setGenerating(false); return }
-      apiKey = entered.trim()
-      localStorage.setItem('anthropic_api_key', apiKey)
     }
 
     try {
@@ -175,54 +163,27 @@ export default function WeeklyReportTab() {
 
         if (allCompleted.length === 0 && allInvisible.length === 0) return
 
-        // 3. Build prompt
-        const prompt = [
-          `You are writing a weekly engineering summary for ${eng.name}.`,
-          ``,
-          `Based on their daily reports for the week of ${fromDate} to ${toDate}, write a concise weekly summary (3–6 bullet points). Focus on the most impactful completed work. Group related items. Skip trivial or repetitive items. Use past tense. Each bullet should be one clear sentence.`,
-          ``,
-          `Daily report data:`,
-          `COMPLETED:`,
-          ...allCompleted.map(i => `- ${i}`),
-          ...(allInvisible.length ? [``, `INVISIBLE WORK:`, ...allInvisible.map(i => `- ${i}`)] : []),
-          ...(allNext.length      ? [``, `NEXT:`,           ...allNext.map(i => `- ${i}`)]      : []),
-          ...(allRisks.length     ? [``, `RISKS:`,          ...allRisks.map(i => `- ${i}`)]     : []),
-          ``,
-          `Return ONLY the bullet points, one per line, starting with "- ". No intro, no outro, no headers.`,
-        ].join('\n')
-
-        // 4. Call Anthropic Messages API directly from browser
-        const resp = await fetch('https://api.anthropic.com/v1/messages', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'x-api-key': apiKey,
-            'anthropic-version': '2023-06-01',
-            'anthropic-dangerous-direct-browser-access': 'true',
+        // 3. Call backend proxy — API key stays server-side
+        const res = await api.post(
+          '/ai/weekly-summary',
+          {
+            engineer_name:  eng.name,
+            completed:      allCompleted,
+            invisible_work: allInvisible,
+            next_tasks:     allNext,
+            delayed_risks:  allRisks,
+            week_label:     `${fromDate} to ${toDate}`,
           },
-          body: JSON.stringify({
-            model: 'claude-haiku-4-5-20251001',
-            max_tokens: 1000,
-            messages: [{ role: 'user', content: prompt }],
-          }),
-        })
-
-        if (!resp.ok) {
-          const err = await resp.json().catch(() => ({}))
-          // Clear stored key if authentication failed
-          if (resp.status === 401) localStorage.removeItem('anthropic_api_key')
-          throw new Error(`Anthropic ${resp.status}: ${err.error?.message || resp.statusText}`)
-        }
-
-        const data = await resp.json()
-        const summary = data.content?.[0]?.text?.trim()
+          pw
+        )
+        const summary = res.summary
         if (!summary) return
 
-        // 5. Save summary to weekly_tasks.tasks via POST /api/weekly-tasks
+        // 4. Save summary to weekly_tasks.tasks via POST /api/weekly-tasks
         await api.post('/weekly-tasks', { engineer_id: eng.id, week, year, tasks: summary }, pw)
       }))
 
-      // 6. Reload report so "Weekly tasks" sections refresh
+      // 5. Reload report so "Weekly tasks" sections refresh
       const updated = await api.get(`/reports/weekly?week=${week}&year=${year}`)
       setReport(updated)
       setGenDone(true)
