@@ -3669,15 +3669,18 @@ def generate_weekly_summary(data: WeeklySummaryRequest, password: str = ""):
     if password != ADMIN_PASSWORD:
         raise HTTPException(403, "Unauthorized")
 
-    conn = get_db()
-    c = conn.cursor()
-    c.execute("SELECT value FROM config WHERE key='anthropic_admin_key'")
-    row = c.fetchone()
-    conn.close()
-
-    api_key = (row["value"] if row else "").strip()
+    # Prefer ANTHROPIC_API_KEY env var (standard completions key);
+    # fall back to anthropic_admin_key stored in config table.
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
     if not api_key:
-        raise HTTPException(400, "Anthropic API key not configured. Set it in Admin → Configuration.")
+        conn2 = get_db()
+        c2 = conn2.cursor()
+        c2.execute("SELECT value FROM config WHERE key='anthropic_admin_key'")
+        row2 = c2.fetchone()
+        conn2.close()
+        api_key = (row2["value"] if row2 else "").strip()
+    if not api_key:
+        raise HTTPException(400, "Anthropic API key not configured. Set ANTHROPIC_API_KEY env var on Render.")
 
     if not data.completed and not data.invisible_work:
         return {"summary": ""}
