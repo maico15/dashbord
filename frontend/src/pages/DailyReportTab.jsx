@@ -3,7 +3,7 @@ import { api } from '../api/client'
 import LoadingSpinner from '../components/LoadingSpinner'
 
 const DAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
-const DAY_SHORT = ['Вс', 'Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб']
+const DAY_SHORT = ['Su', 'Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa']
 
 function isoWeekDays(week, year) {
   const jan4 = new Date(year, 0, 4)
@@ -102,14 +102,14 @@ function EngineerCard({ engineer, report }) {
           paddingLeft: 58, fontSize: 13,
           color: 'var(--muted)', fontStyle: 'italic',
         }}>
-          Отчёт не добавлен
+          No report submitted
         </div>
       ) : (
         <div style={{ paddingLeft: 58 }}>
-          <ReportSection icon="✅" label="Выполнено"           items={report.completed}       alwaysShow />
-          <ReportSection icon="🔵" label="Invisible work"      items={report.invisible_work} />
-          <ReportSection icon="🟡" label="Далее"               items={report.next_tasks}      alwaysShow />
-          <ReportSection icon="🔴" label="Блокеры / Риски"     items={report.delayed_risks} />
+          <ReportSection icon="✅" label="Completed"       items={report.completed}       alwaysShow />
+          <ReportSection icon="🔵" label="Invisible work"  items={report.invisible_work} />
+          <ReportSection icon="🟡" label="Next"            items={report.next_tasks}      alwaysShow />
+          <ReportSection icon="🔴" label="Blockers / Risks" items={report.delayed_risks} />
         </div>
       )}
     </div>
