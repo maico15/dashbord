@@ -461,7 +461,7 @@ def seed_data():
     c.executemany("INSERT INTO team_members (name, stream, avatar_color) VALUES (?,?,?)", members)
     conn.commit()
 
-    now = datetime.now().isocalendar()
+    now = datetime.utcnow().isocalendar()
     current_week = now[1]
     current_year = now[0]
 
@@ -599,7 +599,7 @@ def current_week_year(conn):
     c = conn.cursor()
     c.execute("SELECT key,value FROM config WHERE key IN ('current_week','current_year')")
     cfg = {r["key"]: int(r["value"]) for r in c.fetchall()}
-    now = datetime.now().isocalendar()
+    now = datetime.utcnow().isocalendar()
     return cfg.get("current_week", now[1]), cfg.get("current_year", now[0])
 
 
@@ -2137,10 +2137,11 @@ def overview():
     c.execute("SELECT key,value FROM config")
     cfg = {r["key"]: r["value"] for r in c.fetchall()}
     conn.close()
+    _now = datetime.utcnow().isocalendar()
     return {
         "team_name": cfg.get("team_name", "Engineering Team"),
-        "current_week": int(cfg.get("current_week", 1)),
-        "current_year": int(cfg.get("current_year", 2025)),
+        "current_week": _now[1],
+        "current_year": _now[0],
     }
 
 
