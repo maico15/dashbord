@@ -3707,7 +3707,7 @@ def generate_weekly_summary(data: WeeklySummaryRequest, password: str = ""):
     )
 
     payload = json_lib.dumps({
-        "model": "claude-sonnet-4-20250514",
+        "model": "claude-sonnet-4-5",
         "max_tokens": 1000,
         "messages": [{"role": "user", "content": prompt}],
     }).encode()
