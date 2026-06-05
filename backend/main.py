@@ -3170,24 +3170,29 @@ def get_ai_usage(week: int = None, year: int = None):
 
 
 @app.get("/api/ai-usage/history")
-def get_ai_usage_history(weeks: int = 8):
+def get_ai_usage_history(n: int = 8):
     conn = get_db()
     c = conn.cursor()
     week, year = current_week_year(conn)
 
     result = []
-    for i in range(weeks - 1, -1, -1):
+    for i in range(n - 1, -1, -1):
         w, y = week - i, year
         if w <= 0:
             y -= 1
             w += 52
         row: dict = {"week": f"W{w}", "team": 0}
+        date_from, date_to = _iso_week_bounds(w, y)
+        ts_from = date_from.isoformat() + "T00:00:00"
+        ts_to   = date_to.isoformat()   + "T23:59:59"
         c.execute("""
-            SELECT m.name, SUM(u.total_tokens) AS tokens
-            FROM ai_usage u JOIN team_members m ON m.id = u.engineer_id
-            WHERE u.week_number=? AND u.year=?
+            SELECT m.name,
+                   COALESCE(SUM(e.tokens_output), 0) AS tokens
+            FROM ai_events e
+            JOIN team_members m ON m.id = e.engineer_id
+            WHERE e.timestamp >= ? AND e.timestamp <= ?
             GROUP BY m.id
-        """, (w, y))
+        """, (ts_from, ts_to))
         for r in c.fetchall():
             row[r["name"]] = r["tokens"]
             row["team"] += r["tokens"]
