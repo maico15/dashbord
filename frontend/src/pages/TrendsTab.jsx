@@ -267,6 +267,7 @@ export default function TrendsTab() {
     let cancelled = false
 
     async function load() {
+      setLoading(true)
       // 1. overview for current week/year
       const ov = await api.get('/overview')
       const curWeek = ov.current_week
@@ -275,7 +276,7 @@ export default function TrendsTab() {
       // 2. GitHub metrics (already contains 8 weeks in weekly_chart) + AI history
       const [devData, aiHistory] = await Promise.all([
         api.get(`/metrics/dev?week=${curWeek}&year=${curYear}`),
-        api.get('/ai-usage/history?weeks=8'),
+        api.get('/ai-usage/history?n=8'),
       ])
 
       if (cancelled) return
@@ -322,23 +323,30 @@ export default function TrendsTab() {
         const engs = data.engineers || []
         const sessions = engs.reduce((s, e) => s + (e.sessions || 0), 0)
         const active   = engs.filter(e => (e.tokens_input + e.tokens_output) > 0).length
-        weekDetailMap[label] = { sessions, active }
-        // collect colors from real data
+        weekDetailMap[label] = { sessions, active, engineers: engs }
         engs.forEach(e => {
-          if (e.name && e.color && !engSet.has(e.name)) {
+          if (e.name && e.color) {
             engSet.set(e.name, e.color)
-          } else if (e.name && e.color) {
-            engSet.set(e.name, e.color)  // overwrite fallback with real color
           }
         })
       })
 
-      // Merge sessions/active into aiHistory rows
-      const mergedAi = (aiHistory || []).map(row => ({
-        ...row,
-        _sessions: weekDetailMap[row.week]?.sessions ?? null,
-        _active:   weekDetailMap[row.week]?.active   ?? null,
-      }))
+      // Merge sessions/active + per-engineer tokens into aiHistory rows
+      const mergedAi = (aiHistory || []).map(row => {
+        const detail = weekDetailMap[row.week]
+        const engTokens = {}
+        if (detail?.engineers) {
+          detail.engineers.forEach(e => {
+            if (e.name) engTokens[e.name] = (e.tokens_output || 0)
+          })
+        }
+        return {
+          ...row,
+          ...engTokens,
+          _sessions: detail?.sessions ?? null,
+          _active:   detail?.active   ?? null,
+        }
+      })
 
       setGithubWeeks(ghWeeks)
       setAiWeeks(mergedAi)
