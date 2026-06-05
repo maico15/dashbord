@@ -16,9 +16,9 @@ const TABS = [
   // { key: 'support', label: 'Support' },
   // { key: 'docs', label: 'Documentation' },
   { key: 'ai',     label: '⬡ AI Usage' },
+  { key: 'daily',  label: '📅 Daily Report' },
   { key: 'report', label: '📋 Weekly Report' },
   { key: 'trends', label: '📈 Trends' },
-  { key: 'daily',  label: '📅 Daily Report' },
 ]
 
 function calcCurrentWeek() {
