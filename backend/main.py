@@ -138,6 +138,13 @@ def init_db():
             avatar_color TEXT DEFAULT '#00cfff'
         );
 
+        CREATE TABLE IF NOT EXISTS departments (
+            id     INTEGER PRIMARY KEY AUTOINCREMENT,
+            name   TEXT    NOT NULL UNIQUE,
+            slug   TEXT    NOT NULL UNIQUE,
+            active INTEGER NOT NULL DEFAULT 1
+        );
+
         CREATE TABLE IF NOT EXISTS dev_metrics (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             member_id INTEGER REFERENCES team_members(id) ON DELETE CASCADE,
@@ -319,6 +326,15 @@ def init_db():
             ON ai_usage_daily(date, engineer_id);
     """)
     conn.commit()
+    # Seed default departments
+    c = conn.cursor()
+    c.execute("SELECT COUNT(*) FROM departments")
+    if c.fetchone()[0] == 0:
+        c.executemany(
+            "INSERT INTO departments (name, slug) VALUES (?, ?)",
+            [("IT", "it"), ("Test", "test")]
+        )
+        conn.commit()
     # Add blocked_count for existing SQLite databases that pre-date this column
     if not IS_POSTGRES:
         c = conn.cursor()
@@ -364,6 +380,16 @@ def init_db():
             "CREATE INDEX IF NOT EXISTS idx_ai_usage_daily_date "
             "ON ai_usage_daily(date, engineer_id)"
         )
+        conn.commit()
+    except Exception:
+        pass
+    try:
+        conn.execute("ALTER TABLE team_members ADD COLUMN department_id INTEGER DEFAULT 1")
+        conn.commit()
+    except Exception:
+        pass
+    try:
+        conn.execute("ALTER TABLE team_members ADD COLUMN email TEXT DEFAULT ''")
         conn.commit()
     except Exception:
         pass
@@ -2588,6 +2614,17 @@ class MemberUpdate(BaseModel):
     position: Optional[str] = None
 
 
+class DepartmentCreate(BaseModel):
+    name: str
+
+
+class RegisterEngineerRequest(BaseModel):
+    first_name:    str
+    last_name:     str
+    email:         str
+    department_id: int
+
+
 @app.post("/api/team")
 def create_member(data: MemberCreate, password: str = ""):
     if password != ADMIN_PASSWORD:
@@ -2641,6 +2678,92 @@ def delete_member(member_id: int, password: str = ""):
     conn.commit()
     conn.close()
     return {"ok": True}
+
+
+# ── Departments & self-registration ────────────────────────────────────────────
+
+@app.get("/api/departments")
+def get_departments():
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT id, name, slug FROM departments WHERE active=1 ORDER BY id")
+    rows = c.fetchall()
+    conn.close()
+    return [{"id": r["id"], "name": r["name"], "slug": r["slug"]} for r in rows]
+
+
+ENGINEER_COLORS = [
+    "#00cfff", "#7b61ff", "#00ff9d", "#ffa200", "#ff6b6b",
+    "#f59e0b", "#10b981", "#8b5cf6", "#ec4899", "#06b6d4",
+]
+
+
+@app.post("/api/register-engineer")
+def register_engineer(data: RegisterEngineerRequest):
+    import secrets as secrets_mod
+
+    if not data.email.lower().endswith("@homealliance.com"):
+        raise HTTPException(422, "Only @homealliance.com email addresses are allowed")
+
+    if len(data.first_name.strip()) < 2 or len(data.last_name.strip()) < 2:
+        raise HTTPException(422, "First name and last name must be at least 2 characters")
+
+    conn = get_db()
+    c = conn.cursor()
+
+    c.execute("SELECT id FROM team_members WHERE LOWER(email)=LOWER(?)", (data.email,))
+    if c.fetchone():
+        conn.close()
+        raise HTTPException(409, "Email already registered")
+
+    c.execute("SELECT id, name FROM departments WHERE id=? AND active=1", (data.department_id,))
+    dept = c.fetchone()
+    if not dept:
+        conn.close()
+        raise HTTPException(404, "Department not found")
+
+    c.execute("SELECT avatar_color FROM team_members WHERE department_id=?", (data.department_id,))
+    used_colors = {r["avatar_color"] for r in c.fetchall()}
+    available = [col for col in ENGINEER_COLORS if col not in used_colors]
+    color = available[0] if available else ENGINEER_COLORS[len(used_colors) % len(ENGINEER_COLORS)]
+
+    secret = secrets_mod.token_hex(24)
+
+    full_name = f"{data.first_name.strip()} {data.last_name.strip()}"
+    c.execute(
+        "INSERT INTO team_members (name, email, stream, avatar_color, department_id) VALUES (?,?,?,?,?)",
+        (full_name, data.email.lower(), json_lib.dumps(["dev"]), color, data.department_id)
+    )
+    engineer_id = c.lastrowid
+
+    c.execute(
+        "INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)",
+        (f"secret_{engineer_id}", secret)
+    )
+    conn.commit()
+    conn.close()
+
+    return {
+        "engineer_id": engineer_id,
+        "secret":      secret,
+        "name":        full_name,
+        "email":       data.email.lower(),
+        "department":  dept["name"],
+        "color":       color,
+    }
+
+
+@app.get("/api/departments/{dept_id}/members")
+def get_department_members(dept_id: int):
+    conn = get_db()
+    c = conn.cursor()
+    c.execute(
+        "SELECT id, name, avatar_color, email FROM team_members WHERE department_id=? ORDER BY id",
+        (dept_id,)
+    )
+    rows = c.fetchall()
+    conn.close()
+    return [{"id": r["id"], "name": r["name"], "color": r["avatar_color"], "email": r["email"]} for r in rows]
 
 
 # ── Engineer profile & weekly tasks ────────────────────────────────────────────

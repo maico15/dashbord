@@ -120,6 +120,8 @@ class Cursor:
 
         self._result = self._conn.execute(text(sql), named)
         self.rowcount = self._result.rowcount
+        if hasattr(self._result, "lastrowid"):
+            self.lastrowid = self._result.lastrowid
         return self
 
     def executemany(self, sql: str, params_list):
