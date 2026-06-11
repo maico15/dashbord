@@ -3909,8 +3909,9 @@ def generate_weekly_summary(data: WeeklySummaryRequest, password: str = ""):
         "- Write 15 to 20 bullet points if the data supports it; write fewer only if there is genuinely not enough information.\n"
         "- Cover ALL areas: completed work, invisible/support work, risks, and next steps.\n"
         "- Do NOT group or merge unrelated items — each distinct task or fix gets its own bullet.\n"
-        "- Each bullet must be one clear, specific sentence in past tense (for completed items) or present/future tense (for next steps).\n"
-        "- Include technical details where available (system names, numbers, specific fixes).\n"
+        "- Each bullet must be SHORT: maximum 12 words. Cut ruthlessly. No subordinate clauses.\n"
+        "- Use past tense for completed items, present/future for next steps.\n"
+        "- Include technical specifics inline: system name, number, or fix type in the bullet itself.\n"
         "- Do NOT skip support work, investigations, or internal tasks — they are important.\n"
         "- Do NOT add intro, outro, section headers, or commentary.\n\n"
         + "\n\n".join(lines)
