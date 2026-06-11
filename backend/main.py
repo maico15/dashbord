@@ -3904,17 +3904,22 @@ def generate_weekly_summary(data: WeeklySummaryRequest, password: str = ""):
     week_clause = f" for the week of {data.week_label}" if data.week_label else ""
     prompt = (
         f"You are writing a weekly engineering summary for {data.engineer_name}{week_clause}.\n\n"
-        "Based on their daily reports, write a concise weekly summary (3–6 bullet points). "
-        "Focus on the most impactful completed work. Group related items. Skip trivial or "
-        "repetitive items. Use past tense. Each bullet should be one clear sentence.\n\n"
+        "Based on their daily reports, write a detailed weekly summary. "
+        "Rules:\n"
+        "- Write 15 to 20 bullet points if the data supports it; write fewer only if there is genuinely not enough information.\n"
+        "- Cover ALL areas: completed work, invisible/support work, risks, and next steps.\n"
+        "- Do NOT group or merge unrelated items — each distinct task or fix gets its own bullet.\n"
+        "- Each bullet must be one clear, specific sentence in past tense (for completed items) or present/future tense (for next steps).\n"
+        "- Include technical details where available (system names, numbers, specific fixes).\n"
+        "- Do NOT skip support work, investigations, or internal tasks — they are important.\n"
+        "- Do NOT add intro, outro, section headers, or commentary.\n\n"
         + "\n\n".join(lines)
-        + "\n\nReturn ONLY the bullet points, one per line, starting with \"- \". "
-        "No intro, no outro, no headers."
+        + "\n\nReturn ONLY the bullet points, one per line, starting with \"- \"."
     )
 
     payload = json_lib.dumps({
         "model": "claude-sonnet-4-5",
-        "max_tokens": 1000,
+        "max_tokens": 2000,
         "messages": [{"role": "user", "content": prompt}],
     }).encode()
 
