@@ -491,3 +491,31 @@ body {
 .rich-text-content strong { font-weight: 700; }
 .rich-text-content em    { font-style: italic; }
 .rich-text-content u     { text-decoration: underline; }
+
+/* Weekly summary project groups */
+.project-group {
+  margin-bottom: 16px;
+}
+
+.project-title {
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  margin-bottom: 6px;
+  padding-bottom: 4px;
+  border-bottom: 1px solid var(--border);
+}
+
+.project-group ul {
+  margin: 0;
+  padding-left: 16px;
+}
+
+.project-group li {
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--text);
+  margin-bottom: 2px;
+}
