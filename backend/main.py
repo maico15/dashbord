@@ -3685,7 +3685,7 @@ def _iso_week_bounds(week: int, year: int):
 
 
 @app.get("/api/ai-usage/weekly")
-def get_ai_usage_weekly(week: Optional[int] = None, year: Optional[int] = None):
+def get_ai_usage_weekly(week: Optional[int] = None, year: Optional[int] = None, department_id: Optional[int] = None):
     conn = get_db()
     c = conn.cursor()
     if week is None or year is None:
@@ -3706,20 +3706,37 @@ def get_ai_usage_weekly(week: Optional[int] = None, year: Optional[int] = None):
     # full Monday–Sunday ISO week in UTC.
     ts_from = date_from_s + "T00:00:00"
     ts_to   = date_to_s   + "T23:59:59"
-    c.execute("""
-        SELECT
-            t.id, t.name, t.avatar_color, COALESCE(t.position,'') AS position,
-            COALESCE(SUM(e.tokens_input),  0) AS tokens_input,
-            COALESCE(SUM(e.tokens_output), 0) AS tokens_output,
-            COUNT(DISTINCT e.session_id)      AS sessions,
-            COUNT(DISTINCT DATE(e.timestamp)) AS active_days
-        FROM team_members t
-        LEFT JOIN ai_events e
-               ON e.engineer_id = t.id
-              AND e.timestamp >= ? AND e.timestamp <= ?
-        GROUP BY t.id
-        ORDER BY tokens_input DESC
-    """, (ts_from, ts_to))
+    if department_id is not None:
+        c.execute("""
+            SELECT
+                t.id, t.name, t.avatar_color, COALESCE(t.position,'') AS position,
+                COALESCE(SUM(e.tokens_input),  0) AS tokens_input,
+                COALESCE(SUM(e.tokens_output), 0) AS tokens_output,
+                COUNT(DISTINCT e.session_id)      AS sessions,
+                COUNT(DISTINCT DATE(e.timestamp)) AS active_days
+            FROM team_members t
+            LEFT JOIN ai_events e
+                   ON e.engineer_id = t.id
+                  AND e.timestamp >= ? AND e.timestamp <= ?
+            WHERE t.department_id = ?
+            GROUP BY t.id
+            ORDER BY tokens_input DESC
+        """, (ts_from, ts_to, department_id))
+    else:
+        c.execute("""
+            SELECT
+                t.id, t.name, t.avatar_color, COALESCE(t.position,'') AS position,
+                COALESCE(SUM(e.tokens_input),  0) AS tokens_input,
+                COALESCE(SUM(e.tokens_output), 0) AS tokens_output,
+                COUNT(DISTINCT e.session_id)      AS sessions,
+                COUNT(DISTINCT DATE(e.timestamp)) AS active_days
+            FROM team_members t
+            LEFT JOIN ai_events e
+                   ON e.engineer_id = t.id
+                  AND e.timestamp >= ? AND e.timestamp <= ?
+            GROUP BY t.id
+            ORDER BY tokens_input DESC
+        """, (ts_from, ts_to))
     engineers_rows = [dict(r) for r in c.fetchall()]
 
     # Daily totals for the week

@@ -11,14 +11,19 @@ import TrendsTab from './TrendsTab'
 import DailyReportTab from './DailyReportTab'
 import LoadingSpinner from '../components/LoadingSpinner'
 
-const TABS = [
-  { key: 'dev',    label: 'Development' },
-  // { key: 'support', label: 'Support' },
-  // { key: 'docs', label: 'Documentation' },
-  { key: 'ai',     label: '⬡ AI Usage' },
-  { key: 'daily',  label: '📅 Daily Report' },
-  { key: 'report', label: '📋 Weekly Report' },
-  { key: 'trends', label: '📈 Trends' },
+const IT_DEPT_ID = 1
+
+const TABS_IT = [
+  { key: 'ai',           label: '⬡ AI Usage' },
+  { key: 'dev',          label: 'Development' },
+  { key: 'daily',        label: '📅 Daily Report' },
+  { key: 'report',       label: '📋 Weekly Report' },
+  { key: 'trends',       label: '📈 Trends' },
+  { key: 'achievements', label: '🏆 Achievements' },
+]
+
+const TABS_OTHER = [
+  { key: 'ai', label: '⬡ AI Usage' },
 ]
 
 function calcCurrentWeek() {
@@ -209,11 +214,30 @@ function DocsTab({ data }) {
 }
 
 export default function Dashboard() {
-  const [activeTab, setActiveTab] = useState('dev')
+  const [activeTab, setActiveTab] = useState('ai')
   const [overview, setOverview] = useState(null)
   const [leaderboard, setLeaderboard] = useState(null)
   const [tabData, setTabData] = useState({})
   const [loading, setLoading] = useState(true)
+  const [departments, setDepartments] = useState([])
+  const [activeDept, setActiveDept] = useState(() => {
+    const saved = localStorage.getItem('active_department')
+    return saved ? parseInt(saved) : 1
+  })
+
+  useEffect(() => {
+    api.get('/departments').then(data => {
+      setDepartments(data.filter(d => d.active))
+    }).catch(() => {})
+  }, [])
+
+  const handleDeptChange = (deptId) => {
+    setActiveDept(deptId)
+    localStorage.setItem('active_department', String(deptId))
+    setActiveTab('ai')
+  }
+
+  const currentTabs = activeDept === IT_DEPT_ID ? TABS_IT : TABS_OTHER
 
   useEffect(() => {
     Promise.all([api.get('/overview'), api.get('/leaderboard')])
@@ -260,8 +284,38 @@ export default function Dashboard() {
         totalScore={totalScore}
       />
       <div className="page">
+        {departments.length > 1 && (
+          <div style={{
+            display: 'flex', gap: 4, padding: '8px 0 8px',
+            borderBottom: '1px solid var(--border)',
+            overflowX: 'auto',
+            marginBottom: 4,
+          }}>
+            {departments.map(dept => (
+              <button
+                key={dept.id}
+                onClick={() => handleDeptChange(dept.id)}
+                style={{
+                  padding: '4px 14px',
+                  fontSize: 13,
+                  borderRadius: 6,
+                  border: 'none',
+                  cursor: 'pointer',
+                  fontWeight: activeDept === dept.id ? 600 : 400,
+                  background: activeDept === dept.id ? 'var(--accent1-bg)' : 'transparent',
+                  color: activeDept === dept.id ? 'var(--accent1)' : 'var(--muted)',
+                  transition: 'all 0.15s',
+                  whiteSpace: 'nowrap',
+                }}
+              >
+                {dept.name}
+              </button>
+            ))}
+          </div>
+        )}
+
         <div className="tabs">
-          {TABS.map((t) => (
+          {currentTabs.map((t) => (
             <button
               key={t.key}
               className={`tab-btn${activeTab === t.key ? ' active' : ''}${t.key === 'ai' ? ' tab-ai' : ''}`}
@@ -272,13 +326,18 @@ export default function Dashboard() {
           ))}
         </div>
 
-        {activeTab === 'dev'     && <DevTab />}
-        {activeTab === 'support' && <SupportTab data={tabData.support} />}
-        {activeTab === 'docs'    && <DocsTab data={tabData.docs} />}
-        {activeTab === 'ai'      && <AIUsageTab />}
-        {activeTab === 'report'  && <WeeklyReportTab />}
-        {activeTab === 'trends'  && <TrendsTab />}
-        {activeTab === 'daily'   && <DailyReportTab />}
+        {activeTab === 'dev'          && <DevTab />}
+        {activeTab === 'support'      && <SupportTab data={tabData.support} />}
+        {activeTab === 'docs'         && <DocsTab data={tabData.docs} />}
+        {activeTab === 'ai'           && <AIUsageTab departmentId={activeDept} departmentName={departments.find(d => d.id === activeDept)?.name} />}
+        {activeTab === 'report'       && <WeeklyReportTab />}
+        {activeTab === 'trends'       && <TrendsTab />}
+        {activeTab === 'daily'        && <DailyReportTab />}
+        {activeTab === 'achievements' && (
+          <div style={{ textAlign: 'center', padding: '60px 20px', color: 'var(--muted)' }}>
+            🏆 Achievements — coming soon
+          </div>
+        )}
 
         <Leaderboard data={leaderboard} />
       </div>
