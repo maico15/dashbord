@@ -2588,7 +2588,14 @@ def update_score_rule(rule_id: int, data: ScoreRuleUpdate, password: str = ""):
 def get_team():
     conn = get_db()
     c = conn.cursor()
-    c.execute("SELECT * FROM team_members ORDER BY name")
+    c.execute("""
+        SELECT m.id, m.name, m.stream, m.avatar_color, m.position,
+               m.department_id, m.email,
+               d.name as department_name
+        FROM team_members m
+        LEFT JOIN departments d ON d.id = m.department_id
+        ORDER BY m.id
+    """)
     members = []
     for r in c.fetchall():
         m = dict(r)
@@ -2686,10 +2693,64 @@ def delete_member(member_id: int, password: str = ""):
 def get_departments():
     conn = get_db()
     c = conn.cursor()
-    c.execute("SELECT id, name, slug FROM departments WHERE active=1 ORDER BY id")
+    c.execute("""
+        SELECT d.id, d.name, d.slug, d.active,
+               COUNT(m.id) as member_count
+        FROM departments d
+        LEFT JOIN team_members m ON m.department_id = d.id
+        GROUP BY d.id
+        ORDER BY d.id
+    """)
     rows = c.fetchall()
     conn.close()
-    return [{"id": r["id"], "name": r["name"], "slug": r["slug"]} for r in rows]
+    return [dict(r) for r in rows]
+
+
+@app.post("/api/departments")
+def create_department(data: DepartmentCreate, password: str = ""):
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    slug = re.sub(r'[^a-z0-9]+', '-', data.name.lower()).strip('-')
+    conn = get_db()
+    c = conn.cursor()
+    try:
+        c.execute("INSERT INTO departments (name, slug) VALUES (?,?)", (data.name.strip(), slug))
+        conn.commit()
+        dept_id = c.lastrowid
+    except Exception:
+        conn.close()
+        raise HTTPException(409, "Department with this name already exists")
+    conn.close()
+    return {"id": dept_id, "name": data.name.strip(), "slug": slug, "active": 1}
+
+
+@app.put("/api/departments/{dept_id}")
+def update_department(dept_id: int, data: Dict[str, Any], password: str = ""):
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    conn = get_db()
+    if "active" in data:
+        conn.execute("UPDATE departments SET active=? WHERE id=?", (data["active"], dept_id))
+    conn.commit()
+    conn.close()
+    return {"ok": True}
+
+
+@app.delete("/api/departments/{dept_id}")
+def delete_department(dept_id: int, password: str = ""):
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT COUNT(*) FROM team_members WHERE department_id=?", (dept_id,))
+    count = c.fetchone()[0]
+    if count > 0:
+        conn.close()
+        raise HTTPException(400, f"Cannot delete: department has {count} member(s)")
+    c.execute("DELETE FROM departments WHERE id=?", (dept_id,))
+    conn.commit()
+    conn.close()
+    return {"ok": True}
 
 
 ENGINEER_COLORS = [

@@ -572,6 +572,7 @@ function TeamSection({ pw }) {
                   <span style={{ fontSize: 14, fontWeight: 500 }}>{m.name}</span>
                   <span style={{ fontSize: 11, color: 'var(--muted)', marginLeft: 6, fontWeight: 400, opacity: 0.6 }}>#{m.id}</span>
                   {m.position && <span style={{ fontSize: 12, color: 'var(--muted)', marginLeft: 8, fontWeight: 400 }}>{m.position}</span>}
+                  {m.department_name && <span style={{ fontSize: 11, color: 'var(--accent2)', marginLeft: 8, fontWeight: 400 }}>{m.department_name}</span>}
                 </div>
                 <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
                   {(m.streams || [m.stream]).map(s => (
@@ -2026,6 +2027,7 @@ export default function Admin() {
   const SECTIONS = [
     { key: 'config',        label: 'Configuration' },
     { key: 'team',          label: 'Team' },
+    { key: 'departments',   label: 'Departments' },
     { key: 'metrics',       label: 'Metrics' },
     { key: 'rules',         label: 'Rules' },
     { key: 'integrations',  label: 'Integrations' },
@@ -2064,6 +2066,7 @@ export default function Admin() {
         <div style={{ marginTop: 24 }}>
           {section === 'config'       && <ConfigSection pw={pw} />}
           {section === 'team'         && <TeamSection pw={pw} />}
+          {section === 'departments'  && <DepartmentsSection pw={pw} />}
           {section === 'metrics'      && <MetricsSection pw={pw} />}
           {section === 'rules'        && <RulesSection pw={pw} />}
           {section === 'integrations' && <IntegrationsSection pw={pw} />}
@@ -2071,6 +2074,149 @@ export default function Admin() {
           {section === 'aikeys'       && <AIKeysSection pw={pw} />}
           {section === 'security'     && <SecuritySection pw={pw} onPasswordChange={setPw} />}
         </div>
+      </div>
+    </div>
+  )
+}
+
+function DepartmentsSection({ pw }) {
+  const [depts, setDepts]       = useState([])
+  const [newName, setNewName]   = useState('')
+  const [adding, setAdding]     = useState(false)
+  const [error, setError]       = useState('')
+  const [saved, setSaved]       = useState('')
+
+  const load = () => api.get('/departments').then(setDepts).catch(() => {})
+
+  useEffect(() => { load() }, [])
+
+  const toSlug = (name) =>
+    name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '')
+
+  const handleAdd = async () => {
+    setError('')
+    if (newName.trim().length < 2) {
+      setError('Name must be at least 2 characters')
+      return
+    }
+    setAdding(true)
+    try {
+      await api.post('/departments', { name: newName.trim() }, pw)
+      setNewName('')
+      setSaved('Department added!')
+      setTimeout(() => setSaved(''), 2000)
+      load()
+    } catch (e) {
+      let msg = e.message
+      try { msg = JSON.parse(msg).detail || msg } catch {}
+      setError(msg)
+    } finally {
+      setAdding(false)
+    }
+  }
+
+  const handleToggle = async (dept) => {
+    await api.put(`/departments/${dept.id}`, { active: dept.active ? 0 : 1 }, pw)
+    load()
+  }
+
+  const handleDelete = async (dept) => {
+    setError('')
+    try {
+      await api.del(`/departments/${dept.id}`, pw)
+      load()
+    } catch (e) {
+      let msg = e.message
+      try { msg = JSON.parse(msg).detail || msg } catch {}
+      setError(msg)
+    }
+  }
+
+  return (
+    <div className="admin-section">
+      <h2>Departments</h2>
+      <p style={{ color: 'var(--muted)', fontSize: 13, marginBottom: 16 }}>
+        Departments appear in the telemetry app and as dashboard tabs.
+        Slug is auto-generated from the name.
+      </p>
+
+      <div className="card" style={{ marginBottom: 20 }}>
+        <table className="admin-table" style={{ width: '100%' }}>
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th>Name</th>
+              <th>Slug</th>
+              <th>Members</th>
+              <th>Status</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {depts.map(d => (
+              <tr key={d.id}>
+                <td style={{ color: 'var(--muted)', fontSize: 12 }}>#{d.id}</td>
+                <td style={{ fontWeight: 500 }}>{d.name}</td>
+                <td><code style={{ fontSize: 12, color: 'var(--accent2)' }}>{d.slug}</code></td>
+                <td>{d.member_count ?? '—'}</td>
+                <td>
+                  <span style={{
+                    fontSize: 11, padding: '2px 8px', borderRadius: 10,
+                    background: d.active ? 'var(--success-bg)' : 'var(--card2)',
+                    color: d.active ? 'var(--success)' : 'var(--muted)'
+                  }}>
+                    {d.active ? 'Active' : 'Inactive'}
+                  </span>
+                </td>
+                <td style={{ display: 'flex', gap: 8 }}>
+                  <button
+                    className="btn"
+                    style={{ fontSize: 12, padding: '3px 10px' }}
+                    onClick={() => handleToggle(d)}
+                  >
+                    {d.active ? 'Deactivate' : 'Activate'}
+                  </button>
+                  {d.id > 2 && (
+                    <button
+                      className="btn btn-danger"
+                      style={{ fontSize: 12, padding: '3px 10px' }}
+                      onClick={() => handleDelete(d)}
+                    >
+                      Delete
+                    </button>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      <div className="card">
+        <div style={{ fontSize: 12, color: 'var(--muted)', textTransform: 'uppercase',
+                      letterSpacing: '0.06em', marginBottom: 10 }}>
+          Add Department
+        </div>
+        <div style={{ display: 'flex', gap: 10, alignItems: 'flex-start' }}>
+          <div style={{ flex: 1 }}>
+            <input
+              value={newName}
+              onChange={e => setNewName(e.target.value)}
+              placeholder="Department name (e.g. Operations)"
+              onKeyDown={e => e.key === 'Enter' && handleAdd()}
+            />
+            {newName && (
+              <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 4 }}>
+                Slug: <code>{toSlug(newName)}</code>
+              </div>
+            )}
+          </div>
+          <button className="btn" onClick={handleAdd} disabled={adding}>
+            {adding ? 'Adding...' : '+ Add'}
+          </button>
+        </div>
+        {error && <div style={{ color: 'var(--danger)', fontSize: 13, marginTop: 8 }}>{error}</div>}
+        {saved && <div style={{ color: 'var(--success)', fontSize: 13, marginTop: 8 }}>{saved}</div>}
       </div>
     </div>
   )
