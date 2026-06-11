@@ -2588,7 +2588,14 @@ def update_score_rule(rule_id: int, data: ScoreRuleUpdate, password: str = ""):
 def get_team():
     conn = get_db()
     c = conn.cursor()
-    c.execute("SELECT * FROM team_members ORDER BY name")
+    c.execute("""
+        SELECT m.id, m.name, m.stream, m.avatar_color, m.position,
+               m.department_id, m.email,
+               d.name as department_name
+        FROM team_members m
+        LEFT JOIN departments d ON d.id = m.department_id
+        ORDER BY m.id
+    """)
     members = []
     for r in c.fetchall():
         m = dict(r)
@@ -2686,10 +2693,64 @@ def delete_member(member_id: int, password: str = ""):
 def get_departments():
     conn = get_db()
     c = conn.cursor()
-    c.execute("SELECT id, name, slug FROM departments WHERE active=1 ORDER BY id")
+    c.execute("""
+        SELECT d.id, d.name, d.slug, d.active,
+               COUNT(m.id) as member_count
+        FROM departments d
+        LEFT JOIN team_members m ON m.department_id = d.id
+        GROUP BY d.id
+        ORDER BY d.id
+    """)
     rows = c.fetchall()
     conn.close()
-    return [{"id": r["id"], "name": r["name"], "slug": r["slug"]} for r in rows]
+    return [dict(r) for r in rows]
+
+
+@app.post("/api/departments")
+def create_department(data: DepartmentCreate, password: str = ""):
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    slug = re.sub(r'[^a-z0-9]+', '-', data.name.lower()).strip('-')
+    conn = get_db()
+    c = conn.cursor()
+    try:
+        c.execute("INSERT INTO departments (name, slug) VALUES (?,?)", (data.name.strip(), slug))
+        conn.commit()
+        dept_id = c.lastrowid
+    except Exception:
+        conn.close()
+        raise HTTPException(409, "Department with this name already exists")
+    conn.close()
+    return {"id": dept_id, "name": data.name.strip(), "slug": slug, "active": 1}
+
+
+@app.put("/api/departments/{dept_id}")
+def update_department(dept_id: int, data: Dict[str, Any], password: str = ""):
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    conn = get_db()
+    if "active" in data:
+        conn.execute("UPDATE departments SET active=? WHERE id=?", (data["active"], dept_id))
+    conn.commit()
+    conn.close()
+    return {"ok": True}
+
+
+@app.delete("/api/departments/{dept_id}")
+def delete_department(dept_id: int, password: str = ""):
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT COUNT(*) FROM team_members WHERE department_id=?", (dept_id,))
+    count = c.fetchone()[0]
+    if count > 0:
+        conn.close()
+        raise HTTPException(400, f"Cannot delete: department has {count} member(s)")
+    c.execute("DELETE FROM departments WHERE id=?", (dept_id,))
+    conn.commit()
+    conn.close()
+    return {"ok": True}
 
 
 ENGINEER_COLORS = [
@@ -3624,7 +3685,7 @@ def _iso_week_bounds(week: int, year: int):
 
 
 @app.get("/api/ai-usage/weekly")
-def get_ai_usage_weekly(week: Optional[int] = None, year: Optional[int] = None):
+def get_ai_usage_weekly(week: Optional[int] = None, year: Optional[int] = None, department_id: Optional[int] = None):
     conn = get_db()
     c = conn.cursor()
     if week is None or year is None:
@@ -3645,20 +3706,37 @@ def get_ai_usage_weekly(week: Optional[int] = None, year: Optional[int] = None):
     # full Monday–Sunday ISO week in UTC.
     ts_from = date_from_s + "T00:00:00"
     ts_to   = date_to_s   + "T23:59:59"
-    c.execute("""
-        SELECT
-            t.id, t.name, t.avatar_color, COALESCE(t.position,'') AS position,
-            COALESCE(SUM(e.tokens_input),  0) AS tokens_input,
-            COALESCE(SUM(e.tokens_output), 0) AS tokens_output,
-            COUNT(DISTINCT e.session_id)      AS sessions,
-            COUNT(DISTINCT DATE(e.timestamp)) AS active_days
-        FROM team_members t
-        LEFT JOIN ai_events e
-               ON e.engineer_id = t.id
-              AND e.timestamp >= ? AND e.timestamp <= ?
-        GROUP BY t.id
-        ORDER BY tokens_input DESC
-    """, (ts_from, ts_to))
+    if department_id is not None:
+        c.execute("""
+            SELECT
+                t.id, t.name, t.avatar_color, COALESCE(t.position,'') AS position,
+                COALESCE(SUM(e.tokens_input),  0) AS tokens_input,
+                COALESCE(SUM(e.tokens_output), 0) AS tokens_output,
+                COUNT(DISTINCT e.session_id)      AS sessions,
+                COUNT(DISTINCT DATE(e.timestamp)) AS active_days
+            FROM team_members t
+            LEFT JOIN ai_events e
+                   ON e.engineer_id = t.id
+                  AND e.timestamp >= ? AND e.timestamp <= ?
+            WHERE t.department_id = ?
+            GROUP BY t.id
+            ORDER BY tokens_input DESC
+        """, (ts_from, ts_to, department_id))
+    else:
+        c.execute("""
+            SELECT
+                t.id, t.name, t.avatar_color, COALESCE(t.position,'') AS position,
+                COALESCE(SUM(e.tokens_input),  0) AS tokens_input,
+                COALESCE(SUM(e.tokens_output), 0) AS tokens_output,
+                COUNT(DISTINCT e.session_id)      AS sessions,
+                COUNT(DISTINCT DATE(e.timestamp)) AS active_days
+            FROM team_members t
+            LEFT JOIN ai_events e
+                   ON e.engineer_id = t.id
+                  AND e.timestamp >= ? AND e.timestamp <= ?
+            GROUP BY t.id
+            ORDER BY tokens_input DESC
+        """, (ts_from, ts_to))
     engineers_rows = [dict(r) for r in c.fetchall()]
 
     # Daily totals for the week
@@ -3826,17 +3904,23 @@ def generate_weekly_summary(data: WeeklySummaryRequest, password: str = ""):
     week_clause = f" for the week of {data.week_label}" if data.week_label else ""
     prompt = (
         f"You are writing a weekly engineering summary for {data.engineer_name}{week_clause}.\n\n"
-        "Based on their daily reports, write a concise weekly summary (3–6 bullet points). "
-        "Focus on the most impactful completed work. Group related items. Skip trivial or "
-        "repetitive items. Use past tense. Each bullet should be one clear sentence.\n\n"
+        "Based on their daily reports, write a detailed weekly summary. "
+        "Rules:\n"
+        "- Write 15 to 20 bullet points if the data supports it; write fewer only if there is genuinely not enough information.\n"
+        "- Cover ALL areas: completed work, invisible/support work, risks, and next steps.\n"
+        "- Do NOT group or merge unrelated items — each distinct task or fix gets its own bullet.\n"
+        "- Each bullet must be SHORT: maximum 12 words. Cut ruthlessly. No subordinate clauses.\n"
+        "- Use past tense for completed items, present/future for next steps.\n"
+        "- Include technical specifics inline: system name, number, or fix type in the bullet itself.\n"
+        "- Do NOT skip support work, investigations, or internal tasks — they are important.\n"
+        "- Do NOT add intro, outro, section headers, or commentary.\n\n"
         + "\n\n".join(lines)
-        + "\n\nReturn ONLY the bullet points, one per line, starting with \"- \". "
-        "No intro, no outro, no headers."
+        + "\n\nReturn ONLY the bullet points, one per line, starting with \"- \"."
     )
 
     payload = json_lib.dumps({
         "model": "claude-sonnet-4-5",
-        "max_tokens": 1000,
+        "max_tokens": 2000,
         "messages": [{"role": "user", "content": prompt}],
     }).encode()
 

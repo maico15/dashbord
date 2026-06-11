@@ -117,7 +117,31 @@ function DailyChart({ daily }) {
 }
 
 // ── Empty / no-collector state ────────────────────────────────────────────────
-function EmptyState({ week }) {
+function EmptyState({ week, departmentId, departmentName }) {
+  if (departmentId !== 1) {
+    return (
+      <div style={{ textAlign: 'center', padding: '60px 20px', color: 'var(--muted)' }}>
+        <div style={{ fontSize: 40, marginBottom: 12 }}>📊</div>
+        <div style={{ fontSize: 16, fontWeight: 500, marginBottom: 8, color: 'var(--text)' }}>
+          No data yet for {departmentName || 'this department'}
+        </div>
+        <div style={{ fontSize: 13, marginBottom: 20, maxWidth: 340, margin: '0 auto 20px' }}>
+          Install the telemetry app and register with department &ldquo;{departmentName}&rdquo;
+          to start tracking AI usage.
+        </div>
+        <a
+          href="https://github.com/maico15/dashbord/releases/latest/download/cc_telemetry_tray.exe"
+          style={{
+            display: 'inline-block', padding: '8px 20px',
+            background: 'var(--accent1)', color: '#fff',
+            borderRadius: 8, textDecoration: 'none', fontSize: 13,
+          }}
+        >
+          ⬇ Download Telemetry App
+        </a>
+      </div>
+    )
+  }
   return (
     <div style={{
       textAlign: 'center', padding: '48px 24px',
@@ -148,7 +172,7 @@ function EmptyState({ week }) {
 }
 
 // ── Tab root ──────────────────────────────────────────────────────────────────
-export default function AIUsageTab() {
+export default function AIUsageTab({ departmentId = 1, departmentName }) {
   const [week, setWeek]       = useState(null)
   const [year, setYear]       = useState(null)
   const [report, setReport]   = useState(null)
@@ -170,10 +194,11 @@ export default function AIUsageTab() {
     setLoading(true)
     setError(null)
     setReport(null)
-    api.get(`/ai-usage/weekly?week=${week}&year=${year}`)
+    const deptParam = departmentId !== 1 ? `&department_id=${departmentId}` : ''
+    api.get(`/ai-usage/weekly?week=${week}&year=${year}${deptParam}`)
       .then(d => { setReport(d); setLoading(false) })
       .catch(e => { console.error(e); setError('Failed to load AI usage data'); setLoading(false) })
-  }, [week, year])
+  }, [week, year, departmentId])
 
   const navigate = (delta) => {
     let w = (week ?? 1) + delta
@@ -214,11 +239,11 @@ export default function AIUsageTab() {
       {!loading && error && (
         <div className="card" style={{ padding: '20px 24px', color: 'var(--danger)', display: 'flex', alignItems: 'center', gap: 12 }}>
           <span>{error}</span>
-          <button className="btn btn-ghost" style={{ fontSize: 13 }} onClick={() => { setError(null); setLoading(true); api.get(`/ai-usage/weekly?week=${week}&year=${year}`).then(d => { setReport(d); setLoading(false) }).catch(e => { setError('Failed to load AI usage data'); setLoading(false) }) }}>↺ Retry</button>
+          <button className="btn btn-ghost" style={{ fontSize: 13 }} onClick={() => { setError(null); setLoading(true); const dp = departmentId !== 1 ? `&department_id=${departmentId}` : ''; api.get(`/ai-usage/weekly?week=${week}&year=${year}${dp}`).then(d => { setReport(d); setLoading(false) }).catch(e => { setError('Failed to load AI usage data'); setLoading(false) }) }}>↺ Retry</button>
         </div>
       )}
 
-      {!loading && !error && !hasData && <EmptyState week={week} />}
+      {!loading && !error && !hasData && <EmptyState week={week} departmentId={departmentId} departmentName={departmentName} />}
 
       {!loading && hasData && (
         <>
