@@ -12,10 +12,10 @@ import DailyReportTab from './DailyReportTab'
 import LoadingSpinner from '../components/LoadingSpinner'
 
 const TABS = [
+  { key: 'ai',     label: '⬡ AI Usage' },
   { key: 'dev',    label: 'Development' },
   // { key: 'support', label: 'Support' },
   // { key: 'docs', label: 'Documentation' },
-  { key: 'ai',     label: '⬡ AI Usage' },
   { key: 'daily',  label: '📅 Daily Report' },
   { key: 'report', label: '📋 Weekly Report' },
   { key: 'trends', label: '📈 Trends' },
@@ -209,7 +209,7 @@ function DocsTab({ data }) {
 }
 
 export default function Dashboard() {
-  const [activeTab, setActiveTab] = useState('dev')
+  const [activeTab, setActiveTab] = useState('ai')
   const [overview, setOverview] = useState(null)
   const [leaderboard, setLeaderboard] = useState(null)
   const [tabData, setTabData] = useState({})
