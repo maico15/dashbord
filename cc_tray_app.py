@@ -32,7 +32,7 @@ from tkinter import messagebox, ttk
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-APP_VERSION     = "1.5"
+APP_VERSION     = "1.6"
 APP_NAME        = f"Claude Telemetry v{APP_VERSION}"
 HOME            = pathlib.Path.home()
 CLAUDE_DIR      = HOME / ".claude"
@@ -290,6 +290,9 @@ public class WinEnum {
         ]
 
         _log(f"browser scan: {len(titles)} windows, {len(browser_titles)} browser windows")
+
+        for title in browser_titles:
+            _log(f"browser window: {title[:100]}")
 
         for title in browser_titles:
             t = title.lower()
@@ -555,6 +558,20 @@ class TelemetryTrayApp:
         tk.Button(bar, text="⟳ Refresh", command=refresh,
                   font=("Segoe UI", 9)).pack(side="left", padx=(0, 8))
         tk.Button(bar, text="Clear", command=clear_log,
+                  font=("Segoe UI", 9)).pack(side="left", padx=(0, 8))
+
+        def copy_log():
+            try:
+                content = LOG_PATH.read_text(encoding="utf-8", errors="replace")
+                win.clipboard_clear()
+                win.clipboard_append(content)
+                lbl_updated.config(text="Copied!")
+                win.after(2000, lambda: lbl_updated.config(
+                    text=f"Updated: {datetime.now().strftime('%H:%M:%S')}"))
+            except Exception as e:
+                lbl_updated.config(text=f"Copy error: {e}")
+
+        tk.Button(bar, text="Copy", command=copy_log,
                   font=("Segoe UI", 9)).pack(side="left")
         lbl_updated = tk.Label(bar, text="", font=("Segoe UI", 9), fg="gray")
         lbl_updated.pack(side="right")
