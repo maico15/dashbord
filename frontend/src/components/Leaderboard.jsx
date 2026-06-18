@@ -51,12 +51,16 @@ function BreakdownText({ breakdown, stream }) {
 
 export default function Leaderboard({ data }) {
   const navigate = useNavigate()
-  if (!data || data.length === 0)
-    return <div style={{ color: 'var(--muted)', textAlign: 'center', padding: 32 }}>No data</div>
+  if (!data) return null
 
   return (
     <div className="leaderboard">
       <div className="section-title">Leaderboard · 8 weeks</div>
+      {data.length <= 1 ? (
+        <div style={{ textAlign: 'center', padding: '32px 20px', color: 'var(--muted)', fontSize: 13 }}>
+          No leaderboard yet — add more engineers to this department.
+        </div>
+      ) : (
       <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
         <table className="lb-table">
           <thead>
@@ -125,6 +129,7 @@ export default function Leaderboard({ data }) {
           </tbody>
         </table>
       </div>
+      )}
     </div>
   )
 }

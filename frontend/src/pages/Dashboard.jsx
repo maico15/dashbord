@@ -240,19 +240,19 @@ export default function Dashboard() {
   const currentTabs = activeDept === IT_DEPT_ID ? TABS_IT : TABS_OTHER
 
   useEffect(() => {
-    Promise.all([api.get('/overview'), api.get('/leaderboard')])
-      .then(([ov, lb]) => {
-        setOverview(ov)
-        setLeaderboard(lb)
-        setLoading(false)
-      })
-      .catch(console.error)
+    api.get('/overview').then(ov => {
+      setOverview(ov)
+      setLoading(false)
+    }).catch(console.error)
+  }, [])
 
+  useEffect(() => {
+    api.get(`/leaderboard?department_id=${activeDept}`).then(setLeaderboard).catch(console.error)
     const refresh = setInterval(() => {
-      api.get('/leaderboard').then(setLeaderboard).catch(() => {})
+      api.get(`/leaderboard?department_id=${activeDept}`).then(setLeaderboard).catch(() => {})
     }, 60_000)
     return () => clearInterval(refresh)
-  }, [])
+  }, [activeDept])
 
   useEffect(() => {
     // tabs that manage their own data fetching
