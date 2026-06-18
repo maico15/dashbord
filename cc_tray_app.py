@@ -34,7 +34,7 @@ CREATE_NO_WINDOW = 0x08000000  # Windows: don't flash a console window
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-APP_VERSION     = "1.8"
+APP_VERSION     = "1.9"
 APP_NAME        = f"Claude Telemetry v{APP_VERSION}"
 HOME            = pathlib.Path.home()
 CLAUDE_DIR      = HOME / ".claude"
@@ -63,9 +63,23 @@ AI_TOOLS = {
     "copilot.microsoft.com": "copilot",
 }
 
-# Window title keywords (case-insensitive) — checked after domain match
+# DNS cache patterns — primary detection method
+AI_NETWORK_PATTERNS = {
+    "openai.com":            "chatgpt",
+    "chatgpt.com":           "chatgpt",
+    "claude.ai":             "claude",
+    "anthropic.com":         "claude",
+    "lovable.dev":           "lovable",
+    "gemini.google.com":     "gemini",
+    "bard.google.com":       "gemini",
+    "copilot.microsoft.com": "copilot",
+    "perplexity.ai":         "perplexity",
+}
+
+# Window title keywords (case-insensitive) — fallback after DNS
 AI_TITLE_KEYWORDS = [
     ("chatgpt",    "chatgpt"),
+    ("openai",     "chatgpt"),
     ("claude",     "claude"),
     ("lovable",    "lovable"),
     ("gemini",     "gemini"),
@@ -247,8 +261,44 @@ def _send_all(events: list, cfg: dict) -> tuple:
 # ---------------------------------------------------------------------------
 # Browser URL detection
 # ---------------------------------------------------------------------------
+def _get_ai_tool_from_network() -> str | None:
+    """Detect active AI tool by querying Windows DNS client cache."""
+    try:
+        import subprocess
+        ps = r"""
+$OutputEncoding = [System.Text.Encoding]::UTF8
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+Get-DnsClientCache | Select-Object -ExpandProperty Entry
+"""
+        r = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps],
+            capture_output=True, timeout=5,
+            creationflags=CREATE_NO_WINDOW,
+        )
+        try:
+            output = r.stdout.decode("utf-8")
+        except UnicodeDecodeError:
+            output = r.stdout.decode("cp1251", errors="replace")
+
+        dns_entries = output.strip().lower()
+        for pattern, tool in AI_NETWORK_PATTERNS.items():
+            if pattern in dns_entries:
+                return tool
+        return None
+    except Exception as e:
+        _log(f"network detection error: {e}")
+        return None
+
+
 def _get_active_browser_url() -> str | None:
-    """Return AI tool name if found in any visible browser window title."""
+    """Return AI tool name using DNS cache (primary) + window title (fallback)."""
+    # Method 1: DNS cache — works regardless of window title language
+    tool = _get_ai_tool_from_network()
+    if tool:
+        _log(f"browser match (dns): {tool}")
+        return tool
+
+    # Method 2: window title fallback
     try:
         import subprocess
 
@@ -292,7 +342,6 @@ public class WinEnum {
             output = r.stdout.decode("cp1251", errors="replace")
 
         titles = output.strip().splitlines()
-
         browser_keywords = ["Google Chrome", "Microsoft Edge", "Firefox", "Opera", "Brave"]
         browser_titles = [t for t in titles if any(b in t for b in browser_keywords)]
 
@@ -305,10 +354,10 @@ public class WinEnum {
                 if domain in t:
                     _log(f"browser match (domain): {tool}")
                     return tool
-            for keyword, tool in AI_TITLE_KEYWORDS:
+            for keyword, tool_name in AI_TITLE_KEYWORDS:
                 if keyword.lower() in t:
-                    _log(f"browser match (keyword): {tool}")
-                    return tool
+                    _log(f"browser match (keyword): {tool_name}")
+                    return tool_name
 
         return None
 
