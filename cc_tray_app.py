@@ -32,7 +32,8 @@ from tkinter import messagebox, ttk
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-APP_NAME        = "Claude Telemetry"
+APP_VERSION     = "1.2"
+APP_NAME        = f"Claude Telemetry v{APP_VERSION}"
 HOME            = pathlib.Path.home()
 CLAUDE_DIR      = HOME / ".claude"
 CONFIG_PATH     = HOME / ".claude" / "telemetry_config.json"
