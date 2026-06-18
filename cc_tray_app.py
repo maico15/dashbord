@@ -29,10 +29,12 @@ except ImportError:
 import tkinter as tk
 from tkinter import messagebox, ttk
 
+CREATE_NO_WINDOW = 0x08000000  # Windows: don't flash a console window
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-APP_VERSION     = "1.6"
+APP_VERSION     = "1.7"
 APP_NAME        = f"Claude Telemetry v{APP_VERSION}"
 HOME            = pathlib.Path.home()
 CLAUDE_DIR      = HOME / ".claude"
@@ -279,10 +281,16 @@ public class WinEnum {
 [WinEnum]::GetVisibleWindowTitles() | ForEach-Object { Write-Output $_ }
 """
         r = subprocess.run(
-            ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps],
-            capture_output=True, text=True, timeout=8,
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command",
+             f"chcp 65001 | Out-Null; {ps}"],
+            capture_output=True, timeout=8,
+            creationflags=CREATE_NO_WINDOW,
         )
-        titles = r.stdout.strip().splitlines()
+        try:
+            output = r.stdout.decode("utf-8", errors="replace")
+        except Exception:
+            output = ""
+        titles = output.strip().splitlines()
 
         browser_titles = [
             t for t in titles
