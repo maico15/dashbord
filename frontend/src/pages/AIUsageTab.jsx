@@ -320,19 +320,13 @@ export default function AIUsageTab({ departmentId = 1, departmentName }) {
     setError(null)
     setReport(null)
     setBrowserData(null)
-    const deptParam = `&department_id=${departmentId}`
-    Promise.all([
-      api.get(`/ai-usage/weekly?week=${week}&year=${year}${deptParam}`),
-      api.get(`/ai-usage/browser?week=${week}&year=${year}${deptParam}`),
-    ]).then(([weeklyData, browserResult]) => {
-      setReport(weeklyData)
-      setBrowserData(browserResult)
-      setLoading(false)
-    }).catch(e => {
-      console.error(e)
-      setError('Failed to load AI usage data')
-      setLoading(false)
-    })
+    const deptParam = departmentId ? `&department_id=${departmentId}` : ''
+    api.get(`/ai-usage/weekly?week=${week}&year=${year}${deptParam}`)
+      .then(d => { setReport(d); setLoading(false) })
+      .catch(() => { setError('Failed to load AI usage data'); setLoading(false) })
+    api.get(`/ai-usage/browser?week=${week}&year=${year}${deptParam}`)
+      .then(d => setBrowserData(d))
+      .catch(() => setBrowserData(null))
   }, [week, year, departmentId])
 
   const navigate = (delta) => {
