@@ -46,6 +46,22 @@ SEND_CHUNK      = 200
 REQUEST_TIMEOUT = 15
 DEFAULT_ENDPOINT = "https://dashbord-5u0i.onrender.com"
 
+# Browser tracking
+BROWSER_POLL_INTERVAL = 30   # seconds
+BROWSER_SESSION_GAP   = 120  # seconds of inactivity = new session
+
+AI_TOOLS = {
+    "claude.ai":             "claude",
+    "chat.openai.com":       "chatgpt",
+    "chatgpt.com":           "chatgpt",
+    "lovable.dev":           "lovable",
+    "app.lovable.dev":       "lovable",
+    "gemini.google.com":     "gemini",
+    "copilot.microsoft.com": "copilot",
+}
+
+BROWSER_SESSIONS_PATH = HOME / ".claude" / "browser_sessions.jsonl"
+
 _REG_RUN = r"Software\Microsoft\Windows\CurrentVersion\Run"
 
 _C_GRAY   = (120, 120, 120, 255)
@@ -213,6 +229,77 @@ def _send_all(events: list, cfg: dict) -> tuple:
     return ok_count, None
 
 # ---------------------------------------------------------------------------
+# Browser URL detection
+# ---------------------------------------------------------------------------
+def _get_active_browser_url() -> str | None:
+    """Return matched AI_TOOLS domain if an AI tool is visible in Chrome/Edge."""
+    try:
+        try:
+            import win32gui
+
+            titles = []
+            def _cb(hwnd, _):
+                if not win32gui.IsWindowVisible(hwnd):
+                    return
+                t = win32gui.GetWindowText(hwnd)
+                if t and (" - Google Chrome" in t or " - Microsoft Edge" in t):
+                    titles.append(t.lower())
+            win32gui.EnumWindows(_cb, None)
+
+            for title in titles:
+                for domain in AI_TOOLS:
+                    if domain in title:
+                        return domain
+            return None
+        except ImportError:
+            pass
+
+        # Fallback: PowerShell foreground window title
+        import subprocess
+        ps = (
+            'Add-Type @"\nusing System;using System.Runtime.InteropServices;\n'
+            'public class W{[DllImport("user32.dll")]public static extern IntPtr GetForegroundWindow();'
+            '[DllImport("user32.dll")]public static extern int GetWindowText(IntPtr h,System.Text.StringBuilder s,int c);}\n"@\n'
+            '$h=[W]::GetForegroundWindow();$s=New-Object System.Text.StringBuilder(512);'
+            '[W]::GetWindowText($h,$s,512)|Out-Null;Write-Output $s.ToString()'
+        )
+        r = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps],
+            capture_output=True, text=True, timeout=3,
+        )
+        title = r.stdout.strip().lower()
+        for domain in AI_TOOLS:
+            if domain in title:
+                return domain
+        return None
+    except Exception as e:
+        _log(f"browser url error: {e}")
+        return None
+
+
+def _send_browser_session(cfg: dict, tool: str, duration_sec: int, date_str: str) -> bool:
+    """Send a completed browser AI-tool session to the dashboard."""
+    try:
+        url = cfg["endpoint"].rstrip("/") + "/api/telemetry/tool-sessions"
+        payload = {
+            "engineer_id":  cfg["engineer_id"],
+            "secret":       cfg["secret"],
+            "tool":         tool,
+            "duration_sec": duration_sec,
+            "date":         date_str,
+        }
+        r = requests.post(url, json=payload, timeout=REQUEST_TIMEOUT)
+        if r.status_code == 200:
+            _log(f"browser session: tool={tool} duration={duration_sec}s")
+            return True
+        _log(f"browser session error: {r.status_code}")
+        return False
+    except Exception as e:
+        _log(f"browser session send error: {e}")
+        return False
+
+
+# ---------------------------------------------------------------------------
 # Autostart
 # ---------------------------------------------------------------------------
 def _autostart_enabled() -> bool:
@@ -264,10 +351,11 @@ def _make_icon(color=_C_BLUE) -> Image.Image:
 class TelemetryTrayApp:
 
     def __init__(self):
-        self._stop         = threading.Event()
-        self._poll_thread  = None
-        self._settings_win = None
-        self._status       = "Initializing..."
+        self._stop           = threading.Event()
+        self._poll_thread    = None
+        self._browser_thread = None
+        self._settings_win   = None
+        self._status         = "Initializing..."
         self._load_cfg()
 
     def _load_cfg(self) -> dict:
@@ -294,7 +382,10 @@ class TelemetryTrayApp:
         self._poll_thread = threading.Thread(
             target=self._poll_loop, name="telem-poll", daemon=True)
         self._poll_thread.start()
-        _log("polling started")
+        self._browser_thread = threading.Thread(
+            target=self._browser_loop, name="browser-track", daemon=True)
+        self._browser_thread.start()
+        _log("polling started (claude code + browser)")
 
     def _stop_poll(self) -> None:
         self._stop.set()
@@ -303,6 +394,50 @@ class TelemetryTrayApp:
         while not self._stop.is_set():
             self._do_cycle()
             self._stop.wait(POLL_INTERVAL)
+
+    def _browser_loop(self) -> None:
+        """Track time spent on AI tools in the active browser tab."""
+        current_tool  = None
+        session_start = None
+        last_seen     = None
+
+        while not self._stop.is_set():
+            try:
+                cfg = self._load_cfg()
+                if not cfg.get("engineer_id") or not cfg.get("secret"):
+                    self._stop.wait(BROWSER_POLL_INTERVAL)
+                    continue
+
+                domain = _get_active_browser_url()
+                tool   = AI_TOOLS.get(domain) if domain else None
+                now    = time.time()
+
+                if tool:
+                    if current_tool != tool:
+                        # Switched tool — flush previous session first
+                        if current_tool and session_start and last_seen:
+                            dur = int(last_seen - session_start)
+                            if dur >= 30:
+                                date_str = datetime.fromtimestamp(session_start).strftime("%Y-%m-%d")
+                                _send_browser_session(cfg, current_tool, dur, date_str)
+                        current_tool  = tool
+                        session_start = now
+                    last_seen = now
+                else:
+                    # No AI tool active — flush if gap exceeded
+                    if current_tool and session_start and last_seen:
+                        if now - last_seen > BROWSER_SESSION_GAP:
+                            dur = int(last_seen - session_start)
+                            if dur >= 30:
+                                date_str = datetime.fromtimestamp(session_start).strftime("%Y-%m-%d")
+                                _send_browser_session(cfg, current_tool, dur, date_str)
+                            current_tool  = None
+                            session_start = None
+                            last_seen     = None
+            except Exception as e:
+                _log(f"browser loop error: {e}")
+
+            self._stop.wait(BROWSER_POLL_INTERVAL)
 
     def _do_cycle(self) -> None:
         cfg = self._load_cfg()

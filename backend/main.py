@@ -324,6 +324,16 @@ def init_db():
 
         CREATE INDEX IF NOT EXISTS idx_ai_usage_daily_date
             ON ai_usage_daily(date, engineer_id);
+
+        CREATE TABLE IF NOT EXISTS ai_tool_sessions (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            engineer_id   INTEGER NOT NULL,
+            tool          TEXT    NOT NULL,
+            date          DATE    NOT NULL,
+            duration_sec  INTEGER NOT NULL DEFAULT 0,
+            session_count INTEGER NOT NULL DEFAULT 0,
+            UNIQUE(engineer_id, tool, date)
+        );
     """)
     conn.commit()
     # Seed default departments
@@ -3551,6 +3561,36 @@ def ingest_telemetry(payload: TelemetryPayload):
     conn.commit()
     conn.close()
     return {"accepted": accepted, "duplicate": duplicate}
+
+
+class ToolSessionRequest(BaseModel):
+    engineer_id: str
+    secret:      str
+    tool:        str   # 'claude' | 'chatgpt' | 'lovable' | 'gemini' | 'copilot'
+    duration_sec: int
+    date:        str   # 'YYYY-MM-DD'
+
+
+@app.post("/api/telemetry/tool-sessions")
+def receive_tool_session(data: ToolSessionRequest):
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT value FROM config WHERE key=?", (f"secret_{data.engineer_id}",))
+    row = c.fetchone()
+    if not row or row["value"] != data.secret:
+        conn.close()
+        raise HTTPException(401, "Invalid credentials")
+
+    c.execute("""
+        INSERT INTO ai_tool_sessions (engineer_id, tool, date, duration_sec, session_count)
+        VALUES (?, ?, ?, ?, 1)
+        ON CONFLICT(engineer_id, tool, date) DO UPDATE SET
+            duration_sec  = duration_sec  + excluded.duration_sec,
+            session_count = session_count + 1
+    """, (int(data.engineer_id), data.tool, data.date, data.duration_sec))
+    conn.commit()
+    conn.close()
+    return {"ok": True}
 
 
 @app.get("/api/telemetry/debug")
