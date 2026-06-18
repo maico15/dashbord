@@ -34,7 +34,7 @@ CREATE_NO_WINDOW = 0x08000000  # Windows: don't flash a console window
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-APP_VERSION     = "1.7"
+APP_VERSION     = "1.8"
 APP_NAME        = f"Claude Telemetry v{APP_VERSION}"
 HOME            = pathlib.Path.home()
 CLAUDE_DIR      = HOME / ".claude"
@@ -248,11 +248,13 @@ def _send_all(events: list, cfg: dict) -> tuple:
 # Browser URL detection
 # ---------------------------------------------------------------------------
 def _get_active_browser_url() -> str | None:
-    """Return AI tool name if found in any visible browser window title (PowerShell EnumWindows)."""
+    """Return AI tool name if found in any visible browser window title."""
     try:
         import subprocess
 
         ps = r"""
+$OutputEncoding = [System.Text.Encoding]::UTF8
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 Add-Type @"
 using System;
 using System.Runtime.InteropServices;
@@ -262,55 +264,50 @@ public class WinEnum {
     public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
     [DllImport("user32.dll")] public static extern bool EnumWindows(EnumWindowsProc enumProc, IntPtr lParam);
     [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hWnd);
-    [DllImport("user32.dll")] public static extern int GetWindowText(IntPtr hWnd, StringBuilder lpString, int nMaxCount);
-    public static List<string> GetVisibleWindowTitles() {
-        var titles = new List<string>();
-        EnumWindows((hwnd, lParam) => {
-            if (IsWindowVisible(hwnd)) {
+    [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetWindowText(IntPtr hWnd, StringBuilder lpString, int nMaxCount);
+    public static List<string> GetAll() {
+        var list = new List<string>();
+        EnumWindows((h, l) => {
+            if (IsWindowVisible(h)) {
                 var sb = new StringBuilder(512);
-                GetWindowText(hwnd, sb, 512);
-                string t = sb.ToString();
-                if (t.Length > 0) titles.Add(t);
+                GetWindowText(h, sb, 512);
+                if (sb.Length > 0) list.Add(sb.ToString());
             }
             return true;
         }, IntPtr.Zero);
-        return titles;
+        return list;
     }
 }
 "@
-[WinEnum]::GetVisibleWindowTitles() | ForEach-Object { Write-Output $_ }
+[WinEnum]::GetAll() | ForEach-Object { Write-Output $_ }
 """
         r = subprocess.run(
-            ["powershell", "-NoProfile", "-NonInteractive", "-Command",
-             f"chcp 65001 | Out-Null; {ps}"],
-            capture_output=True, timeout=8,
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps],
+            capture_output=True, timeout=10,
             creationflags=CREATE_NO_WINDOW,
         )
         try:
-            output = r.stdout.decode("utf-8", errors="replace")
-        except Exception:
-            output = ""
+            output = r.stdout.decode("utf-8")
+        except UnicodeDecodeError:
+            output = r.stdout.decode("cp1251", errors="replace")
+
         titles = output.strip().splitlines()
 
-        browser_titles = [
-            t for t in titles
-            if any(b in t for b in ["Chrome", "Edge", "Firefox", "Opera", "Brave"])
-        ]
+        browser_keywords = ["Google Chrome", "Microsoft Edge", "Firefox", "Opera", "Brave"]
+        browser_titles = [t for t in titles if any(b in t for b in browser_keywords)]
 
         _log(f"browser scan: {len(titles)} windows, {len(browser_titles)} browser windows")
 
         for title in browser_titles:
             _log(f"browser window: {title[:100]}")
-
-        for title in browser_titles:
             t = title.lower()
             for domain, tool in AI_TOOLS.items():
                 if domain in t:
-                    _log(f"browser match (domain): {tool} | {title[:80]}")
+                    _log(f"browser match (domain): {tool}")
                     return tool
             for keyword, tool in AI_TITLE_KEYWORDS:
                 if keyword.lower() in t:
-                    _log(f"browser match (keyword): {tool} | {title[:80]}")
+                    _log(f"browser match (keyword): {tool}")
                     return tool
 
         return None
