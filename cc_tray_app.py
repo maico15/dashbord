@@ -32,7 +32,7 @@ from tkinter import messagebox, ttk
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-APP_VERSION     = "1.3"
+APP_VERSION     = "1.4"
 APP_NAME        = f"Claude Telemetry v{APP_VERSION}"
 HOME            = pathlib.Path.home()
 CLAUDE_DIR      = HOME / ".claude"
@@ -60,6 +60,19 @@ AI_TOOLS = {
     "gemini.google.com":     "gemini",
     "copilot.microsoft.com": "copilot",
 }
+
+# Window title keywords (case-insensitive) — checked after domain match
+AI_TITLE_KEYWORDS = [
+    ("chatgpt",    "chatgpt"),
+    ("claude",     "claude"),
+    ("lovable",    "lovable"),
+    ("gemini",     "gemini"),
+    ("copilot",    "copilot"),
+    ("perplexity", "perplexity"),
+    ("cursor",     "cursor"),
+    ("v0.dev",     "v0"),
+    ("bolt.new",   "bolt"),
+]
 
 BROWSER_SESSIONS_PATH = HOME / ".claude" / "browser_sessions.jsonl"
 
@@ -233,7 +246,18 @@ def _send_all(events: list, cfg: dict) -> tuple:
 # Browser URL detection
 # ---------------------------------------------------------------------------
 def _get_active_browser_url() -> str | None:
-    """Return matched AI_TOOLS domain if an AI tool is visible in Chrome/Edge."""
+    """Return AI tool name if an AI tool tab is visible in any browser window."""
+
+    def match_title(title: str) -> str | None:
+        t = title.lower()
+        for domain, tool in AI_TOOLS.items():
+            if domain in t:
+                return tool
+        for keyword, tool in AI_TITLE_KEYWORDS:
+            if keyword in t:
+                return tool
+        return None
+
     try:
         try:
             import win32gui
@@ -243,15 +267,19 @@ def _get_active_browser_url() -> str | None:
                 if not win32gui.IsWindowVisible(hwnd):
                     return
                 t = win32gui.GetWindowText(hwnd)
-                if t and (" - Google Chrome" in t or " - Microsoft Edge" in t):
-                    titles.append(t.lower())
+                if t and any(b in t for b in [
+                    "Google Chrome", "Microsoft Edge", "Firefox", "Opera", "Brave"
+                ]):
+                    titles.append(t)
             win32gui.EnumWindows(_cb, None)
 
             for title in titles:
-                for domain in AI_TOOLS:
-                    if domain in title:
-                        return domain
+                result = match_title(title)
+                if result:
+                    _log(f"browser detected via win32gui: {result} | {title[:60]}")
+                    return result
             return None
+
         except ImportError:
             pass
 
@@ -259,20 +287,27 @@ def _get_active_browser_url() -> str | None:
         import subprocess
         ps = (
             'Add-Type @"\nusing System;using System.Runtime.InteropServices;\n'
-            'public class W{[DllImport("user32.dll")]public static extern IntPtr GetForegroundWindow();'
-            '[DllImport("user32.dll")]public static extern int GetWindowText(IntPtr h,System.Text.StringBuilder s,int c);}\n"@\n'
-            '$h=[W]::GetForegroundWindow();$s=New-Object System.Text.StringBuilder(512);'
-            '[W]::GetWindowText($h,$s,512)|Out-Null;Write-Output $s.ToString()'
+            'public class W{'
+            '[DllImport("user32.dll")]public static extern IntPtr GetForegroundWindow();'
+            '[DllImport("user32.dll")]public static extern int GetWindowText(IntPtr h,System.Text.StringBuilder s,int c);'
+            '}\n"@\n'
+            '$h=[W]::GetForegroundWindow();'
+            '$s=New-Object System.Text.StringBuilder(512);'
+            '[W]::GetWindowText($h,$s,512)|Out-Null;'
+            'Write-Output $s.ToString()'
         )
         r = subprocess.run(
             ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps],
             capture_output=True, text=True, timeout=3,
         )
-        title = r.stdout.strip().lower()
-        for domain in AI_TOOLS:
-            if domain in title:
-                return domain
+        title = r.stdout.strip()
+        if title:
+            result = match_title(title)
+            if result:
+                _log(f"browser detected via PowerShell: {result} | {title[:60]}")
+                return result
         return None
+
     except Exception as e:
         _log(f"browser url error: {e}")
         return None
@@ -401,17 +436,21 @@ class TelemetryTrayApp:
         current_tool  = None
         session_start = None
         last_seen     = None
+        _tick         = 0
 
         while not self._stop.is_set():
             try:
+                _tick += 1
                 cfg = self._load_cfg()
                 if not cfg.get("engineer_id") or not cfg.get("secret"):
                     self._stop.wait(BROWSER_POLL_INTERVAL)
                     continue
 
-                domain = _get_active_browser_url()
-                tool   = AI_TOOLS.get(domain) if domain else None
-                now    = time.time()
+                tool = _get_active_browser_url()
+                now  = time.time()
+
+                if _tick % 10 == 0:
+                    _log(f"browser tick {_tick}: tool={tool} current={current_tool}")
 
                 if tool:
                     if current_tool != tool:
