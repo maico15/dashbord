@@ -2204,13 +2204,16 @@ def overview():
 
 
 @app.get("/api/leaderboard")
-def leaderboard():
+def leaderboard(department_id: Optional[int] = None):
     conn = get_db()
     c = conn.cursor()
     rules = get_rules(conn)
     week, year = current_week_year(conn)
 
-    c.execute("SELECT * FROM team_members ORDER BY id")
+    if department_id is not None:
+        c.execute("SELECT * FROM team_members WHERE department_id=? ORDER BY id", (department_id,))
+    else:
+        c.execute("SELECT * FROM team_members ORDER BY id")
     members = [dict(r) for r in c.fetchall()]
 
     board = []
