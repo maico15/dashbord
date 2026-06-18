@@ -32,7 +32,7 @@ from tkinter import messagebox, ttk
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-APP_VERSION     = "1.4"
+APP_VERSION     = "1.5"
 APP_NAME        = f"Claude Telemetry v{APP_VERSION}"
 HOME            = pathlib.Path.home()
 CLAUDE_DIR      = HOME / ".claude"
@@ -246,66 +246,62 @@ def _send_all(events: list, cfg: dict) -> tuple:
 # Browser URL detection
 # ---------------------------------------------------------------------------
 def _get_active_browser_url() -> str | None:
-    """Return AI tool name if an AI tool tab is visible in any browser window."""
-
-    def match_title(title: str) -> str | None:
-        t = title.lower()
-        for domain, tool in AI_TOOLS.items():
-            if domain in t:
-                return tool
-        for keyword, tool in AI_TITLE_KEYWORDS:
-            if keyword in t:
-                return tool
-        return None
-
+    """Return AI tool name if found in any visible browser window title (PowerShell EnumWindows)."""
     try:
-        try:
-            import win32gui
-
-            titles = []
-            def _cb(hwnd, _):
-                if not win32gui.IsWindowVisible(hwnd):
-                    return
-                t = win32gui.GetWindowText(hwnd)
-                if t and any(b in t for b in [
-                    "Google Chrome", "Microsoft Edge", "Firefox", "Opera", "Brave"
-                ]):
-                    titles.append(t)
-            win32gui.EnumWindows(_cb, None)
-
-            for title in titles:
-                result = match_title(title)
-                if result:
-                    _log(f"browser detected via win32gui: {result} | {title[:60]}")
-                    return result
-            return None
-
-        except ImportError:
-            pass
-
-        # Fallback: PowerShell foreground window title
         import subprocess
-        ps = (
-            'Add-Type @"\nusing System;using System.Runtime.InteropServices;\n'
-            'public class W{'
-            '[DllImport("user32.dll")]public static extern IntPtr GetForegroundWindow();'
-            '[DllImport("user32.dll")]public static extern int GetWindowText(IntPtr h,System.Text.StringBuilder s,int c);'
-            '}\n"@\n'
-            '$h=[W]::GetForegroundWindow();'
-            '$s=New-Object System.Text.StringBuilder(512);'
-            '[W]::GetWindowText($h,$s,512)|Out-Null;'
-            'Write-Output $s.ToString()'
-        )
+
+        ps = r"""
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+using System.Collections.Generic;
+using System.Text;
+public class WinEnum {
+    public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+    [DllImport("user32.dll")] public static extern bool EnumWindows(EnumWindowsProc enumProc, IntPtr lParam);
+    [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hWnd);
+    [DllImport("user32.dll")] public static extern int GetWindowText(IntPtr hWnd, StringBuilder lpString, int nMaxCount);
+    public static List<string> GetVisibleWindowTitles() {
+        var titles = new List<string>();
+        EnumWindows((hwnd, lParam) => {
+            if (IsWindowVisible(hwnd)) {
+                var sb = new StringBuilder(512);
+                GetWindowText(hwnd, sb, 512);
+                string t = sb.ToString();
+                if (t.Length > 0) titles.Add(t);
+            }
+            return true;
+        }, IntPtr.Zero);
+        return titles;
+    }
+}
+"@
+[WinEnum]::GetVisibleWindowTitles() | ForEach-Object { Write-Output $_ }
+"""
         r = subprocess.run(
             ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps],
-            capture_output=True, text=True, timeout=3,
+            capture_output=True, text=True, timeout=8,
         )
-        title = r.stdout.strip()
-        if title:
-            result = match_title(title)
-            if result:
-                _log(f"browser detected via PowerShell: {result} | {title[:60]}")
-                return result
+        titles = r.stdout.strip().splitlines()
+
+        browser_titles = [
+            t for t in titles
+            if any(b in t for b in ["Chrome", "Edge", "Firefox", "Opera", "Brave"])
+        ]
+
+        _log(f"browser scan: {len(titles)} windows, {len(browser_titles)} browser windows")
+
+        for title in browser_titles:
+            t = title.lower()
+            for domain, tool in AI_TOOLS.items():
+                if domain in t:
+                    _log(f"browser match (domain): {tool} | {title[:80]}")
+                    return tool
+            for keyword, tool in AI_TITLE_KEYWORDS:
+                if keyword.lower() in t:
+                    _log(f"browser match (keyword): {tool} | {title[:80]}")
+                    return tool
+
         return None
 
     except Exception as e:
@@ -449,6 +445,8 @@ class TelemetryTrayApp:
                 tool = _get_active_browser_url()
                 now  = time.time()
 
+                if tool:
+                    _log(f"browser active: {tool}")
                 if _tick % 10 == 0:
                     _log(f"browser tick {_tick}: tool={tool} current={current_tool}")
 
