@@ -3496,10 +3496,17 @@ class TelemetryPayload(BaseModel):
 
 @app.post("/api/telemetry/events")
 def ingest_telemetry(payload: TelemetryPayload):
-    if not TELEMETRY_SECRET or payload.secret != TELEMETRY_SECRET:
-        raise HTTPException(401, "Invalid telemetry secret")
     conn = get_db()
     c = conn.cursor()
+    # Accept global TELEMETRY_SECRET (legacy) or per-engineer secret stored by /api/register-engineer
+    authed = TELEMETRY_SECRET and payload.secret == TELEMETRY_SECRET
+    if not authed:
+        c.execute("SELECT value FROM config WHERE key=?", (f"secret_{payload.engineer_id}",))
+        row = c.fetchone()
+        authed = row and row["value"] == payload.secret
+    if not authed:
+        conn.close()
+        raise HTTPException(401, "Invalid telemetry secret")
     accepted = 0
     duplicate = 0
     for ev in payload.events:
