@@ -32,7 +32,7 @@ from tkinter import messagebox, ttk
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-APP_VERSION     = "1.2"
+APP_VERSION     = "1.3"
 APP_NAME        = f"Claude Telemetry v{APP_VERSION}"
 HOME            = pathlib.Path.home()
 CLAUDE_DIR      = HOME / ".claude"
@@ -480,6 +480,56 @@ class TelemetryTrayApp:
     def _on_run_now(self, *_) -> None:
         threading.Thread(target=self._do_cycle, daemon=True).start()
 
+    def _on_view_log(self, *_) -> None:
+        self.root.after(0, self._open_log_viewer)
+
+    def _open_log_viewer(self) -> None:
+        from tkinter import scrolledtext
+
+        win = tk.Toplevel(self.root)
+        win.title("Telemetry Log")
+        win.geometry("700x420")
+        win.attributes("-topmost", True)
+
+        bar = tk.Frame(win, pady=6, padx=10)
+        bar.pack(fill="x")
+
+        def refresh():
+            txt.config(state="normal")
+            txt.delete("1.0", "end")
+            try:
+                lines = LOG_PATH.read_text(encoding="utf-8", errors="replace").splitlines()
+                txt.insert("end", "\n".join(lines[-200:]))
+                txt.see("end")
+            except FileNotFoundError:
+                txt.insert("end", "No log file yet.\nRun Now to generate activity.")
+            except Exception as e:
+                txt.insert("end", f"Error reading log: {e}")
+            txt.config(state="disabled")
+            lbl_updated.config(text=f"Updated: {datetime.now().strftime('%H:%M:%S')}")
+
+        def clear_log():
+            try:
+                LOG_PATH.write_text("", encoding="utf-8")
+                refresh()
+            except Exception:
+                pass
+
+        tk.Button(bar, text="⟳ Refresh", command=refresh,
+                  font=("Segoe UI", 9)).pack(side="left", padx=(0, 8))
+        tk.Button(bar, text="Clear", command=clear_log,
+                  font=("Segoe UI", 9)).pack(side="left")
+        lbl_updated = tk.Label(bar, text="", font=("Segoe UI", 9), fg="gray")
+        lbl_updated.pack(side="right")
+
+        txt = scrolledtext.ScrolledText(
+            win, font=("Consolas", 9), state="disabled",
+            wrap="none", bg="#1e1e1e", fg="#d4d4d4",
+            insertbackground="white",
+        )
+        txt.pack(fill="both", expand=True, padx=6, pady=(0, 6))
+        refresh()
+
     def _on_toggle_autostart(self, *_) -> None:
         _set_autostart(not _autostart_enabled())
         self._icon.update_menu()
@@ -712,9 +762,10 @@ class TelemetryTrayApp:
 
         btn_row = tk.Frame(frm)
         btn_row.grid(row=frm.grid_size()[1], column=0, columnspan=2, pady=8)
-        tk.Button(btn_row, text="Save",  command=save,        width=10).pack(side="left", padx=4)
-        tk.Button(btn_row, text="Test",  command=test,        width=10).pack(side="left", padx=4)
-        tk.Button(btn_row, text="Close", command=win.destroy, width=10).pack(side="left", padx=4)
+        tk.Button(btn_row, text="Save",     command=save,                    width=10).pack(side="left", padx=4)
+        tk.Button(btn_row, text="Test",     command=test,                    width=10).pack(side="left", padx=4)
+        tk.Button(btn_row, text="View Log", command=self._open_log_viewer,   width=10).pack(side="left", padx=4)
+        tk.Button(btn_row, text="Close",    command=win.destroy,             width=10).pack(side="left", padx=4)
 
     def run(self) -> None:
         self.root = tk.Tk()
@@ -722,6 +773,7 @@ class TelemetryTrayApp:
 
         menu = pystray.Menu(
             pystray.MenuItem("Run Now",           self._on_run_now),
+            pystray.MenuItem("View Log",          self._on_view_log),
             pystray.MenuItem("Start with Windows",
                              self._on_toggle_autostart,
                              checked=lambda item: _autostart_enabled()),
