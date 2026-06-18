@@ -3909,6 +3909,82 @@ def get_ai_usage_engineer(
     }
 
 
+@app.get("/api/ai-usage/browser")
+def ai_usage_browser(week: int, year: int, department_id: Optional[int] = None):
+    conn = get_db()
+    c = conn.cursor()
+
+    week_start, week_end = _iso_week_bounds(week, year)
+    date_from = str(week_start)
+    date_to   = str(week_end)
+
+    if department_id is not None:
+        c.execute("SELECT id FROM team_members WHERE department_id=?", (department_id,))
+    else:
+        c.execute("SELECT id FROM team_members")
+    member_ids = [r["id"] for r in c.fetchall()]
+
+    if not member_ids:
+        conn.close()
+        return {"tools": [], "per_engineer": [], "total_minutes": 0}
+
+    placeholders = ",".join("?" * len(member_ids))
+
+    c.execute(f"""
+        SELECT tool,
+               SUM(duration_sec) as total_sec,
+               COUNT(DISTINCT engineer_id) as engineers
+        FROM ai_tool_sessions
+        WHERE engineer_id IN ({placeholders})
+          AND date BETWEEN ? AND ?
+        GROUP BY tool
+        ORDER BY total_sec DESC
+    """, (*member_ids, date_from, date_to))
+    tools = [
+        {
+            "tool":          r["tool"],
+            "total_minutes": round(r["total_sec"] / 60),
+            "engineers":     r["engineers"],
+        }
+        for r in c.fetchall()
+    ]
+
+    c.execute(f"""
+        SELECT s.engineer_id, m.name, m.avatar_color,
+               s.tool, SUM(s.duration_sec) as total_sec
+        FROM ai_tool_sessions s
+        JOIN team_members m ON m.id = s.engineer_id
+        WHERE s.engineer_id IN ({placeholders})
+          AND s.date BETWEEN ? AND ?
+        GROUP BY s.engineer_id, s.tool
+        ORDER BY s.engineer_id, total_sec DESC
+    """, (*member_ids, date_from, date_to))
+
+    per_eng: Dict[int, dict] = {}
+    for r in c.fetchall():
+        eid = r["engineer_id"]
+        if eid not in per_eng:
+            per_eng[eid] = {
+                "name":          r["name"],
+                "color":         r["avatar_color"],
+                "total_minutes": 0,
+                "tools":         [],
+            }
+        mins = round(r["total_sec"] / 60)
+        per_eng[eid]["total_minutes"] += mins
+        per_eng[eid]["tools"].append({"tool": r["tool"], "minutes": mins})
+
+    per_engineer = sorted(per_eng.values(), key=lambda x: x["total_minutes"], reverse=True)
+    total_minutes = sum(t["total_minutes"] for t in tools)
+
+    conn.close()
+    return {
+        "tools":         tools,
+        "per_engineer":  per_engineer,
+        "total_minutes": total_minutes,
+    }
+
+
 # ── AI weekly summary proxy ───────────────────────────────────────────────────
 
 class WeeklySummaryRequest(BaseModel):

@@ -116,6 +116,130 @@ function DailyChart({ daily }) {
   )
 }
 
+// ── Browser AI tools ─────────────────────────────────────────────────────────
+const TOOL_COLORS = {
+  claude:  '#d97706',
+  chatgpt: '#10a37f',
+  lovable: '#ff6b6b',
+  gemini:  '#4285f4',
+  copilot: '#7b61ff',
+}
+
+const TOOL_LABELS = {
+  claude:  'Claude.ai',
+  chatgpt: 'ChatGPT',
+  lovable: 'Lovable',
+  gemini:  'Gemini',
+  copilot: 'Copilot',
+}
+
+function formatMinutes(mins) {
+  if (!mins) return '—'
+  if (mins < 60) return `${mins}m`
+  const h = Math.floor(mins / 60)
+  const m = mins % 60
+  return m > 0 ? `${h}h ${m}m` : `${h}h`
+}
+
+function BrowserToolsSection({ data }) {
+  if (!data) return null
+  const noData = !data.tools?.length && !data.per_engineer?.length
+  const maxMins = Math.max(...(data.tools || []).map(t => t.total_minutes), 1)
+
+  return (
+    <div style={{ marginTop: 20 }}>
+      <div style={{
+        fontSize: 11, fontWeight: 500, color: 'var(--muted)',
+        textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 12,
+      }}>
+        Browser AI tools — this week
+      </div>
+      <div className="two-col">
+        {/* Left: time by tool */}
+        <div className="card" style={{ padding: '16px 20px' }}>
+          <div style={{
+            fontSize: 11, color: 'var(--muted)', marginBottom: 12,
+            textTransform: 'uppercase', letterSpacing: '0.05em',
+          }}>
+            Time by tool
+          </div>
+          {noData ? (
+            <div style={{ fontSize: 13, color: 'var(--muted)', textAlign: 'center', padding: '20px 0' }}>
+              No browser data yet — install telemetry app
+            </div>
+          ) : (data.tools || []).map(t => (
+            <div key={t.tool} style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 10 }}>
+              <div style={{
+                width: 20, height: 20, borderRadius: 4, flexShrink: 0,
+                background: TOOL_COLORS[t.tool] || '#888',
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+              }}>
+                <span style={{ fontSize: 10, color: '#fff', fontWeight: 600 }}>
+                  {(TOOL_LABELS[t.tool] || t.tool)[0].toUpperCase()}
+                </span>
+              </div>
+              <span style={{ fontSize: 13, minWidth: 80 }}>{TOOL_LABELS[t.tool] || t.tool}</span>
+              <div style={{ flex: 1, height: 5, background: 'var(--card2)', borderRadius: 3 }}>
+                <div style={{
+                  height: 5, borderRadius: 3,
+                  background: TOOL_COLORS[t.tool] || '#888',
+                  width: `${Math.round(t.total_minutes / maxMins * 100)}%`,
+                  transition: 'width 0.4s ease',
+                }} />
+              </div>
+              <span style={{ fontSize: 12, color: 'var(--muted)', minWidth: 40, textAlign: 'right' }}>
+                {formatMinutes(t.total_minutes)}
+              </span>
+            </div>
+          ))}
+        </div>
+
+        {/* Right: per engineer */}
+        <div className="card" style={{ padding: '16px 20px' }}>
+          <div style={{
+            fontSize: 11, color: 'var(--muted)', marginBottom: 12,
+            textTransform: 'uppercase', letterSpacing: '0.05em',
+          }}>
+            Per engineer
+          </div>
+          {noData ? (
+            <div style={{ fontSize: 13, color: 'var(--muted)', textAlign: 'center', padding: '20px 0' }}>
+              No data yet
+            </div>
+          ) : (data.per_engineer || []).map(eng => (
+            <div key={eng.name} style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 10 }}>
+              <div style={{
+                width: 32, height: 32, borderRadius: '50%', flexShrink: 0,
+                background: (eng.color || '#888') + '22',
+                color: eng.color || '#888',
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                fontSize: 12, fontWeight: 500,
+              }}>
+                {eng.name.split(' ').map(w => w[0]).join('').slice(0, 2).toUpperCase()}
+              </div>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontSize: 13, fontWeight: 500 }}>{eng.name}</div>
+                <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginTop: 3 }}>
+                  {(eng.tools || []).slice(0, 3).map(t => (
+                    <span key={t.tool} style={{
+                      fontSize: 11, padding: '1px 7px', borderRadius: 10,
+                      background: (TOOL_COLORS[t.tool] || '#888') + '22',
+                      color: TOOL_COLORS[t.tool] || '#888',
+                    }}>
+                      {TOOL_LABELS[t.tool] || t.tool} {formatMinutes(t.minutes)}
+                    </span>
+                  ))}
+                </div>
+              </div>
+              <span style={{ fontSize: 13, fontWeight: 500 }}>{formatMinutes(eng.total_minutes)}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  )
+}
+
 // ── Empty / no-collector state ────────────────────────────────────────────────
 function EmptyState({ week, departmentId, departmentName }) {
   if (departmentId !== 1) {
@@ -175,9 +299,10 @@ function EmptyState({ week, departmentId, departmentName }) {
 export default function AIUsageTab({ departmentId = 1, departmentName }) {
   const [week, setWeek]       = useState(null)
   const [year, setYear]       = useState(null)
-  const [report, setReport]   = useState(null)
-  const [loading, setLoading] = useState(true)
-  const [error, setError]     = useState(null)
+  const [report, setReport]           = useState(null)
+  const [browserData, setBrowserData] = useState(null)
+  const [loading, setLoading]         = useState(true)
+  const [error, setError]             = useState(null)
 
   useEffect(() => {
     api.get('/overview').then(d => {
@@ -194,10 +319,20 @@ export default function AIUsageTab({ departmentId = 1, departmentName }) {
     setLoading(true)
     setError(null)
     setReport(null)
-    const deptParam = departmentId !== 1 ? `&department_id=${departmentId}` : ''
-    api.get(`/ai-usage/weekly?week=${week}&year=${year}${deptParam}`)
-      .then(d => { setReport(d); setLoading(false) })
-      .catch(e => { console.error(e); setError('Failed to load AI usage data'); setLoading(false) })
+    setBrowserData(null)
+    const deptParam = `&department_id=${departmentId}`
+    Promise.all([
+      api.get(`/ai-usage/weekly?week=${week}&year=${year}${deptParam}`),
+      api.get(`/ai-usage/browser?week=${week}&year=${year}${deptParam}`),
+    ]).then(([weeklyData, browserResult]) => {
+      setReport(weeklyData)
+      setBrowserData(browserResult)
+      setLoading(false)
+    }).catch(e => {
+      console.error(e)
+      setError('Failed to load AI usage data')
+      setLoading(false)
+    })
   }, [week, year, departmentId])
 
   const navigate = (delta) => {
@@ -266,9 +401,16 @@ export default function AIUsageTab({ departmentId = 1, departmentName }) {
               sub={`${report.total_sessions ?? 0} session${report.total_sessions !== 1 ? 's' : ''}`}
               color="#c084fc"
             />
+            <AICard
+              label="Browser AI time"
+              value={browserData?.total_minutes ? formatMinutes(browserData.total_minutes) : '—'}
+              sub={`${browserData?.tools?.length || 0} tool${(browserData?.tools?.length || 0) !== 1 ? 's' : ''}`}
+              color="#7b61ff"
+            />
           </div>
 
           <DailyChart daily={report.daily || []} />
+          <BrowserToolsSection data={browserData} />
 
           <div className="two-col" style={{ marginTop: 20 }}>
             <BottleneckBars
