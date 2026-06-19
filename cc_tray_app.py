@@ -34,7 +34,7 @@ CREATE_NO_WINDOW = 0x08000000  # Windows: don't flash a console window
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-APP_VERSION     = "2.1"
+APP_VERSION     = "2.2"
 APP_NAME        = f"Claude Telemetry v{APP_VERSION}"
 HOME            = pathlib.Path.home()
 CLAUDE_DIR      = HOME / ".claude"
@@ -318,17 +318,43 @@ def _send_all(events: list, cfg: dict) -> tuple:
 # Browser URL detection
 # ---------------------------------------------------------------------------
 def _get_ai_tool_from_network() -> str | None:
-    """Detect active AI tool by querying Windows DNS client cache."""
+    """Detect active AI tool via socket DNS cache (primary) or PowerShell (fallback)."""
+    import socket, subprocess
+
+    # Method 1: socket.getaddrinfo — uses OS DNS cache, no PowerShell needed
+    _AI_HOSTS = [
+        ("chat.openai.com",       "chatgpt"),
+        ("api.openai.com",        "chatgpt"),
+        ("claude.ai",             "claude"),
+        ("api.anthropic.com",     "claude"),
+        ("lovable.dev",           "lovable"),
+        ("gemini.google.com",     "gemini"),
+        ("copilot.microsoft.com", "copilot"),
+    ]
     try:
-        import subprocess
+        socket.setdefaulttimeout(0.3)
+        for host, tool in _AI_HOSTS:
+            try:
+                if socket.getaddrinfo(host, 443, socket.AF_INET, socket.SOCK_STREAM):
+                    _log(f"browser match (socket): {tool} via {host}")
+                    return tool
+            except (socket.gaierror, socket.timeout, OSError):
+                pass
+    except Exception as e:
+        _log(f"socket detection error: {e}")
+    finally:
+        socket.setdefaulttimeout(None)
+
+    # Method 2: PowerShell Get-DnsClientCache fallback
+    try:
         ps = r"""
 $OutputEncoding = [System.Text.Encoding]::UTF8
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-Get-DnsClientCache | Select-Object -ExpandProperty Entry
+try { Get-DnsClientCache | Select-Object -ExpandProperty Entry } catch { Write-Output "" }
 """
         r = subprocess.run(
             ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps],
-            capture_output=True, timeout=5,
+            capture_output=True, timeout=10,
             creationflags=CREATE_NO_WINDOW,
         )
         try:
@@ -337,13 +363,17 @@ Get-DnsClientCache | Select-Object -ExpandProperty Entry
             output = r.stdout.decode("cp1251", errors="replace")
 
         dns_entries = output.strip().lower()
-        for pattern, tool in AI_NETWORK_PATTERNS.items():
-            if pattern in dns_entries:
-                return tool
-        return None
+        if dns_entries:
+            for pattern, tool in AI_NETWORK_PATTERNS.items():
+                if pattern in dns_entries:
+                    _log(f"browser match (dns): {tool}")
+                    return tool
+    except subprocess.TimeoutExpired:
+        _log("dns cache check timed out — skipping")
     except Exception as e:
-        _log(f"network detection error: {e}")
-        return None
+        _log(f"dns detection error: {e}")
+
+    return None
 
 
 def _get_active_browser_url() -> str | None:
@@ -351,7 +381,6 @@ def _get_active_browser_url() -> str | None:
     # Method 1: DNS cache — works regardless of window title language
     tool = _get_ai_tool_from_network()
     if tool:
-        _log(f"browser match (dns): {tool}")
         return tool
 
     # Method 2: window title fallback
