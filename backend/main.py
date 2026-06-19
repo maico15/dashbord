@@ -334,6 +334,15 @@ def init_db():
             session_count INTEGER NOT NULL DEFAULT 0,
             UNIQUE(engineer_id, tool, date)
         );
+
+        CREATE TABLE IF NOT EXISTS performance_scores (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            engineer_id INTEGER NOT NULL,
+            week        INTEGER NOT NULL,
+            year        INTEGER NOT NULL,
+            score       INTEGER NOT NULL CHECK(score >= 1 AND score <= 10),
+            UNIQUE(engineer_id, week, year)
+        );
     """)
     conn.commit()
     # Seed default departments
@@ -3591,6 +3600,41 @@ def receive_tool_session(data: ToolSessionRequest):
     conn.commit()
     conn.close()
     return {"ok": True}
+
+
+class ScoreRequest(BaseModel):
+    engineer_id: int
+    week:        int
+    year:        int
+    score:       int
+
+@app.post("/api/performance-scores")
+def save_performance_score(data: ScoreRequest, password: str = ""):
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    if not (1 <= data.score <= 10):
+        raise HTTPException(422, "Score must be between 1 and 10")
+    conn = get_db()
+    conn.execute("""
+        INSERT INTO performance_scores (engineer_id, week, year, score)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(engineer_id, week, year) DO UPDATE SET score = excluded.score
+    """, (data.engineer_id, data.week, data.year, data.score))
+    conn.commit()
+    conn.close()
+    return {"ok": True}
+
+@app.get("/api/performance-scores")
+def get_performance_scores(week: int, year: int):
+    conn = get_db()
+    c = conn.cursor()
+    c.execute(
+        "SELECT engineer_id, score FROM performance_scores WHERE week=? AND year=?",
+        (week, year)
+    )
+    rows = c.fetchall()
+    conn.close()
+    return {r["engineer_id"]: r["score"] for r in rows}
 
 
 @app.get("/api/telemetry/debug")

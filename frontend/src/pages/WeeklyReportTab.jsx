@@ -29,8 +29,37 @@ function weekDateRange(week, year) {
 
 // ── Engineer row ───────────────────────────────────────────────────────────────
 
-function EngineerRow({ engineer }) {
+function EngineerRow({ engineer, score, onScoreChange, week, year }) {
   const initials = engineer.name.split(' ').slice(0, 2).map(w => w[0]).join('')
+  const [localScore, setLocalScore] = useState(score || '')
+  const [saving, setSaving]         = useState(false)
+  const [saved, setSaved]           = useState(false)
+
+  useEffect(() => {
+    setLocalScore(score || '')
+  }, [score, week, year])
+
+  const handleSave = async (val) => {
+    const num = parseInt(val)
+    if (!val || isNaN(num) || num < 1 || num > 10) return
+    setSaving(true)
+    try {
+      await api.post('/performance-scores?password=admin123', {
+        engineer_id: engineer.id,
+        week,
+        year,
+        score: num,
+      })
+      onScoreChange(num)
+      setSaved(true)
+      setTimeout(() => setSaved(false), 1500)
+    } catch (e) {
+      console.error('Score save error:', e)
+    } finally {
+      setSaving(false)
+    }
+  }
+
   return (
     <div style={{ marginBottom: 32 }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 14, marginBottom: 12 }}>
@@ -43,7 +72,7 @@ function EngineerRow({ engineer }) {
         }}>
           {initials}
         </div>
-        <div>
+        <div style={{ flex: 1 }}>
           <div style={{ display: 'flex', alignItems: 'baseline', gap: 10 }}>
             <span style={{ fontSize: 16, fontWeight: 700 }}>{engineer.name}</span>
             {engineer.position && (
@@ -78,6 +107,35 @@ function EngineerRow({ engineer }) {
             )}
           </div>
         </div>
+
+        {/* Score input */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
+          <span style={{ fontSize: 12, color: 'var(--muted)' }}>Score</span>
+          <input
+            type="number"
+            min="1"
+            max="10"
+            value={localScore}
+            onChange={e => setLocalScore(e.target.value)}
+            onBlur={e => handleSave(e.target.value)}
+            onKeyDown={e => e.key === 'Enter' && handleSave(e.target.value)}
+            placeholder="—"
+            style={{
+              width: 52,
+              textAlign: 'center',
+              fontSize: 15,
+              fontWeight: 600,
+              padding: '4px 6px',
+              borderRadius: 8,
+              border: `1.5px solid ${localScore ? engineer.color : 'var(--border)'}`,
+              background: localScore ? `${engineer.color}15` : 'var(--card)',
+              color: localScore ? engineer.color : 'var(--muted)',
+              outline: 'none',
+            }}
+          />
+          {saving && <span style={{ fontSize: 11, color: 'var(--muted)' }}>...</span>}
+          {saved  && <span style={{ fontSize: 11, color: 'var(--success)' }}>✓</span>}
+        </div>
       </div>
       <div style={{ paddingLeft: 58 }}>
         <EngineerWeeklyBlock engineer={engineer} />
@@ -97,6 +155,7 @@ export default function WeeklyReportTab() {
   const [generating, setGenerating] = useState(false)
   const [genError, setGenError]     = useState(null)
   const [genDone, setGenDone]       = useState(false)
+  const [scores, setScores]         = useState({})
 
   useEffect(() => {
     api.get('/overview').then(d => {
@@ -117,6 +176,13 @@ export default function WeeklyReportTab() {
     api.get(`/reports/weekly?week=${week}&year=${year}`)
       .then(d => { setReport(d); setLoading(false) })
       .catch(e => { console.error(e); setError('Failed to load weekly report'); setLoading(false) })
+  }, [week, year])
+
+  useEffect(() => {
+    if (!week || !year) return
+    api.get(`/performance-scores?week=${week}&year=${year}`)
+      .then(setScores)
+      .catch(() => {})
   }, [week, year])
 
   const navigate = (delta) => {
@@ -142,13 +208,11 @@ export default function WeeklyReportTab() {
       const toDate   = fmtDate(fri)
 
       await Promise.all(report.engineers.map(async (eng) => {
-        // 1. Fetch daily reports for this engineer for the week
         const dailyReports = await api.get(
           `/reports/engineer/${eng.id}?from_date=${fromDate}&to_date=${toDate}`
         )
         if (!dailyReports || dailyReports.length === 0) return
 
-        // 2. Flatten all sections
         const allCompleted  = dailyReports.flatMap(r => r.completed      || [])
         const allInvisible  = dailyReports.flatMap(r => r.invisible_work || [])
         const allNext       = dailyReports.flatMap(r => r.next_tasks     || [])
@@ -156,7 +220,6 @@ export default function WeeklyReportTab() {
 
         if (allCompleted.length === 0 && allInvisible.length === 0) return
 
-        // 3. Call backend proxy — API key stays server-side
         const res = await api.post(
           '/ai/weekly-summary',
           {
@@ -172,11 +235,9 @@ export default function WeeklyReportTab() {
         const summary = res.summary
         if (!summary) return
 
-        // 4. Save summary to weekly_tasks.tasks via POST /api/weekly-tasks
         await api.post('/weekly-tasks', { engineer_id: eng.id, week, year, tasks: summary }, pw)
       }))
 
-      // 5. Reload report so "Weekly tasks" sections refresh
       const updated = await api.get(`/reports/weekly?week=${week}&year=${year}`)
       setReport(updated)
       setGenDone(true)
@@ -257,7 +318,16 @@ export default function WeeklyReportTab() {
 
       {!loading && !error && report && (
         <div>
-          {report.engineers.map(eng => <EngineerRow key={eng.id} engineer={eng} />)}
+          {report.engineers.map(eng => (
+            <EngineerRow
+              key={eng.id}
+              engineer={eng}
+              score={scores[eng.id] || ''}
+              onScoreChange={(val) => setScores(prev => ({ ...prev, [eng.id]: val }))}
+              week={week}
+              year={year}
+            />
+          ))}
         </div>
       )}
     </div>
