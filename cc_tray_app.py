@@ -34,7 +34,7 @@ CREATE_NO_WINDOW = 0x08000000  # Windows: don't flash a console window
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-APP_VERSION     = "1.9"
+APP_VERSION     = "2.0"
 APP_NAME        = f"Claude Telemetry v{APP_VERSION}"
 HOME            = pathlib.Path.home()
 CLAUDE_DIR      = HOME / ".claude"
@@ -91,6 +91,8 @@ AI_TITLE_KEYWORDS = [
 ]
 
 BROWSER_SESSIONS_PATH = HOME / ".claude" / "browser_sessions.jsonl"
+BROWSER_BUFFER_PATH   = HOME / ".claude" / "browser_sessions_buffer.jsonl"
+HEARTBEAT_INTERVAL    = 600  # seconds
 
 _REG_RUN = r"Software\Microsoft\Windows\CurrentVersion\Run"
 
@@ -151,6 +153,32 @@ def _save_buffer(events: list) -> None:
 def _append_buffer(events: list) -> None:
     existing = _load_buffer()
     _save_buffer(existing + events)
+
+
+def _load_browser_buffer() -> list:
+    try:
+        events = []
+        for line in BROWSER_BUFFER_PATH.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line:
+                events.append(json.loads(line))
+        return events
+    except Exception:
+        return []
+
+def _save_browser_buffer(events: list) -> None:
+    try:
+        BROWSER_BUFFER_PATH.parent.mkdir(parents=True, exist_ok=True)
+        BROWSER_BUFFER_PATH.write_text(
+            "\n".join(json.dumps(e) for e in events), encoding="utf-8"
+        )
+    except Exception:
+        pass
+
+def _append_browser_buffer(event: dict) -> None:
+    existing = _load_browser_buffer()
+    existing.append(event)
+    _save_browser_buffer(existing)
 
 # ---------------------------------------------------------------------------
 # Parsing
@@ -367,25 +395,45 @@ public class WinEnum {
 
 
 def _send_browser_session(cfg: dict, tool: str, duration_sec: int, date_str: str) -> bool:
-    """Send a completed browser AI-tool session to the dashboard."""
+    """Send browser AI tool session to dashboard. Buffer on failure."""
+    event = {"tool": tool, "duration_sec": duration_sec, "date": date_str}
     try:
         url = cfg["endpoint"].rstrip("/") + "/api/telemetry/tool-sessions"
-        payload = {
-            "engineer_id":  cfg["engineer_id"],
-            "secret":       cfg["secret"],
-            "tool":         tool,
-            "duration_sec": duration_sec,
-            "date":         date_str,
-        }
+        payload = {"engineer_id": cfg["engineer_id"], "secret": cfg["secret"], **event}
         r = requests.post(url, json=payload, timeout=REQUEST_TIMEOUT)
         if r.status_code == 200:
-            _log(f"browser session: tool={tool} duration={duration_sec}s")
+            _log(f"browser session sent: tool={tool} duration={duration_sec}s")
+            _flush_browser_buffer(cfg)
             return True
-        _log(f"browser session error: {r.status_code}")
+        _log(f"browser session error {r.status_code}: buffering")
+        _append_browser_buffer(event)
         return False
     except Exception as e:
-        _log(f"browser session send error: {e}")
+        _log(f"browser session send error: {e} — buffering")
+        _append_browser_buffer(event)
         return False
+
+
+def _flush_browser_buffer(cfg: dict) -> None:
+    """Try to send buffered browser sessions."""
+    buffered = _load_browser_buffer()
+    if not buffered:
+        return
+    sent = []
+    for event in buffered:
+        try:
+            url = cfg["endpoint"].rstrip("/") + "/api/telemetry/tool-sessions"
+            payload = {"engineer_id": cfg["engineer_id"], "secret": cfg["secret"], **event}
+            r = requests.post(url, json=payload, timeout=REQUEST_TIMEOUT)
+            if r.status_code == 200:
+                sent.append(event)
+                _log(f"browser buffer flushed: tool={event['tool']} duration={event['duration_sec']}s")
+        except Exception:
+            pass
+    remaining = [e for e in buffered if e not in sent]
+    _save_browser_buffer(remaining)
+    if sent:
+        _log(f"browser buffer: flushed {len(sent)}, remaining {len(remaining)}")
 
 
 # ---------------------------------------------------------------------------
@@ -440,10 +488,11 @@ def _make_icon(color=_C_BLUE) -> Image.Image:
 class TelemetryTrayApp:
 
     def __init__(self):
-        self._stop           = threading.Event()
-        self._poll_thread    = None
-        self._browser_thread = None
-        self._settings_win   = None
+        self._stop              = threading.Event()
+        self._poll_thread       = None
+        self._browser_thread    = None
+        self._heartbeat_thread  = None
+        self._settings_win      = None
         self._status         = "Initializing..."
         self._load_cfg()
 
@@ -474,7 +523,10 @@ class TelemetryTrayApp:
         self._browser_thread = threading.Thread(
             target=self._browser_loop, name="browser-track", daemon=True)
         self._browser_thread.start()
-        _log("polling started (claude code + browser)")
+        self._heartbeat_thread = threading.Thread(
+            target=self._heartbeat_loop, name="heartbeat", daemon=True)
+        self._heartbeat_thread.start()
+        _log("polling started (claude code + browser + heartbeat)")
 
     def _stop_poll(self) -> None:
         self._stop.set()
@@ -533,6 +585,24 @@ class TelemetryTrayApp:
                 _log(f"browser loop error: {e}")
 
             self._stop.wait(BROWSER_POLL_INTERVAL)
+
+    def _heartbeat_loop(self) -> None:
+        """Ping backend every 10 minutes to prevent Render free plan sleep."""
+        while not self._stop.is_set():
+            try:
+                cfg = self._load_cfg()
+                endpoint = cfg.get("endpoint", DEFAULT_ENDPOINT)
+                r = requests.get(
+                    f"{endpoint.rstrip('/')}/api/overview",
+                    timeout=10,
+                )
+                if r.status_code == 200:
+                    _log("heartbeat ok")
+                else:
+                    _log(f"heartbeat {r.status_code}")
+            except Exception as e:
+                _log(f"heartbeat error: {e}")
+            self._stop.wait(HEARTBEAT_INTERVAL)
 
     def _do_cycle(self) -> None:
         cfg = self._load_cfg()
