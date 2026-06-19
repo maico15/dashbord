@@ -34,7 +34,7 @@ CREATE_NO_WINDOW = 0x08000000  # Windows: don't flash a console window
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-APP_VERSION           = "2.4"
+APP_VERSION           = "2.5"
 APP_NAME              = f"Claude Telemetry v{APP_VERSION}"
 GITHUB_REPO           = "maico15/dashbord"
 UPDATE_CHECK_INTERVAL = 3600  # seconds
@@ -555,7 +555,7 @@ public class WinEnum {
             output = r.stdout.decode("cp1251", errors="replace")
 
         titles = output.strip().splitlines()
-        browser_keywords = ["Google Chrome", "Microsoft Edge", "Firefox", "Opera", "Brave"]
+        browser_keywords = ["Google Chrome", "Microsoft Edge", "Firefox", "Firefox Developer Edition", "Opera", "Brave"]
         browser_titles = [t for t in titles if any(b in t for b in browser_keywords)]
 
         _log(f"browser scan: {len(titles)} windows, {len(browser_titles)} browser windows")
