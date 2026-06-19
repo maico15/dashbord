@@ -34,7 +34,7 @@ CREATE_NO_WINDOW = 0x08000000  # Windows: don't flash a console window
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-APP_VERSION           = "2.5"
+APP_VERSION           = "2.6"
 APP_NAME              = f"Claude Telemetry v{APP_VERSION}"
 GITHUB_REPO           = "maico15/dashbord"
 UPDATE_CHECK_INTERVAL = 3600  # seconds
@@ -590,7 +590,7 @@ def _send_browser_session(cfg: dict, tool: str, duration_sec: int, date_str: str
             _log(f"browser session sent: tool={tool} duration={duration_sec}s")
             _flush_browser_buffer(cfg)
             return True
-        _log(f"browser session error {r.status_code}: buffering")
+        _log(f"browser session error {r.status_code} (engineer_id={cfg.get('engineer_id')}): {r.text[:120]}")
         _append_browser_buffer(event)
         return False
     except Exception as e:
@@ -759,7 +759,10 @@ class TelemetryTrayApp:
                                 _send_browser_session(cfg, current_tool, dur, date_str)
                         current_tool  = tool
                         session_start = now
-                    last_seen = now
+                        last_seen     = now
+                    else:
+                        # Same tool — accumulate duration
+                        last_seen = now
                 else:
                     # No AI tool active — flush if gap exceeded
                     if current_tool and session_start and last_seen:
