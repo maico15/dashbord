@@ -34,7 +34,7 @@ CREATE_NO_WINDOW = 0x08000000  # Windows: don't flash a console window
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-APP_VERSION     = "2.2"
+APP_VERSION     = "2.3"
 APP_NAME        = f"Claude Telemetry v{APP_VERSION}"
 HOME            = pathlib.Path.home()
 CLAUDE_DIR      = HOME / ".claude"
@@ -54,40 +54,121 @@ BROWSER_POLL_INTERVAL = 30   # seconds
 BROWSER_SESSION_GAP   = 120  # seconds of inactivity = new session
 
 AI_TOOLS = {
-    "claude.ai":             "claude",
-    "chat.openai.com":       "chatgpt",
-    "chatgpt.com":           "chatgpt",
-    "lovable.dev":           "lovable",
-    "app.lovable.dev":       "lovable",
-    "gemini.google.com":     "gemini",
-    "copilot.microsoft.com": "copilot",
+    "chat.openai.com":        "chatgpt",
+    "chatgpt.com":            "chatgpt",
+    "claude.ai":              "claude",
+    "anthropic.com":          "claude",
+    "gemini.google.com":      "gemini",
+    "aistudio.google.com":    "gemini",
+    "ai.google.dev":          "gemini",
+    "copilot.microsoft.com":  "copilot",
+    "perplexity.ai":          "perplexity",
+    "grok.com":               "grok",
+    "meta.ai":                "meta",
+    "chat.deepseek.com":      "deepseek",
+    "lovable.dev":            "lovable",
+    "cursor.com":             "cursor",
+    "cursor.sh":              "cursor",
+    "v0.dev":                 "v0",
+    "bolt.new":               "bolt",
+    "replit.com":             "replit",
+    "windsurf.ai":            "windsurf",
+    "fireflies.ai":           "fireflies",
+    "midjourney.com":         "midjourney",
+    "runwayml.com":           "runway",
+    "notion.so":              "notion",
 }
 
 # DNS cache patterns — primary detection method
 AI_NETWORK_PATTERNS = {
-    "openai.com":            "chatgpt",
-    "chatgpt.com":           "chatgpt",
-    "claude.ai":             "claude",
-    "anthropic.com":         "claude",
-    "lovable.dev":           "lovable",
-    "gemini.google.com":     "gemini",
-    "bard.google.com":       "gemini",
-    "copilot.microsoft.com": "copilot",
-    "perplexity.ai":         "perplexity",
+    # ChatGPT / OpenAI
+    "chat.openai.com":           "chatgpt",
+    "chatgpt.com":               "chatgpt",
+    "api.openai.com":            "chatgpt",
+    "openai.com":                "chatgpt",
+    # Claude / Anthropic
+    "claude.ai":                 "claude",
+    "api.anthropic.com":         "claude",
+    "anthropic.com":             "claude",
+    # Gemini / Google AI
+    "gemini.google.com":         "gemini",
+    "aistudio.google.com":       "gemini",
+    "ai.google.dev":             "gemini",
+    "bard.google.com":           "gemini",
+    "makersuite.google.com":     "gemini",
+    # Microsoft Copilot
+    "copilot.microsoft.com":     "copilot",
+    "copilot.cloud.microsoft":   "copilot",
+    # Perplexity
+    "perplexity.ai":             "perplexity",
+    "www.perplexity.ai":         "perplexity",
+    # Grok (xAI)
+    "grok.com":                  "grok",
+    "grok.x.ai":                 "grok",
+    # Meta AI
+    "meta.ai":                   "meta",
+    "ai.meta.com":               "meta",
+    # DeepSeek
+    "chat.deepseek.com":         "deepseek",
+    "deepseek.com":              "deepseek",
+    # Lovable
+    "lovable.dev":               "lovable",
+    "app.lovable.dev":           "lovable",
+    # Cursor
+    "cursor.com":                "cursor",
+    "cursor.sh":                 "cursor",
+    "api2.cursor.sh":            "cursor",
+    # GitHub Copilot
+    "copilot.github.com":        "github_copilot",
+    # Bolt (StackBlitz)
+    "bolt.new":                  "bolt",
+    "stackblitz.com":            "bolt",
+    # v0 (Vercel)
+    "v0.dev":                    "v0",
+    # Replit AI
+    "replit.com":                "replit",
+    "replit.ai":                 "replit",
+    # Windsurf / Codeium
+    "windsurf.ai":               "windsurf",
+    "codeium.com":               "windsurf",
+    # Midjourney
+    "midjourney.com":            "midjourney",
+    "www.midjourney.com":        "midjourney",
+    # Runway
+    "runwayml.com":              "runway",
+    "app.runwayml.com":          "runway",
+    # Fireflies
+    "fireflies.ai":              "fireflies",
+    "app.fireflies.ai":          "fireflies",
+    # Notion AI
+    "notion.so":                 "notion",
+    "notion.com":                "notion",
 }
 
 # Window title keywords (case-insensitive) — fallback after DNS
 AI_TITLE_KEYWORDS = [
-    ("chatgpt",    "chatgpt"),
-    ("openai",     "chatgpt"),
-    ("claude",     "claude"),
-    ("lovable",    "lovable"),
-    ("gemini",     "gemini"),
-    ("copilot",    "copilot"),
-    ("perplexity", "perplexity"),
-    ("cursor",     "cursor"),
-    ("v0.dev",     "v0"),
-    ("bolt.new",   "bolt"),
+    ("chatgpt",     "chatgpt"),
+    ("openai",      "chatgpt"),
+    ("claude",      "claude"),
+    ("anthropic",   "claude"),
+    ("gemini",      "gemini"),
+    ("google ai",   "gemini"),
+    ("ai studio",   "gemini"),
+    ("copilot",     "copilot"),
+    ("perplexity",  "perplexity"),
+    ("grok",        "grok"),
+    ("meta ai",     "meta"),
+    ("deepseek",    "deepseek"),
+    ("lovable",     "lovable"),
+    ("cursor",      "cursor"),
+    ("v0.dev",      "v0"),
+    ("bolt.new",    "bolt"),
+    ("replit",      "replit"),
+    ("windsurf",    "windsurf"),
+    ("midjourney",  "midjourney"),
+    ("runway",      "runway"),
+    ("fireflies",   "fireflies"),
+    ("notion",      "notion"),
 ]
 
 BROWSER_SESSIONS_PATH = HOME / ".claude" / "browser_sessions.jsonl"
@@ -324,12 +405,29 @@ def _get_ai_tool_from_network() -> str | None:
     # Method 1: socket.getaddrinfo — uses OS DNS cache, no PowerShell needed
     _AI_HOSTS = [
         ("chat.openai.com",       "chatgpt"),
-        ("api.openai.com",        "chatgpt"),
+        ("chatgpt.com",           "chatgpt"),
         ("claude.ai",             "claude"),
         ("api.anthropic.com",     "claude"),
-        ("lovable.dev",           "lovable"),
         ("gemini.google.com",     "gemini"),
+        ("aistudio.google.com",   "gemini"),
+        ("ai.google.dev",         "gemini"),
         ("copilot.microsoft.com", "copilot"),
+        ("perplexity.ai",         "perplexity"),
+        ("grok.com",              "grok"),
+        ("meta.ai",               "meta"),
+        ("chat.deepseek.com",     "deepseek"),
+        ("lovable.dev",           "lovable"),
+        ("cursor.com",            "cursor"),
+        ("cursor.sh",             "cursor"),
+        ("v0.dev",                "v0"),
+        ("bolt.new",              "bolt"),
+        ("replit.com",            "replit"),
+        ("windsurf.ai",           "windsurf"),
+        ("copilot.github.com",    "github_copilot"),
+        ("fireflies.ai",          "fireflies"),
+        ("midjourney.com",        "midjourney"),
+        ("runwayml.com",          "runway"),
+        ("notion.so",             "notion"),
     ]
     try:
         socket.setdefaulttimeout(0.3)
