@@ -34,8 +34,10 @@ CREATE_NO_WINDOW = 0x08000000  # Windows: don't flash a console window
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-APP_VERSION     = "2.3"
-APP_NAME        = f"Claude Telemetry v{APP_VERSION}"
+APP_VERSION           = "2.4"
+APP_NAME              = f"Claude Telemetry v{APP_VERSION}"
+GITHUB_REPO           = "maico15/dashbord"
+UPDATE_CHECK_INTERVAL = 3600  # seconds
 HOME            = pathlib.Path.home()
 CLAUDE_DIR      = HOME / ".claude"
 CONFIG_PATH     = HOME / ".claude" / "telemetry_config.json"
@@ -194,6 +196,34 @@ def _log(msg: str) -> None:
             f.write(f"{ts}  {msg}\n")
     except Exception:
         pass
+
+def _check_for_update():
+    """Check GitHub Releases for a newer version.
+    Returns (latest_version, download_url) or None."""
+    try:
+        import urllib.request, json as _json
+        url = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+        req = urllib.request.Request(url, headers={"User-Agent": "cc-telemetry-tray"})
+        with urllib.request.urlopen(req, timeout=10) as r:
+            data = _json.load(r)
+        latest = data.get("tag_name", "").lstrip("v")
+        if not latest:
+            return None
+        try:
+            from packaging.version import Version
+            newer = Version(latest) > Version(APP_VERSION)
+        except Exception:
+            newer = latest > APP_VERSION
+        if not newer:
+            return None
+        for asset in data.get("assets", []):
+            if asset["name"].endswith(".exe"):
+                return latest, asset["browser_download_url"]
+        return None
+    except Exception as e:
+        _log(f"update check error: {e}")
+        return None
+
 
 def _ensure_single_instance() -> None:
     """Kill previous instance if running, then write our PID."""
@@ -647,8 +677,10 @@ class TelemetryTrayApp:
         self._poll_thread       = None
         self._browser_thread    = None
         self._heartbeat_thread  = None
+        self._update_thread     = None
+        self._pending_update    = None
         self._settings_win      = None
-        self._status         = "Initializing..."
+        self._status            = "Initializing..."
         self._load_cfg()
 
     def _load_cfg(self) -> dict:
@@ -681,7 +713,10 @@ class TelemetryTrayApp:
         self._heartbeat_thread = threading.Thread(
             target=self._heartbeat_loop, name="heartbeat", daemon=True)
         self._heartbeat_thread.start()
-        _log("polling started (claude code + browser + heartbeat)")
+        self._update_thread = threading.Thread(
+            target=self._update_loop, name="updater", daemon=True)
+        self._update_thread.start()
+        _log("polling started (claude code + browser + heartbeat + updater)")
 
     def _stop_poll(self) -> None:
         self._stop.set()
@@ -758,6 +793,73 @@ class TelemetryTrayApp:
             except Exception as e:
                 _log(f"heartbeat error: {e}")
             self._stop.wait(HEARTBEAT_INTERVAL)
+
+    def _update_loop(self) -> None:
+        """Check for updates hourly, starting 30s after launch."""
+        self._stop.wait(30)
+        while not self._stop.is_set():
+            result = _check_for_update()
+            if result:
+                latest_ver, download_url = result
+                _log(f"update available: v{latest_ver}")
+                self._set_status(f"Update v{latest_ver} available — right-click to install")
+                self._pending_update = (latest_ver, download_url)
+                try:
+                    self._icon.update_menu()
+                except Exception:
+                    pass
+            self._stop.wait(UPDATE_CHECK_INTERVAL)
+
+    def _on_install_update(self, *_) -> None:
+        if not self._pending_update:
+            return
+        latest_ver, download_url = self._pending_update
+        self._pending_update = None
+        try:
+            self._icon.update_menu()
+        except Exception:
+            pass
+        threading.Thread(
+            target=self._do_update,
+            args=(download_url, latest_ver),
+            daemon=True,
+        ).start()
+
+    def _do_update(self, download_url: str, latest_ver: str) -> None:
+        """Download new exe and replace via batch script, then restart."""
+        import tempfile, sys, urllib.request
+        _log(f"downloading update v{latest_ver}...")
+        self._set_status(f"Downloading v{latest_ver}...")
+        try:
+            tmp_dir = pathlib.Path(tempfile.gettempdir())
+            new_exe = tmp_dir / "cc_telemetry_tray_new.exe"
+            req = urllib.request.Request(
+                download_url, headers={"User-Agent": "cc-telemetry-tray"}
+            )
+            with urllib.request.urlopen(req, timeout=120) as r:
+                new_exe.write_bytes(r.read())
+            _log(f"downloaded to {new_exe}")
+
+            current_exe = pathlib.Path(sys.executable).resolve()
+            batch = tmp_dir / "cc_update.bat"
+            batch.write_text(
+                "@echo off\r\n"
+                "timeout /t 2 /nobreak >nul\r\n"
+                f"move /y \"{new_exe}\" \"{current_exe}\"\r\n"
+                f"start \"\" \"{current_exe}\"\r\n"
+                "del \"%~f0\"\r\n",
+                encoding="ascii",
+            )
+            import subprocess
+            subprocess.Popen(
+                ["cmd.exe", "/c", str(batch)],
+                creationflags=CREATE_NO_WINDOW,
+            )
+            _log("updater launched, quitting...")
+            self.root.after(0, self._on_quit)
+        except Exception as e:
+            _log(f"update failed: {e}")
+            self._set_status(f"Update failed: {e}")
 
     def _do_cycle(self) -> None:
         cfg = self._load_cfg()
@@ -1113,6 +1215,14 @@ class TelemetryTrayApp:
         menu = pystray.Menu(
             pystray.MenuItem("Run Now",           self._on_run_now),
             pystray.MenuItem("View Log",          self._on_view_log),
+            pystray.MenuItem(
+                lambda item: (
+                    f"Install update v{self._pending_update[0]}"
+                    if self._pending_update else "No updates"
+                ),
+                self._on_install_update,
+                visible=lambda item: self._pending_update is not None,
+            ),
             pystray.MenuItem("Start with Windows",
                              self._on_toggle_autostart,
                              checked=lambda item: _autostart_enabled()),
