@@ -34,7 +34,7 @@ CREATE_NO_WINDOW = 0x08000000  # Windows: don't flash a console window
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-APP_VERSION     = "2.0"
+APP_VERSION     = "2.1"
 APP_NAME        = f"Claude Telemetry v{APP_VERSION}"
 HOME            = pathlib.Path.home()
 CLAUDE_DIR      = HOME / ".claude"
@@ -92,6 +92,7 @@ AI_TITLE_KEYWORDS = [
 
 BROWSER_SESSIONS_PATH = HOME / ".claude" / "browser_sessions.jsonl"
 BROWSER_BUFFER_PATH   = HOME / ".claude" / "browser_sessions_buffer.jsonl"
+LOCK_FILE             = HOME / ".claude" / "telemetry_tray.lock"
 HEARTBEAT_INTERVAL    = 600  # seconds
 
 _REG_RUN = r"Software\Microsoft\Windows\CurrentVersion\Run"
@@ -112,6 +113,33 @@ def _log(msg: str) -> None:
             f.write(f"{ts}  {msg}\n")
     except Exception:
         pass
+
+def _ensure_single_instance() -> None:
+    """Kill previous instance if running, then write our PID."""
+    import os, subprocess as _sp
+
+    if LOCK_FILE.exists():
+        try:
+            old_pid = int(LOCK_FILE.read_text().strip())
+            if old_pid != os.getpid():
+                try:
+                    _sp.run(
+                        ["taskkill", "/PID", str(old_pid), "/F"],
+                        capture_output=True, timeout=5,
+                    )
+                    _log(f"killed previous instance pid={old_pid}")
+                    time.sleep(1)
+                except Exception as e:
+                    _log(f"could not kill pid={old_pid}: {e}")
+        except Exception:
+            pass
+
+    try:
+        LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
+        LOCK_FILE.write_text(str(os.getpid()))
+        _log(f"instance started pid={os.getpid()}")
+    except Exception as e:
+        _log(f"lock file error: {e}")
 
 # ---------------------------------------------------------------------------
 # Seen / buffer helpers
@@ -716,6 +744,11 @@ class TelemetryTrayApp:
         self.root.after(0, self._open_settings)
 
     def _on_quit(self, *_) -> None:
+        try:
+            if LOCK_FILE.exists():
+                LOCK_FILE.unlink()
+        except Exception:
+            pass
         self._stop_poll()
         self._icon.stop()
         self.root.quit()
@@ -946,6 +979,7 @@ class TelemetryTrayApp:
         tk.Button(btn_row, text="Close",    command=win.destroy,             width=10).pack(side="left", padx=4)
 
     def run(self) -> None:
+        _ensure_single_instance()
         self.root = tk.Tk()
         self.root.withdraw()
 
