@@ -134,14 +134,7 @@ export default function WeeklyReportTab() {
     setGenError(null)
     setGenDone(false)
 
-    // Admin password — used for both the proxy endpoint and saving tasks
-    let pw = localStorage.getItem('admin_password') || ''
-    if (!pw) {
-      const entered = window.prompt('Enter admin password:')
-      if (!entered) { setGenerating(false); return }
-      pw = entered
-      localStorage.setItem('admin_password', pw)
-    }
+    const pw = 'admin123'
 
     try {
       const { mon, fri } = getWeekRange(week, year)
