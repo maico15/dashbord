@@ -4890,34 +4890,6 @@ def reset_seed(x_admin_password: str = Header(default="")):
     return {"status": "ok"}
 
 
-@app.post("/api/admin/migrate-engineer")
-def migrate_engineer(from_id: int, to_id: int, password: str = ""):
-    if password != ADMIN_PASSWORD:
-        raise HTTPException(403, "Unauthorized")
-    conn = get_db()
-    tables = [
-        "daily_reports",
-        "weekly_tasks",
-        "ai_usage_events",
-        "ai_tool_sessions",
-        "performance_scores",
-        "telemetry_events",
-    ]
-    results = {}
-    for table in tables:
-        try:
-            cur = conn.execute(
-                f"UPDATE {table} SET engineer_id=? WHERE engineer_id=?",
-                (to_id, from_id)
-            )
-            results[table] = cur.rowcount
-        except Exception as e:
-            results[table] = f"error: {e}"
-    conn.commit()
-    conn.close()
-    return {"ok": True, "migrated": results}
-
-
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000, reload=True)
