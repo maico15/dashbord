@@ -34,7 +34,7 @@ CREATE_NO_WINDOW = 0x08000000  # Windows: don't flash a console window
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-APP_VERSION           = "2.9"
+APP_VERSION           = "2.9.1"
 APP_NAME              = f"Claude Telemetry v{APP_VERSION}"
 GITHUB_REPO           = "maico15/dashbord"
 UPDATE_CHECK_INTERVAL = 3600  # seconds
@@ -869,6 +869,17 @@ class TelemetryTrayApp:
                 "del \"%~f0\"\r\n",
                 encoding="ascii",
             )
+            # Clean up old PyInstaller temp folders to prevent DLL conflicts
+            import glob, shutil
+            temp_dir = os.environ.get("TEMP", os.path.join(
+                os.path.expanduser("~"), "AppData", "Local", "Temp"))
+            for mei_dir in glob.glob(os.path.join(temp_dir, "_MEI*")):
+                try:
+                    shutil.rmtree(mei_dir, ignore_errors=True)
+                    _log(f"update: cleaned {mei_dir}")
+                except Exception:
+                    pass
+
             import subprocess
             subprocess.Popen(
                 ["cmd.exe", "/c", str(batch)],
@@ -1594,5 +1605,29 @@ class TelemetryTrayApp:
         self.root.mainloop()
 
 
+def _cleanup_mei_folders() -> None:
+    """Remove stale PyInstaller _MEI temp folders on startup."""
+    import glob, shutil
+    try:
+        temp_dir = os.environ.get("TEMP", os.path.join(
+            os.path.expanduser("~"), "AppData", "Local", "Temp"))
+        current_mei = getattr(sys, "_MEIPASS", None)
+        cleaned = 0
+        for mei_dir in glob.glob(os.path.join(temp_dir, "_MEI*")):
+            # Skip the folder belonging to THIS running instance
+            if current_mei and os.path.abspath(mei_dir) == os.path.abspath(current_mei):
+                continue
+            try:
+                shutil.rmtree(mei_dir, ignore_errors=True)
+                cleaned += 1
+            except Exception:
+                pass
+        if cleaned:
+            _log(f"startup: cleaned {cleaned} stale _MEI folders")
+    except Exception as e:
+        _log(f"startup cleanup error: {e}")
+
+
 if __name__ == "__main__":
+    _cleanup_mei_folders()
     TelemetryTrayApp().run()
