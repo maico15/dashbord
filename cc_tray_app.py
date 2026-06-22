@@ -34,7 +34,7 @@ CREATE_NO_WINDOW = 0x08000000  # Windows: don't flash a console window
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-APP_VERSION           = "2.6"
+APP_VERSION           = "2.7"
 APP_NAME              = f"Claude Telemetry v{APP_VERSION}"
 GITHUB_REPO           = "maico15/dashbord"
 UPDATE_CHECK_INTERVAL = 3600  # seconds
@@ -988,6 +988,234 @@ class TelemetryTrayApp:
         _set_autostart(not _autostart_enabled())
         self._icon.update_menu()
 
+    def _on_stats(self, *_) -> None:
+        self.root.after(0, self._open_stats_window)
+
+    def _open_stats_window(self) -> None:
+        win = tk.Toplevel(self.root)
+        win.title("My Stats")
+        win.geometry("420x480")
+        win.resizable(False, False)
+        win.attributes("-topmost", True)
+        win.configure(bg="#1e1e1e")
+
+        BG      = "#1e1e1e"
+        FG      = "#d4d4d4"
+        FG_DIM  = "#888888"
+        C_BLUE  = "#00cfff"
+        C_PURPLE= "#7b61ff"
+        C_GREEN = "#34c759"
+        FONT    = ("Segoe UI", 9)
+        FONT_B  = ("Segoe UI", 9, "bold")
+        FONT_H  = ("Segoe UI", 10, "bold")
+
+        # ── header bar ────────────────────────────────────────────────
+        bar = tk.Frame(win, bg=BG, pady=6, padx=12)
+        bar.pack(fill="x")
+
+        lbl_name = tk.Label(bar, text="", font=FONT_H, bg=BG, fg=FG, anchor="w")
+        lbl_name.pack(side="left")
+
+        lbl_updated = tk.Label(bar, text="", font=FONT, bg=BG, fg=FG_DIM, anchor="e")
+        lbl_updated.pack(side="right")
+
+        # ── week label ────────────────────────────────────────────────
+        lbl_week = tk.Label(win, text="", font=FONT, bg=BG, fg=FG_DIM, anchor="w", padx=12)
+        lbl_week.pack(fill="x")
+
+        # ── separator helper ─────────────────────────────────────────
+        def sep():
+            tk.Frame(win, bg="#333333", height=1).pack(fill="x", padx=12, pady=4)
+
+        def section_label(text, color):
+            tk.Label(win, text=text, font=FONT_B, bg=BG, fg=color, anchor="w", padx=12
+                     ).pack(fill="x")
+
+        def stat_row(label, var_ref):
+            frm = tk.Frame(win, bg=BG, padx=20)
+            frm.pack(fill="x")
+            tk.Label(frm, text=label, font=FONT, bg=BG, fg=FG_DIM, width=14, anchor="w"
+                     ).pack(side="left")
+            lbl = tk.Label(frm, textvariable=var_ref, font=FONT, bg=BG, fg=FG, anchor="w")
+            lbl.pack(side="left")
+            return lbl
+
+        # ── Claude Code section ───────────────────────────────────────
+        sep()
+        section_label("CLAUDE CODE", C_BLUE)
+
+        v_today_cc   = tk.StringVar(value="—")
+        v_week_cc    = tk.StringVar(value="—")
+        v_sessions   = tk.StringVar(value="—")
+        v_last_event = tk.StringVar(value="—")
+
+        stat_row("Today:",       v_today_cc)
+        stat_row("This week:",   v_week_cc)
+        stat_row("Sessions:",    v_sessions)
+        stat_row("Last event:",  v_last_event)
+
+        # ── Browser AI section ───────────────────────────────────────
+        sep()
+        section_label("BROWSER AI", C_PURPLE)
+
+        v_browser_today = tk.StringVar(value="—")
+        v_browser_week  = tk.StringVar(value="—")
+
+        stat_row("Today:",       v_browser_today)
+        stat_row("Week top:",    v_browser_week)
+
+        # ── Connection section ───────────────────────────────────────
+        sep()
+        section_label("CONNECTION", C_GREEN)
+
+        v_last_sent = tk.StringVar(value="—")
+        v_buffered  = tk.StringVar(value="—")
+        v_status    = tk.StringVar(value="—")
+
+        stat_row("Last sent:",   v_last_sent)
+        stat_row("Buffered:",    v_buffered)
+        lbl_status = stat_row("Status:",      v_status)
+
+        # ── refresh button ────────────────────────────────────────────
+        sep()
+        btn_row = tk.Frame(win, bg=BG, pady=6)
+        btn_row.pack()
+        lbl_msg = tk.Label(btn_row, text="", font=FONT, bg=BG, fg=FG_DIM)
+        lbl_msg.pack(side="left", padx=(0, 8))
+
+        _after_id = [None]
+
+        def _schedule_refresh():
+            _after_id[0] = win.after(300000, refresh)
+
+        def refresh():
+            if _after_id[0]:
+                win.after_cancel(_after_id[0])
+                _after_id[0] = None
+
+            lbl_msg.config(text="Loading...", fg=FG_DIM)
+            win.update_idletasks()
+
+            cfg = self._load_cfg()
+            eng_id = cfg.get("engineer_id", "")
+            secret = cfg.get("secret", "")
+            endpoint = cfg.get("endpoint", DEFAULT_ENDPOINT).rstrip("/")
+
+            # ── connection section (always from local files) ──────────
+            last_sent_ts = None
+            try:
+                lines = LOG_PATH.read_text(encoding="utf-8", errors="replace").splitlines()
+                for line in reversed(lines[-100:]):
+                    if "sent 200" in line or "sent " in line and "-> accepted" in line:
+                        parts = line.strip().split()
+                        if len(parts) >= 2:
+                            v_last_sent.set(parts[1])
+                            try:
+                                from datetime import datetime as _dt
+                                last_sent_ts = _dt.strptime(parts[0] + " " + parts[1], "%Y-%m-%d %H:%M:%S")
+                            except Exception:
+                                pass
+                        break
+                else:
+                    v_last_sent.set("Never")
+            except Exception:
+                v_last_sent.set("—")
+
+            try:
+                buf_lines = BUFFER_PATH.read_text(encoding="utf-8", errors="replace").splitlines()
+                count = sum(1 for ln in buf_lines if ln.strip())
+                v_buffered.set(f"{count} events")
+            except FileNotFoundError:
+                v_buffered.set("0 events")
+            except Exception:
+                v_buffered.set("—")
+
+            if last_sent_ts:
+                from datetime import datetime as _dt2
+                delta = (_dt2.now() - last_sent_ts).total_seconds()
+                if delta < 300:
+                    v_status.set("✅ Online")
+                    lbl_status.config(fg=C_GREEN)
+                else:
+                    v_status.set("⚠️ Check connection")
+                    lbl_status.config(fg="#ff9f0a")
+            else:
+                v_status.set("⚠️ Check connection")
+                lbl_status.config(fg="#ff9f0a")
+
+            # ── API call ──────────────────────────────────────────────
+            if not eng_id or not secret:
+                lbl_msg.config(text="Not configured — run onboarding first.", fg="#ff453a")
+                _schedule_refresh()
+                return
+
+            try:
+                url = f"{endpoint}/api/engineer/{eng_id}/stats?secret={secret}"
+                r = requests.get(url, timeout=10)
+                if r.status_code == 401:
+                    lbl_msg.config(text="Auth error — check secret.", fg="#ff453a")
+                    _schedule_refresh()
+                    return
+                if r.status_code != 200:
+                    lbl_msg.config(text=f"Server error {r.status_code}", fg="#ff453a")
+                    _schedule_refresh()
+                    return
+                data = r.json()
+            except Exception as e:
+                lbl_msg.config(text=f"Unable to connect: {e}", fg="#ff9f0a")
+                _schedule_refresh()
+                return
+
+            # ── populate header ───────────────────────────────────────
+            lbl_name.config(text=data.get("name", ""))
+            lbl_week.config(text=f"Week {data.get('week')} · {data.get('year')}")
+
+            # ── Claude Code ───────────────────────────────────────────
+            cc = data.get("claude_code", {})
+            today_total = cc.get("today_tokens_input", 0) + cc.get("today_tokens_output", 0)
+            week_total  = cc.get("week_tokens_input",  0) + cc.get("week_tokens_output",  0)
+            v_today_cc.set(f"{today_total:,} tokens")
+            v_week_cc.set(f"{week_total:,} tokens")
+            v_sessions.set(str(cc.get("week_sessions", 0)))
+            last_ev = cc.get("last_event_at")
+            if last_ev:
+                try:
+                    v_last_event.set(last_ev[11:16])
+                except Exception:
+                    v_last_event.set(last_ev)
+            else:
+                v_last_event.set("none")
+
+            # ── Browser AI ────────────────────────────────────────────
+            browser = data.get("browser", {})
+            today_b = browser.get("today", [])
+            if today_b:
+                parts = [f"{t['tool']:<12} {t['duration_sec'] // 60} min" for t in today_b]
+                v_browser_today.set("  " + ",  ".join(parts))
+            else:
+                v_browser_today.set("No activity today")
+
+            week_b = browser.get("week", [])
+            if week_b:
+                top = week_b[0]
+                v_browser_week.set(f"{top['tool']}  {top['duration_sec'] // 60} min")
+            else:
+                v_browser_week.set("No activity")
+
+            lbl_msg.config(text="", fg=FG_DIM)
+            lbl_updated.config(text=f"Updated: {datetime.now().strftime('%H:%M:%S')}")
+            _schedule_refresh()
+
+        tk.Button(btn_row, text="⟳ Refresh", command=refresh,
+                  font=FONT, bg="#2d2d2d", fg=FG, relief="flat", padx=8).pack(side="left")
+
+        win.protocol("WM_DELETE_WINDOW", lambda: (
+            win.after_cancel(_after_id[0]) if _after_id[0] else None,
+            win.destroy()
+        ))
+
+        refresh()
+
     def _on_settings(self, *_) -> None:
         self.root.after(0, self._open_settings)
 
@@ -1254,7 +1482,8 @@ class TelemetryTrayApp:
             pystray.MenuItem("Start with Windows",
                              self._on_toggle_autostart,
                              checked=lambda item: _autostart_enabled()),
-            pystray.MenuItem("Settings…",         self._on_settings),
+            pystray.MenuItem("My Stats",           self._on_stats),
+            pystray.MenuItem("Settings…",          self._on_settings),
             pystray.MenuItem("Quit",              self._on_quit),
         )
 

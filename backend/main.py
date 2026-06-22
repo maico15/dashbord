@@ -3995,6 +3995,108 @@ def get_ai_usage_engineer(
     }
 
 
+@app.get("/api/engineer/{engineer_id}/stats")
+def get_engineer_stats(engineer_id: int, secret: str = "", week: int = 0, year: int = 0):
+    conn = get_db()
+    c = conn.cursor()
+
+    # Auth
+    c.execute("SELECT value FROM config WHERE key=?", (f"secret_{engineer_id}",))
+    secret_row = c.fetchone()
+    if not secret_row or secret_row["value"] != secret:
+        conn.close()
+        raise HTTPException(401, "Invalid credentials")
+
+    # Resolve week/year
+    if week == 0 or year == 0:
+        cw, cy = current_week_year(conn)
+        if week == 0:
+            week = cw
+        if year == 0:
+            year = cy
+
+    # Engineer name
+    c.execute("SELECT name FROM team_members WHERE id=?", (engineer_id,))
+    eng = c.fetchone()
+    if not eng:
+        conn.close()
+        raise HTTPException(404, "Engineer not found")
+
+    date_from, date_to = _iso_week_bounds(week, year)
+    date_from_s = str(date_from)
+    date_to_s   = str(date_to)
+
+    # Claude Code — this week
+    c.execute("""
+        SELECT COALESCE(SUM(tokens_input),  0) AS tokens_input,
+               COALESCE(SUM(tokens_output), 0) AS tokens_output,
+               COUNT(DISTINCT session_id)      AS sessions,
+               MAX(timestamp)                  AS last_event_at
+        FROM ai_events
+        WHERE engineer_id=?
+          AND date(timestamp) >= ? AND date(timestamp) <= ?
+    """, (engineer_id, date_from_s, date_to_s))
+    week_cc = dict(c.fetchone())
+
+    # Claude Code — today
+    c.execute("""
+        SELECT COALESCE(SUM(tokens_input),  0) AS tokens_input,
+               COALESCE(SUM(tokens_output), 0) AS tokens_output
+        FROM ai_events
+        WHERE engineer_id=? AND date(timestamp) = date('now')
+    """, (engineer_id,))
+    today_cc = dict(c.fetchone())
+
+    # Browser sessions — this week
+    c.execute("""
+        SELECT tool,
+               COALESCE(SUM(duration_sec),  0) AS duration_sec,
+               COALESCE(SUM(session_count), 0) AS session_count
+        FROM ai_tool_sessions
+        WHERE engineer_id=? AND date >= ? AND date <= ?
+        GROUP BY tool
+        ORDER BY duration_sec DESC
+    """, (engineer_id, date_from_s, date_to_s))
+    week_browser = [
+        {"tool": r["tool"], "duration_sec": r["duration_sec"], "sessions": r["session_count"]}
+        for r in c.fetchall()
+    ]
+
+    # Browser sessions — today
+    c.execute("""
+        SELECT tool,
+               COALESCE(SUM(duration_sec), 0) AS duration_sec
+        FROM ai_tool_sessions
+        WHERE engineer_id=? AND date = date('now')
+        GROUP BY tool
+        ORDER BY duration_sec DESC
+    """, (engineer_id,))
+    today_browser = [
+        {"tool": r["tool"], "duration_sec": r["duration_sec"]}
+        for r in c.fetchall()
+    ]
+
+    conn.close()
+    return {
+        "engineer_id": engineer_id,
+        "name":        eng["name"],
+        "week":        week,
+        "year":        year,
+        "claude_code": {
+            "week_tokens_input":   week_cc["tokens_input"],
+            "week_tokens_output":  week_cc["tokens_output"],
+            "week_sessions":       week_cc["sessions"],
+            "today_tokens_input":  today_cc["tokens_input"],
+            "today_tokens_output": today_cc["tokens_output"],
+            "last_event_at":       week_cc["last_event_at"],
+        },
+        "browser": {
+            "week":  week_browser,
+            "today": today_browser,
+        },
+    }
+
+
 @app.get("/api/ai-usage/browser")
 def ai_usage_browser(week: int, year: int, department_id: Optional[int] = None):
     conn = get_db()
