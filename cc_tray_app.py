@@ -584,7 +584,7 @@ def _send_browser_session(cfg: dict, tool: str, duration_sec: int, date_str: str
     event = {"tool": tool, "duration_sec": duration_sec, "date": date_str}
     try:
         url = cfg["endpoint"].rstrip("/") + "/api/telemetry/tool-sessions"
-        payload = {"engineer_id": cfg["engineer_id"], "secret": cfg["secret"], **event}
+        payload = {"engineer_id": str(cfg["engineer_id"]), "secret": cfg["secret"], **event}
         r = requests.post(url, json=payload, timeout=REQUEST_TIMEOUT)
         if r.status_code == 200:
             _log(f"browser session sent: tool={tool} duration={duration_sec}s")
@@ -608,7 +608,7 @@ def _flush_browser_buffer(cfg: dict) -> None:
     for event in buffered:
         try:
             url = cfg["endpoint"].rstrip("/") + "/api/telemetry/tool-sessions"
-            payload = {"engineer_id": cfg["engineer_id"], "secret": cfg["secret"], **event}
+            payload = {"engineer_id": str(cfg["engineer_id"]), "secret": cfg["secret"], **event}
             r = requests.post(url, json=payload, timeout=REQUEST_TIMEOUT)
             if r.status_code == 200:
                 sent.append(event)
