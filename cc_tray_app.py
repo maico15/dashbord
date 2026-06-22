@@ -34,7 +34,7 @@ CREATE_NO_WINDOW = 0x08000000  # Windows: don't flash a console window
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-APP_VERSION           = "2.7"
+APP_VERSION           = "2.8"
 APP_NAME              = f"Claude Telemetry v{APP_VERSION}"
 GITHUB_REPO           = "maico15/dashbord"
 UPDATE_CHECK_INTERVAL = 3600  # seconds
@@ -1386,7 +1386,7 @@ class TelemetryTrayApp:
 
         win = tk.Toplevel(self.root)
         win.title("Settings")
-        win.geometry("460x350")
+        win.geometry("460x430")
         win.resizable(False, False)
         win.attributes("-topmost", True)
         win.protocol("WM_DELETE_WINDOW", win.destroy)
@@ -1462,6 +1462,67 @@ class TelemetryTrayApp:
         util_row = tk.Frame(frm)
         util_row.grid(row=frm.grid_size()[1], column=0, columnspan=2, pady=2)
         tk.Button(util_row, text="Copy config path", command=copy_config_path, width=20).pack(side="left", padx=4)
+
+        # ── update section ────────────────────────────────────────────
+        sep_r = frm.grid_size()[1]
+        tk.Frame(frm, bg="#cccccc", height=1).grid(
+            row=sep_r, column=0, columnspan=2, sticky="ew", pady=(10, 4))
+
+        ver_row = tk.Frame(frm)
+        ver_row.grid(row=frm.grid_size()[1], column=0, columnspan=2, sticky="w", pady=2)
+        tk.Label(ver_row, text=f"Current version:  v{APP_VERSION}",
+                 font=("Segoe UI", 9), fg="gray").pack(side="left", padx=(0, 12))
+
+        btn_update = tk.Button(ver_row, text="Check for Update", font=("Segoe UI", 9), width=16)
+        btn_update.pack(side="left")
+
+        lbl_update_status = tk.Label(frm, text="", font=("Segoe UI", 9))
+        lbl_update_status.grid(row=frm.grid_size()[1], column=0, columnspan=2, sticky="w", pady=2, padx=2)
+
+        def do_install(latest_ver, download_url):
+            from tkinter import messagebox
+            if messagebox.askokcancel(
+                "Install Update",
+                f"Install v{latest_ver}?\n\nThe app will restart automatically.",
+                parent=win,
+            ):
+                win.destroy()
+                self._pending_update = (latest_ver, download_url)
+                self._on_install_update()
+
+        def check_update():
+            btn_update.config(state="disabled", text="Checking...")
+            lbl_update_status.config(text="")
+
+            def _worker():
+                try:
+                    result = _check_for_update()
+                except Exception:
+                    result = "__error__"
+                win.after(0, lambda: _on_result(result))
+
+            def _on_result(result):
+                if result == "__error__":
+                    lbl_update_status.config(
+                        text="⚠️ Could not check — no connection", fg="#ff4444")
+                    btn_update.config(state="normal", text="Check for Update")
+                elif result is None:
+                    lbl_update_status.config(
+                        text="✅ You have the latest version", fg="#34c759")
+                    btn_update.config(state="normal", text="Check for Update")
+                else:
+                    latest_ver, download_url = result
+                    lbl_update_status.config(
+                        text=f"🆕 v{latest_ver} available — click Install",
+                        fg="#ffa200")
+                    btn_update.config(
+                        state="normal",
+                        text=f"Install v{latest_ver}",
+                        command=lambda: do_install(latest_ver, download_url))
+
+            threading.Thread(target=_worker, daemon=True).start()
+
+        btn_update.config(command=check_update)
 
     def run(self) -> None:
         _ensure_single_instance()
