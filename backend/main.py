@@ -2785,7 +2785,9 @@ ENGINEER_COLORS = [
 def register_engineer(data: RegisterEngineerRequest):
     import secrets as secrets_mod
 
-    if not data.email.lower().endswith("@homealliance.com"):
+    email_norm = data.email.strip().lower()
+
+    if not email_norm.endswith("@homealliance.com"):
         raise HTTPException(422, "Only @homealliance.com email addresses are allowed")
 
     if len(data.first_name.strip()) < 2 or len(data.last_name.strip()) < 2:
@@ -2794,10 +2796,27 @@ def register_engineer(data: RegisterEngineerRequest):
     conn = get_db()
     c = conn.cursor()
 
-    c.execute("SELECT id FROM team_members WHERE LOWER(email)=LOWER(?)", (data.email,))
-    if c.fetchone():
+    c.execute(
+        "SELECT id, name, email, avatar_color, department_id FROM team_members WHERE LOWER(email)=?",
+        (email_norm,)
+    )
+    existing = c.fetchone()
+    if existing:
+        c.execute("SELECT name FROM departments WHERE id=?", (existing["department_id"],))
+        dept_row = c.fetchone()
+        c.execute("SELECT value FROM config WHERE key=?", (f"secret_{existing['id']}",))
+        secret_row = c.fetchone()
         conn.close()
-        raise HTTPException(409, "Email already registered")
+        print(f"[register] re-registration: engineer_id={existing['id']} email={email_norm}")
+        return {
+            "engineer_id": existing["id"],
+            "secret":      secret_row["value"] if secret_row else "",
+            "name":        existing["name"],
+            "email":       email_norm,
+            "department":  dept_row["name"] if dept_row else "",
+            "color":       existing["avatar_color"],
+            "registered":  False,
+        }
 
     c.execute("SELECT id, name FROM departments WHERE id=? AND active=1", (data.department_id,))
     dept = c.fetchone()
@@ -2815,7 +2834,7 @@ def register_engineer(data: RegisterEngineerRequest):
     full_name = f"{data.first_name.strip()} {data.last_name.strip()}"
     c.execute(
         "INSERT INTO team_members (name, email, stream, avatar_color, department_id) VALUES (?,?,?,?,?)",
-        (full_name, data.email.lower(), json_lib.dumps(["dev"]), color, data.department_id)
+        (full_name, email_norm, json_lib.dumps(["dev"]), color, data.department_id)
     )
     engineer_id = c.lastrowid
 
@@ -2830,9 +2849,10 @@ def register_engineer(data: RegisterEngineerRequest):
         "engineer_id": engineer_id,
         "secret":      secret,
         "name":        full_name,
-        "email":       data.email.lower(),
+        "email":       email_norm,
         "department":  dept["name"],
         "color":       color,
+        "registered":  True,
     }
 
 
@@ -3514,6 +3534,28 @@ class TelemetryPayload(BaseModel):
     engineer_id: int
     secret: str
     events: List[TelemetryEvent]
+
+
+class TelemetryVerifyRequest(BaseModel):
+    engineer_id: int
+    secret: str
+
+
+@app.post("/api/telemetry/verify")
+def verify_telemetry_config(data: TelemetryVerifyRequest):
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT id, name FROM team_members WHERE id=?", (data.engineer_id,))
+    engineer = c.fetchone()
+    if not engineer:
+        conn.close()
+        raise HTTPException(404, "not found")
+    c.execute("SELECT value FROM config WHERE key=?", (f"secret_{data.engineer_id}",))
+    secret_row = c.fetchone()
+    conn.close()
+    if not secret_row or secret_row["value"] != data.secret:
+        raise HTTPException(401, "wrong secret")
+    return {"ok": True, "engineer_id": data.engineer_id, "name": engineer["name"]}
 
 
 @app.post("/api/telemetry/events")

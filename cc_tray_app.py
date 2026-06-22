@@ -700,6 +700,22 @@ class TelemetryTrayApp:
         cfg = self._load_cfg()
         return bool(cfg.get("engineer_id") and cfg.get("secret"))
 
+    def _verify_config(self) -> bool:
+        cfg = self._load_cfg()
+        if not cfg.get("engineer_id") or not cfg.get("secret"):
+            return False
+        try:
+            import requests
+            url = cfg.get("endpoint", DEFAULT_ENDPOINT).rstrip("/") + "/api/telemetry/verify"
+            r = requests.post(url, json={
+                "engineer_id": cfg["engineer_id"],
+                "secret": cfg["secret"]
+            }, timeout=5)
+            return r.status_code == 200
+        except Exception:
+            # Network unavailable — trust local config
+            return True
+
     def _start_poll(self) -> None:
         if self._poll_thread and self._poll_thread.is_alive():
             return
@@ -1142,7 +1158,7 @@ class TelemetryTrayApp:
 
         win = tk.Toplevel(self.root)
         win.title("Settings")
-        win.geometry("460x310")
+        win.geometry("460x350")
         win.resizable(False, False)
         win.attributes("-topmost", True)
         win.protocol("WM_DELETE_WINDOW", win.destroy)
@@ -1203,12 +1219,21 @@ class TelemetryTrayApp:
             except Exception as e:
                 lbl_msg.config(text=str(e), fg="red")
 
+        def copy_config_path():
+            win.clipboard_clear()
+            win.clipboard_append(str(CONFIG_PATH))
+            lbl_msg.config(text="Path copied! Transfer this file to another PC", fg="green")
+
         btn_row = tk.Frame(frm)
         btn_row.grid(row=frm.grid_size()[1], column=0, columnspan=2, pady=8)
-        tk.Button(btn_row, text="Save",     command=save,                    width=10).pack(side="left", padx=4)
-        tk.Button(btn_row, text="Test",     command=test,                    width=10).pack(side="left", padx=4)
-        tk.Button(btn_row, text="View Log", command=self._open_log_viewer,   width=10).pack(side="left", padx=4)
-        tk.Button(btn_row, text="Close",    command=win.destroy,             width=10).pack(side="left", padx=4)
+        tk.Button(btn_row, text="Save",             command=save,                    width=10).pack(side="left", padx=4)
+        tk.Button(btn_row, text="Test",             command=test,                    width=10).pack(side="left", padx=4)
+        tk.Button(btn_row, text="View Log",         command=self._open_log_viewer,   width=10).pack(side="left", padx=4)
+        tk.Button(btn_row, text="Close",            command=win.destroy,             width=10).pack(side="left", padx=4)
+
+        util_row = tk.Frame(frm)
+        util_row.grid(row=frm.grid_size()[1], column=0, columnspan=2, pady=2)
+        tk.Button(util_row, text="Copy config path", command=copy_config_path, width=20).pack(side="left", padx=4)
 
     def run(self) -> None:
         _ensure_single_instance()
@@ -1244,6 +1269,9 @@ class TelemetryTrayApp:
 
         cfg = self._load_cfg()
         if not cfg.get("engineer_id") or not cfg.get("secret"):
+            self.root.after(600, self._open_onboarding)
+        elif not self._verify_config():
+            _log("pre-flight verify failed (401) — re-running onboarding")
             self.root.after(600, self._open_onboarding)
         else:
             self._start_poll()
