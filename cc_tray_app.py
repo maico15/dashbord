@@ -34,7 +34,7 @@ CREATE_NO_WINDOW = 0x08000000  # Windows: don't flash a console window
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-APP_VERSION           = "2.8"
+APP_VERSION           = "2.9"
 APP_NAME              = f"Claude Telemetry v{APP_VERSION}"
 GITHUB_REPO           = "maico15/dashbord"
 UPDATE_CHECK_INTERVAL = 3600  # seconds
@@ -673,14 +673,17 @@ def _make_icon(color=_C_BLUE) -> Image.Image:
 class TelemetryTrayApp:
 
     def __init__(self):
-        self._stop              = threading.Event()
-        self._poll_thread       = None
-        self._browser_thread    = None
-        self._heartbeat_thread  = None
-        self._update_thread     = None
-        self._pending_update    = None
-        self._settings_win      = None
-        self._status            = "Initializing..."
+        self._stop                   = threading.Event()
+        self._poll_thread            = None
+        self._browser_thread         = None
+        self._heartbeat_thread       = None
+        self._update_thread          = None
+        self._pending_update         = None
+        self._settings_win           = None
+        self._status                 = "Initializing..."
+        self._browser_current_tool   = None
+        self._browser_session_start  = None
+        self._browser_last_seen      = None
         self._load_cfg()
 
     def _load_cfg(self) -> dict:
@@ -744,10 +747,7 @@ class TelemetryTrayApp:
 
     def _browser_loop(self) -> None:
         """Track time spent on AI tools in the active browser tab."""
-        current_tool  = None
-        session_start = None
-        last_seen     = None
-        _tick         = 0
+        _tick = 0
 
         while not self._stop.is_set():
             try:
@@ -763,33 +763,33 @@ class TelemetryTrayApp:
                 if tool:
                     _log(f"browser active: {tool}")
                 if _tick % 10 == 0:
-                    _log(f"browser tick {_tick}: tool={tool} current={current_tool}")
+                    _log(f"browser tick {_tick}: tool={tool} current={self._browser_current_tool}")
 
                 if tool:
-                    if current_tool != tool:
+                    if self._browser_current_tool != tool:
                         # Switched tool — flush previous session first
-                        if current_tool and session_start and last_seen:
-                            dur = int(last_seen - session_start)
+                        if self._browser_current_tool and self._browser_session_start and self._browser_last_seen:
+                            dur = int(self._browser_last_seen - self._browser_session_start)
                             if dur >= 30:
-                                date_str = datetime.fromtimestamp(session_start).strftime("%Y-%m-%d")
-                                _send_browser_session(cfg, current_tool, dur, date_str)
-                        current_tool  = tool
-                        session_start = now
-                        last_seen     = now
+                                date_str = datetime.fromtimestamp(self._browser_session_start).strftime("%Y-%m-%d")
+                                _send_browser_session(cfg, self._browser_current_tool, dur, date_str)
+                        self._browser_current_tool  = tool
+                        self._browser_session_start = now
+                        self._browser_last_seen     = now
                     else:
                         # Same tool — accumulate duration
-                        last_seen = now
+                        self._browser_last_seen = now
                 else:
                     # No AI tool active — flush if gap exceeded
-                    if current_tool and session_start and last_seen:
-                        if now - last_seen > BROWSER_SESSION_GAP:
-                            dur = int(last_seen - session_start)
+                    if self._browser_current_tool and self._browser_session_start and self._browser_last_seen:
+                        if now - self._browser_last_seen > BROWSER_SESSION_GAP:
+                            dur = int(self._browser_last_seen - self._browser_session_start)
                             if dur >= 30:
-                                date_str = datetime.fromtimestamp(session_start).strftime("%Y-%m-%d")
-                                _send_browser_session(cfg, current_tool, dur, date_str)
-                            current_tool  = None
-                            session_start = None
-                            last_seen     = None
+                                date_str = datetime.fromtimestamp(self._browser_session_start).strftime("%Y-%m-%d")
+                                _send_browser_session(cfg, self._browser_current_tool, dur, date_str)
+                            self._browser_current_tool  = None
+                            self._browser_session_start = None
+                            self._browser_last_seen     = None
             except Exception as e:
                 _log(f"browser loop error: {e}")
 
@@ -1219,7 +1219,30 @@ class TelemetryTrayApp:
     def _on_settings(self, *_) -> None:
         self.root.after(0, self._open_settings)
 
+    def _flush_browser_session_on_exit(self) -> None:
+        """Flush any active browser session before app shutdown."""
+        try:
+            tool  = self._browser_current_tool
+            start = self._browser_session_start
+            seen  = self._browser_last_seen
+            if not tool or not start or not seen:
+                return
+            dur = int(seen - start)
+            if dur < 30:
+                _log(f"shutdown flush: session too short ({dur}s), skipping")
+                return
+            cfg = self._load_cfg()
+            date_str = datetime.fromtimestamp(start).strftime("%Y-%m-%d")
+            _log(f"shutdown flush: {tool} {dur}s on {date_str}")
+            _send_browser_session(cfg, tool, dur, date_str)
+            self._browser_current_tool  = None
+            self._browser_session_start = None
+            self._browser_last_seen     = None
+        except Exception as e:
+            _log(f"shutdown flush error: {e}")
+
     def _on_quit(self, *_) -> None:
+        self._flush_browser_session_on_exit()
         try:
             if LOCK_FILE.exists():
                 LOCK_FILE.unlink()
@@ -1525,6 +1548,8 @@ class TelemetryTrayApp:
         btn_update.config(command=check_update)
 
     def run(self) -> None:
+        import atexit
+        atexit.register(self._flush_browser_session_on_exit)
         _ensure_single_instance()
         self.root = tk.Tk()
         self.root.withdraw()
