@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react'
+import { Link } from 'react-router-dom'
 import { api } from '../api/client'
 import TopBar from '../components/TopBar'
 import MetricCard from '../components/MetricCard'
@@ -340,6 +341,22 @@ export default function Dashboard() {
         )}
 
         <Leaderboard data={leaderboard} />
+
+        <footer className="dashboard-footer">
+          <span className="dashboard-footer-text">
+            Home Alliance Engineering Dashboard
+          </span>
+          <Link to="/releases" className="dashboard-footer-link">
+            ⚡ CC Telemetry — Release History
+          </Link>
+          <a
+            href="https://github.com/maico15/dashbord/releases/latest/download/cc_telemetry_tray.exe"
+            className="dashboard-footer-dl"
+            download
+          >
+            ⬇ Download Latest
+          </a>
+        </footer>
       </div>
     </>
   )

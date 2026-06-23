@@ -5034,6 +5034,42 @@ def reset_seed(x_admin_password: str = Header(default="")):
     return {"status": "ok"}
 
 
+@app.get("/api/releases")
+def get_releases():
+    import urllib.request, json as _json
+    url = "https://api.github.com/repos/maico15/dashbord/releases?per_page=20"
+    try:
+        req = urllib.request.Request(
+            url,
+            headers={
+                "User-Agent": "ha-dashboard",
+                "Accept":     "application/vnd.github+json"
+            }
+        )
+        with urllib.request.urlopen(req, timeout=10) as r:
+            data = _json.load(r)
+        return {
+            "releases": [
+                {
+                    "version": rel["tag_name"],
+                    "name":    rel["name"],
+                    "date":    rel["published_at"][:10],
+                    "body":    rel.get("body") or "",
+                    "url":     rel["html_url"],
+                    "download_url": next(
+                        (a["browser_download_url"]
+                         for a in rel.get("assets", [])
+                         if a["name"].endswith(".exe")),
+                        None
+                    )
+                }
+                for rel in data
+            ]
+        }
+    except Exception as e:
+        return {"releases": [], "error": str(e)}
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000, reload=True)
