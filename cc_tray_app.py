@@ -34,7 +34,7 @@ CREATE_NO_WINDOW = 0x08000000  # Windows: don't flash a console window
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-APP_VERSION           = "2.9.1"
+APP_VERSION           = "2.9.2"
 APP_NAME              = f"Claude Telemetry v{APP_VERSION}"
 GITHUB_REPO           = "maico15/dashbord"
 UPDATE_CHECK_INTERVAL = 3600  # seconds
@@ -1373,6 +1373,7 @@ class TelemetryTrayApp:
                     cfg_new["registered_name"]  = data["name"]
                     cfg_new["registered_dept"]  = data["department"]
                     self._write_cfg(cfg_new)
+                    _create_desktop_shortcut()
                     win.after(0, lambda: _show_success(data))
                 except urllib.error.HTTPError as e:
                     body = e.read().decode()
@@ -1605,6 +1606,79 @@ class TelemetryTrayApp:
         self.root.mainloop()
 
 
+def _create_desktop_shortcut() -> None:
+    """Create a desktop shortcut to this exe on Windows."""
+    try:
+        import winshell
+        from win32com.client import Dispatch
+
+        if getattr(sys, 'frozen', False):
+            exe_path = sys.executable
+        else:
+            exe_path = os.path.abspath(sys.argv[0])
+
+        desktop = winshell.desktop()
+        shortcut_path = os.path.join(desktop, "CC Telemetry.lnk")
+
+        if os.path.exists(shortcut_path):
+            _log("shortcut: already exists, skipping")
+            return
+
+        shell = Dispatch("WScript.Shell")
+        shortcut = shell.CreateShortCut(shortcut_path)
+        shortcut.Targetpath = exe_path
+        shortcut.WorkingDirectory = os.path.dirname(exe_path)
+        shortcut.Description = "Home Alliance Claude Code Telemetry"
+        shortcut.IconLocation = exe_path
+        shortcut.save()
+
+        _log(f"shortcut: created at {shortcut_path}")
+
+    except ImportError:
+        _create_desktop_shortcut_fallback()
+    except Exception as e:
+        _log(f"shortcut error: {e}")
+
+
+def _create_desktop_shortcut_fallback() -> None:
+    """Fallback shortcut creation using PowerShell (no extra deps)."""
+    try:
+        if getattr(sys, 'frozen', False):
+            exe_path = sys.executable
+        else:
+            exe_path = os.path.abspath(sys.argv[0])
+
+        desktop = os.path.join(os.path.expanduser("~"), "Desktop")
+        shortcut_path = os.path.join(desktop, "CC Telemetry.lnk")
+
+        if os.path.exists(shortcut_path):
+            _log("shortcut: already exists, skipping")
+            return
+
+        ps_script = f"""
+$ws = New-Object -ComObject WScript.Shell
+$s = $ws.CreateShortcut('{shortcut_path}')
+$s.TargetPath = '{exe_path}'
+$s.WorkingDirectory = '{os.path.dirname(exe_path)}'
+$s.Description = 'Home Alliance Claude Code Telemetry'
+$s.IconLocation = '{exe_path}'
+$s.Save()
+"""
+        import subprocess
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive",
+             "-ExecutionPolicy", "Bypass", "-Command", ps_script],
+            capture_output=True, timeout=10
+        )
+        if result.returncode == 0:
+            _log(f"shortcut: created via PowerShell at {shortcut_path}")
+        else:
+            _log(f"shortcut PS error: {result.stderr.decode(errors='ignore')}")
+
+    except Exception as e:
+        _log(f"shortcut fallback error: {e}")
+
+
 def _cleanup_mei_folders() -> None:
     """Remove stale PyInstaller _MEI temp folders on startup."""
     import glob, shutil
@@ -1630,4 +1704,6 @@ def _cleanup_mei_folders() -> None:
 
 if __name__ == "__main__":
     _cleanup_mei_folders()
+    if os.path.exists(CONFIG_PATH):
+        _create_desktop_shortcut()
     TelemetryTrayApp().run()
