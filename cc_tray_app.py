@@ -34,7 +34,7 @@ CREATE_NO_WINDOW = 0x08000000  # Windows: don't flash a console window
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-APP_VERSION           = "2.9.2"
+APP_VERSION           = "2.9.3"
 APP_NAME              = f"Claude Telemetry v{APP_VERSION}"
 GITHUB_REPO           = "maico15/dashbord"
 UPDATE_CHECK_INTERVAL = 3600  # seconds
@@ -1607,76 +1607,61 @@ class TelemetryTrayApp:
 
 
 def _create_desktop_shortcut() -> None:
-    """Create a desktop shortcut to this exe on Windows."""
+    """Create a desktop shortcut to this exe on Windows via PowerShell."""
+    import os, sys, subprocess
     try:
-        import winshell
-        from win32com.client import Dispatch
-
-        if getattr(sys, 'frozen', False):
+        if getattr(sys, "frozen", False):
             exe_path = sys.executable
         else:
             exe_path = os.path.abspath(sys.argv[0])
 
-        desktop = winshell.desktop()
+        # Use PowerShell to get real Desktop path (handles relocated folders)
+        ps_desktop = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive",
+             "-ExecutionPolicy", "Bypass",
+             "-Command",
+             "[Environment]::GetFolderPath('Desktop')"],
+            capture_output=True, timeout=5
+        )
+        if ps_desktop.returncode != 0:
+            _log("shortcut: could not resolve Desktop path")
+            return
+
+        desktop = ps_desktop.stdout.decode(errors="ignore").strip()
         shortcut_path = os.path.join(desktop, "CC Telemetry.lnk")
 
         if os.path.exists(shortcut_path):
             _log("shortcut: already exists, skipping")
             return
 
-        shell = Dispatch("WScript.Shell")
-        shortcut = shell.CreateShortCut(shortcut_path)
-        shortcut.Targetpath = exe_path
-        shortcut.WorkingDirectory = os.path.dirname(exe_path)
-        shortcut.Description = "Home Alliance Claude Code Telemetry"
-        shortcut.IconLocation = exe_path
-        shortcut.save()
+        # Escape backslashes for PowerShell string
+        exe_escaped = exe_path.replace("\\", "\\\\")
+        dir_escaped = os.path.dirname(exe_path).replace("\\", "\\\\")
+        sc_escaped  = shortcut_path.replace("\\", "\\\\")
 
-        _log(f"shortcut: created at {shortcut_path}")
+        ps_script = (
+            f"$ws = New-Object -ComObject WScript.Shell; "
+            f"$s = $ws.CreateShortcut('{sc_escaped}'); "
+            f"$s.TargetPath = '{exe_escaped}'; "
+            f"$s.WorkingDirectory = '{dir_escaped}'; "
+            f"$s.Description = 'Home Alliance Claude Code Telemetry'; "
+            f"$s.IconLocation = '{exe_escaped}'; "
+            f"$s.Save()"
+        )
 
-    except ImportError:
-        _create_desktop_shortcut_fallback()
-    except Exception as e:
-        _log(f"shortcut error: {e}")
-
-
-def _create_desktop_shortcut_fallback() -> None:
-    """Fallback shortcut creation using PowerShell (no extra deps)."""
-    try:
-        if getattr(sys, 'frozen', False):
-            exe_path = sys.executable
-        else:
-            exe_path = os.path.abspath(sys.argv[0])
-
-        desktop = os.path.join(os.path.expanduser("~"), "Desktop")
-        shortcut_path = os.path.join(desktop, "CC Telemetry.lnk")
-
-        if os.path.exists(shortcut_path):
-            _log("shortcut: already exists, skipping")
-            return
-
-        ps_script = f"""
-$ws = New-Object -ComObject WScript.Shell
-$s = $ws.CreateShortcut('{shortcut_path}')
-$s.TargetPath = '{exe_path}'
-$s.WorkingDirectory = '{os.path.dirname(exe_path)}'
-$s.Description = 'Home Alliance Claude Code Telemetry'
-$s.IconLocation = '{exe_path}'
-$s.Save()
-"""
-        import subprocess
         result = subprocess.run(
             ["powershell", "-NoProfile", "-NonInteractive",
              "-ExecutionPolicy", "Bypass", "-Command", ps_script],
             capture_output=True, timeout=10
         )
         if result.returncode == 0:
-            _log(f"shortcut: created via PowerShell at {shortcut_path}")
+            _log(f"shortcut: created at {shortcut_path}")
         else:
-            _log(f"shortcut PS error: {result.stderr.decode(errors='ignore')}")
+            err = result.stderr.decode(errors="ignore").strip()
+            _log(f"shortcut PS error: {err}")
 
     except Exception as e:
-        _log(f"shortcut fallback error: {e}")
+        _log(f"shortcut error: {e}")
 
 
 def _cleanup_mei_folders() -> None:
@@ -1703,7 +1688,8 @@ def _cleanup_mei_folders() -> None:
 
 
 if __name__ == "__main__":
+    import os as _os
     _cleanup_mei_folders()
-    if os.path.exists(CONFIG_PATH):
+    if _os.path.exists(CONFIG_PATH):
         _create_desktop_shortcut()
     TelemetryTrayApp().run()
