@@ -34,7 +34,7 @@ CREATE_NO_WINDOW = 0x08000000  # Windows: don't flash a console window
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-APP_VERSION           = "2.9.3"
+APP_VERSION           = "2.9.5"
 APP_NAME              = f"Claude Telemetry v{APP_VERSION}"
 GITHUB_REPO           = "maico15/dashbord"
 UPDATE_CHECK_INTERVAL = 3600  # seconds
@@ -69,6 +69,7 @@ AI_TOOLS = {
     "meta.ai":                "meta",
     "chat.deepseek.com":      "deepseek",
     "lovable.dev":            "lovable",
+    "lovable.app":            "lovable",
     "cursor.com":             "cursor",
     "cursor.sh":              "cursor",
     "v0.dev":                 "v0",
@@ -116,6 +117,7 @@ AI_NETWORK_PATTERNS = {
     # Lovable
     "lovable.dev":               "lovable",
     "app.lovable.dev":           "lovable",
+    "lovable.app":               "lovable",
     # Cursor
     "cursor.com":                "cursor",
     "cursor.sh":                 "cursor",
@@ -447,6 +449,7 @@ def _get_ai_tool_from_network() -> str | None:
         ("meta.ai",               "meta"),
         ("chat.deepseek.com",     "deepseek"),
         ("lovable.dev",           "lovable"),
+        ("lovable.app",           "lovable"),
         ("cursor.com",            "cursor"),
         ("cursor.sh",             "cursor"),
         ("v0.dev",                "v0"),
