@@ -34,7 +34,7 @@ CREATE_NO_WINDOW = 0x08000000  # Windows: don't flash a console window
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-APP_VERSION           = "2.9.5"
+APP_VERSION           = "2.9.6"
 APP_NAME              = f"Claude Telemetry v{APP_VERSION}"
 GITHUB_REPO           = "maico15/dashbord"
 UPDATE_CHECK_INTERVAL = 3600  # seconds
@@ -833,6 +833,7 @@ class TelemetryTrayApp:
             self._stop.wait(UPDATE_CHECK_INTERVAL)
 
     def _on_install_update(self, *_) -> None:
+        import os, sys  # noqa: F401
         if not self._pending_update:
             return
         latest_ver, download_url = self._pending_update
@@ -849,7 +850,7 @@ class TelemetryTrayApp:
 
     def _do_update(self, download_url: str, latest_ver: str) -> None:
         """Download new exe and replace via batch script, then restart."""
-        import tempfile, sys, urllib.request
+        import os, sys, tempfile, urllib.request
         _log(f"downloading update v{latest_ver}...")
         self._set_status(f"Downloading v{latest_ver}...")
         try:
@@ -1669,7 +1670,7 @@ def _create_desktop_shortcut() -> None:
 
 def _cleanup_mei_folders() -> None:
     """Remove stale PyInstaller _MEI temp folders on startup."""
-    import glob, shutil
+    import os, sys, glob, shutil
     try:
         temp_dir = os.environ.get("TEMP", os.path.join(
             os.path.expanduser("~"), "AppData", "Local", "Temp"))
