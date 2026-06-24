@@ -34,7 +34,7 @@ CREATE_NO_WINDOW = 0x08000000  # Windows: don't flash a console window
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-APP_VERSION           = "2.9.6"
+APP_VERSION           = "2.9.7"
 APP_NAME              = f"Claude Telemetry v{APP_VERSION}"
 GITHUB_REPO           = "maico15/dashbord"
 UPDATE_CHECK_INTERVAL = 3600  # seconds
@@ -1267,6 +1267,110 @@ class TelemetryTrayApp:
         self._icon.stop()
         self.root.quit()
 
+    def _uninstall(self) -> None:
+        import os, sys, subprocess, winreg, shutil
+
+        from tkinter import messagebox
+        confirmed = messagebox.askyesno(
+            "Uninstall CC Telemetry",
+            "This will:\n\n"
+            "• Remove autostart from Windows registry\n"
+            "• Delete all local data and config files\n"
+            "• Remove desktop shortcut\n"
+            "• Delete the application\n\n"
+            "Your data on the dashboard will be preserved.\n\n"
+            "Are you sure you want to uninstall?"
+        )
+        if not confirmed:
+            return
+
+        _log("uninstall: started")
+
+        try:
+            self._flush_browser_session_on_exit()
+        except Exception as e:
+            _log(f"uninstall: flush error: {e}")
+
+        try:
+            _set_autostart(False)
+            _log("uninstall: autostart removed")
+        except Exception as e:
+            _log(f"uninstall: autostart error: {e}")
+
+        files_to_delete = [
+            CONFIG_PATH,
+            BUFFER_PATH,
+            SEEN_PATH,
+            BROWSER_BUFFER_PATH,
+        ]
+        for f in files_to_delete:
+            try:
+                import pathlib
+                p = pathlib.Path(f)
+                if p.exists():
+                    p.unlink()
+                    _log(f"uninstall: deleted {p.name}")
+            except Exception as e:
+                _log(f"uninstall: could not delete {f}: {e}")
+
+        try:
+            ps_desktop = subprocess.run(
+                ["powershell", "-NoProfile", "-NonInteractive",
+                 "-ExecutionPolicy", "Bypass",
+                 "-Command",
+                 "[Environment]::GetFolderPath('Desktop')"],
+                capture_output=True, timeout=5
+            )
+            if ps_desktop.returncode == 0:
+                desktop = ps_desktop.stdout.decode(errors="ignore").strip()
+                shortcut = os.path.join(desktop, "CC Telemetry.lnk")
+                if os.path.exists(shortcut):
+                    os.remove(shortcut)
+                    _log("uninstall: desktop shortcut removed")
+        except Exception as e:
+            _log(f"uninstall: shortcut error: {e}")
+
+        try:
+            _log("uninstall: complete — goodbye")
+            import time
+            time.sleep(0.2)
+            LOG_PATH.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+        try:
+            if getattr(sys, "frozen", False):
+                exe_path = sys.executable
+            else:
+                exe_path = os.path.abspath(sys.argv[0])
+
+            bat_path = os.path.join(
+                os.environ.get("TEMP", os.path.expanduser("~")),
+                "cc_telemetry_uninstall.bat"
+            )
+            bat_content = (
+                "@echo off\n"
+                "timeout /t 3 /nobreak >nul\n"
+                f"del /f /q \"{exe_path}\"\n"
+                f"del /f /q \"{bat_path}\"\n"
+            )
+            with open(bat_path, "w") as bf:
+                bf.write(bat_content)
+
+            subprocess.Popen(
+                ["cmd", "/c", bat_path],
+                creationflags=subprocess.CREATE_NO_WINDOW,
+                close_fds=True
+            )
+            _log("uninstall: self-delete scheduled")
+        except Exception as e:
+            _log(f"uninstall: self-delete error: {e}")
+
+        self._on_quit()
+
+    def _on_uninstall(self, *_) -> None:
+        self.root.after(0, self._uninstall)
+
     def _open_onboarding(self) -> None:
         win = tk.Toplevel(self.root)
         win.title("Claude Telemetry — Registration")
@@ -1586,6 +1690,8 @@ class TelemetryTrayApp:
                              checked=lambda item: _autostart_enabled()),
             pystray.MenuItem("My Stats",           self._on_stats),
             pystray.MenuItem("Settings…",          self._on_settings),
+            pystray.MenuItem("Uninstall",         self._on_uninstall),
+            pystray.Menu.SEPARATOR,
             pystray.MenuItem("Quit",              self._on_quit),
         )
 
