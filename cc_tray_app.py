@@ -34,7 +34,7 @@ CREATE_NO_WINDOW = 0x08000000  # Windows: don't flash a console window
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-APP_VERSION           = "2.9.8"
+APP_VERSION           = "2.9.9"
 APP_NAME              = f"Claude Telemetry v{APP_VERSION}"
 GITHUB_REPO           = "maico15/dashbord"
 UPDATE_CHECK_INTERVAL = 3600  # seconds
@@ -1757,14 +1757,52 @@ class TelemetryTrayApp:
         self.root.mainloop()
 
 
+def _ensure_permanent_exe() -> str:
+    """
+    If the exe is running from Downloads or Temp, copy it to
+    %LOCALAPPDATA%\\CCTelemetry\\cc_telemetry_tray.exe
+    Returns the permanent exe path (or current path if already permanent).
+    """
+    import os, sys, shutil
+    if not getattr(sys, "frozen", False):
+        return os.path.abspath(sys.argv[0])
+
+    current = sys.executable
+    install_dir = os.path.join(
+        os.environ.get("LOCALAPPDATA", os.path.expanduser("~")),
+        "CCTelemetry"
+    )
+    permanent = os.path.join(install_dir, "cc_telemetry_tray.exe")
+
+    # Already in permanent location
+    if os.path.abspath(current).lower() == os.path.abspath(permanent).lower():
+        return permanent
+
+    # Running from Downloads or Temp — copy to permanent location
+    bad_paths = ["downloads", "temp", "tmp"]
+    if any(p in current.lower() for p in bad_paths):
+        try:
+            os.makedirs(install_dir, exist_ok=True)
+            shutil.copy2(current, permanent)
+            _log(f"installed to {permanent}")
+        except Exception as e:
+            _log(f"install copy error: {e}")
+            return current
+    else:
+        return current
+
+    return permanent
+
+
 def _create_desktop_shortcut() -> None:
     """Create a desktop shortcut to this exe on Windows via PowerShell."""
-    import os, sys, subprocess
+    import os, sys, subprocess, tempfile
     try:
-        if getattr(sys, "frozen", False):
-            exe_path = sys.executable
-        else:
-            exe_path = os.path.abspath(sys.argv[0])
+        try:
+            exe_path = _EXE_PATH
+        except NameError:
+            exe_path = sys.executable if getattr(sys, "frozen", False) \
+                       else os.path.abspath(sys.argv[0])
 
         # Use PowerShell to get real Desktop path (handles relocated folders)
         ps_desktop = subprocess.run(
@@ -1786,25 +1824,42 @@ def _create_desktop_shortcut() -> None:
         dir_escaped = os.path.dirname(exe_path).replace("\\", "\\\\")
         sc_escaped  = shortcut_path.replace("\\", "\\\\")
 
-        ps_script = (
-            f"$ws = New-Object -ComObject WScript.Shell; "
-            f"$s = $ws.CreateShortcut('{sc_escaped}'); "
-            f"$s.TargetPath = '{exe_escaped}'; "
-            f"$s.WorkingDirectory = '{dir_escaped}'; "
-            f"$s.Description = 'Home Alliance Claude Code Telemetry'; "
-            f"$s.IconLocation = '{exe_escaped}'; "
-            f"$s.Save()"
-        )
+        ps_lines = [
+            "$ws = New-Object -ComObject WScript.Shell",
+            f"$s = $ws.CreateShortcut([System.IO.Path]::GetFullPath('{sc_escaped}'))",
+            f"$s.TargetPath = [System.IO.Path]::GetFullPath('{exe_escaped}')",
+            f"$s.WorkingDirectory = [System.IO.Path]::GetFullPath('{dir_escaped}')",
+            "$s.Description = 'Home Alliance Claude Code Telemetry'",
+            f"$s.IconLocation = '{exe_escaped}'",
+            "$s.Save()",
+        ]
+        ps_content = "\n".join(ps_lines)
 
-        result = subprocess.run(
-            ["powershell", "-NoProfile", "-NonInteractive",
-             "-ExecutionPolicy", "Bypass", "-Command", ps_script],
-            capture_output=True, timeout=10
-        )
+        # Write PS script to temp file to avoid command-line encoding issues
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".ps1", delete=False,
+            encoding="utf-8"
+        ) as tf:
+            tf.write(ps_content)
+            ps_file = tf.name
+
+        try:
+            result = subprocess.run(
+                ["powershell", "-NoProfile", "-NonInteractive",
+                 "-ExecutionPolicy", "Bypass",
+                 "-File", ps_file],
+                capture_output=True, timeout=15
+            )
+        finally:
+            try:
+                os.remove(ps_file)
+            except Exception:
+                pass
+
         if result.returncode == 0:
             _log(f"shortcut: created at {shortcut_path}")
         else:
-            err = result.stderr.decode(errors="ignore").strip()
+            err = result.stderr.decode("utf-8", errors="replace").strip()
             _log(f"shortcut PS error: {err}")
 
     except Exception as e:
@@ -1836,6 +1891,7 @@ def _cleanup_mei_folders() -> None:
 
 if __name__ == "__main__":
     import os as _os
+    _EXE_PATH = _ensure_permanent_exe()
     _cleanup_mei_folders()
     if _os.path.exists(CONFIG_PATH):
         import os as _os2
