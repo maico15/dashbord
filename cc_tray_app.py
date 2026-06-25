@@ -34,7 +34,7 @@ CREATE_NO_WINDOW = 0x08000000  # Windows: don't flash a console window
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-APP_VERSION           = "2.9.7"
+APP_VERSION           = "2.9.8"
 APP_NAME              = f"Claude Telemetry v{APP_VERSION}"
 GITHUB_REPO           = "maico15/dashbord"
 UPDATE_CHECK_INTERVAL = 3600  # seconds
@@ -1595,6 +1595,41 @@ class TelemetryTrayApp:
             win.clipboard_append(str(CONFIG_PATH))
             lbl_msg.config(text="Path copied! Transfer this file to another PC", fg="green")
 
+        def create_shortcut():
+            import os
+            try:
+                import subprocess
+                ps_desktop = subprocess.run(
+                    ["powershell", "-NoProfile", "-NonInteractive",
+                     "-ExecutionPolicy", "Bypass",
+                     "-Command", "[Environment]::GetFolderPath('Desktop')"],
+                    capture_output=True, timeout=5
+                )
+                desktop = ps_desktop.stdout.decode(errors="ignore").strip()
+                shortcut_path = os.path.join(desktop, "CC Telemetry.lnk")
+                already_exists = os.path.exists(shortcut_path)
+            except Exception:
+                already_exists = False
+                shortcut_path = None
+
+            if already_exists:
+                try:
+                    os.remove(shortcut_path)
+                except Exception:
+                    pass
+
+            _create_desktop_shortcut()
+
+            try:
+                if shortcut_path and os.path.exists(shortcut_path):
+                    lbl_msg.config(
+                        text="✓ Shortcut created on Desktop", fg="green")
+                else:
+                    lbl_msg.config(
+                        text="⚠ Could not create shortcut", fg="orange")
+            except Exception:
+                lbl_msg.config(text="✓ Shortcut creation attempted", fg="green")
+
         btn_row = tk.Frame(frm)
         btn_row.grid(row=frm.grid_size()[1], column=0, columnspan=2, pady=8)
         tk.Button(btn_row, text="Save",             command=save,                    width=10).pack(side="left", padx=4)
@@ -1605,6 +1640,12 @@ class TelemetryTrayApp:
         util_row = tk.Frame(frm)
         util_row.grid(row=frm.grid_size()[1], column=0, columnspan=2, pady=2)
         tk.Button(util_row, text="Copy config path", command=copy_config_path, width=20).pack(side="left", padx=4)
+        tk.Button(
+            util_row,
+            text="Create Desktop Shortcut",
+            command=create_shortcut,
+            width=22
+        ).pack(side="left", padx=4)
 
         # ── update section ────────────────────────────────────────────
         sep_r = frm.grid_size()[1]
@@ -1740,10 +1781,6 @@ def _create_desktop_shortcut() -> None:
         desktop = ps_desktop.stdout.decode(errors="ignore").strip()
         shortcut_path = os.path.join(desktop, "CC Telemetry.lnk")
 
-        if os.path.exists(shortcut_path):
-            _log("shortcut: already exists, skipping")
-            return
-
         # Escape backslashes for PowerShell string
         exe_escaped = exe_path.replace("\\", "\\\\")
         dir_escaped = os.path.dirname(exe_path).replace("\\", "\\\\")
@@ -1801,5 +1838,19 @@ if __name__ == "__main__":
     import os as _os
     _cleanup_mei_folders()
     if _os.path.exists(CONFIG_PATH):
-        _create_desktop_shortcut()
+        import os as _os2
+        try:
+            import subprocess as _sp2
+            _ps = _sp2.run(
+                ["powershell", "-NoProfile", "-NonInteractive",
+                 "-ExecutionPolicy", "Bypass",
+                 "-Command", "[Environment]::GetFolderPath('Desktop')"],
+                capture_output=True, timeout=5
+            )
+            _desk = _ps.stdout.decode(errors="ignore").strip()
+            _sc = _os2.path.join(_desk, "CC Telemetry.lnk")
+            if not _os2.path.exists(_sc):
+                _create_desktop_shortcut()
+        except Exception:
+            _create_desktop_shortcut()
     TelemetryTrayApp().run()
