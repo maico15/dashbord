@@ -118,19 +118,21 @@ function DailyChart({ daily }) {
 
 // ── Browser AI tools ─────────────────────────────────────────────────────────
 const TOOL_COLORS = {
-  claude:  '#d97706',
-  chatgpt: '#10a37f',
-  lovable: '#ff6b6b',
-  gemini:  '#4285f4',
-  copilot: '#7b61ff',
+  'claude':    '#7c3aed',
+  'claude.ai': '#7c3aed',
+  'chatgpt':   '#10a37f',
+  'lovable':   '#ff6b6b',
+  'gemini':    '#4285f4',
+  'copilot':   '#7b61ff',
 }
 
 const TOOL_LABELS = {
-  claude:  'Claude.ai',
-  chatgpt: 'ChatGPT',
-  lovable: 'Lovable',
-  gemini:  'Gemini',
-  copilot: 'Copilot',
+  'claude':    'Claude.ai',
+  'claude.ai': 'Claude.ai',
+  'chatgpt':   'ChatGPT',
+  'lovable':   'Lovable',
+  'gemini':    'Gemini',
+  'copilot':   'Copilot',
 }
 
 function formatMinutes(mins) {
