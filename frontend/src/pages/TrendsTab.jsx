@@ -255,6 +255,123 @@ function AiTrends({ weeks, engineers }) {
   )
 }
 
+// ── Browser AI Usage Trends ─────────────────────────────────────────────────
+
+const BROWSER_TOOL_COLORS = {
+  'chatgpt':   '#10a37f',
+  'claude.ai': '#7c3aed',
+  'lovable':   '#ff6b6b',
+  'gemini':    '#4285f4',
+  'copilot':   '#7b61ff',
+}
+
+const BROWSER_TOOL_LABELS = {
+  'chatgpt':   'ChatGPT',
+  'claude.ai': 'Claude.ai',
+  'lovable':   'Lovable',
+  'gemini':    'Gemini',
+  'copilot':   'Copilot',
+}
+
+function formatHours(mins) {
+  if (!mins) return '0h'
+  const h = Math.floor(mins / 60)
+  const m = mins % 60
+  return m > 0 ? `${h}h ${m}m` : `${h}h`
+}
+
+const BrowserAiTip = ({ active, payload, label }) => {
+  if (!active || !payload?.length) return null
+  return (
+    <div style={{
+      background: 'var(--card2)', border: '1px solid var(--border)',
+      borderRadius: 8, padding: '8px 12px', fontSize: 12,
+    }}>
+      <div style={{ color: 'var(--muted)', marginBottom: 4 }}>{label}</div>
+      {payload.map((p, i) => (
+        <div key={i} style={{ color: p.fill, fontWeight: 600 }}>
+          {p.name}: {formatHours(p.value)}
+        </div>
+      ))}
+    </div>
+  )
+}
+
+function BrowserAiTrends({ weeks }) {
+  // weeks: [{week:'W19', chatgpt:120, 'claude.ai':30, total:150}, ...]
+  if (!weeks || weeks.length === 0) return null
+
+  const tools = Object.keys(BROWSER_TOOL_COLORS)
+  const hasData = weeks.some(w => tools.some(t => (w[t] || 0) > 0))
+  if (!hasData) return null
+
+  const sorted = [...weeks].sort((a, b) => {
+    const na = parseInt(a.week.replace('W', ''), 10)
+    const nb = parseInt(b.week.replace('W', ''), 10)
+    return na - nb
+  })
+
+  // active tools = tools that have at least one non-zero value
+  const activeTools = tools.filter(t => sorted.some(w => (w[t] || 0) > 0))
+
+  const curWeek = sorted[sorted.length - 1]
+  const prevWeek = sorted[sorted.length - 2]
+  const curTotal = activeTools.reduce((s, t) => s + (curWeek?.[t] || 0), 0)
+  const prevTotal = activeTools.reduce((s, t) => s + (prevWeek?.[t] || 0), 0)
+  const delta = curTotal - prevTotal
+
+  return (
+    <div className="card" style={{ marginBottom: 20 }}>
+      <SectionLabel>Browser AI usage · Last 8 Weeks</SectionLabel>
+
+      <div style={{ display: 'flex', gap: 16, marginBottom: 16, flexWrap: 'wrap' }}>
+        <div style={{ background: 'var(--bg)', borderRadius: 8, padding: '10px 16px', minWidth: 100 }}>
+          <div style={{ fontSize: 11, color: 'var(--muted)', marginBottom: 4 }}>This week</div>
+          <div style={{ fontSize: 22, fontWeight: 600, color: 'var(--text)' }}>{formatHours(curTotal)}</div>
+          {prevTotal > 0 && (
+            <div style={{ fontSize: 11, color: delta >= 0 ? 'var(--success)' : 'var(--danger)' }}>
+              {delta >= 0 ? '↑' : '↓'} {formatHours(Math.abs(delta))} vs last
+            </div>
+          )}
+        </div>
+        {activeTools.map(t => (
+          <div key={t} style={{ background: 'var(--bg)', borderRadius: 8, padding: '10px 16px', minWidth: 100 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
+              <span style={{ width: 8, height: 8, borderRadius: 2, background: BROWSER_TOOL_COLORS[t], flexShrink: 0 }} />
+              <span style={{ fontSize: 11, color: 'var(--muted)' }}>{BROWSER_TOOL_LABELS[t] || t}</span>
+            </div>
+            <div style={{ fontSize: 22, fontWeight: 600, color: 'var(--text)' }}>
+              {formatHours(curWeek?.[t] || 0)}
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <ResponsiveContainer width="100%" height={220}>
+        <BarChart data={sorted} margin={{ top: 4, right: 8, left: -16, bottom: 0 }}>
+          <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
+          <XAxis dataKey="week" tick={{ fontSize: 11, fill: 'var(--muted)' }} />
+          <YAxis
+            tickFormatter={v => v >= 60 ? `${Math.floor(v / 60)}h` : `${v}m`}
+            tick={{ fontSize: 11, fill: 'var(--muted)' }}
+          />
+          <Tooltip content={<BrowserAiTip />} />
+          <Legend wrapperStyle={{ fontSize: 12, paddingTop: 8 }} />
+          {activeTools.map(t => (
+            <Bar
+              key={t}
+              dataKey={t}
+              name={BROWSER_TOOL_LABELS[t] || t}
+              stackId="a"
+              fill={BROWSER_TOOL_COLORS[t]}
+            />
+          ))}
+        </BarChart>
+      </ResponsiveContainer>
+    </div>
+  )
+}
+
 // ── Main component ─────────────────────────────────────────────────────────────
 
 export default function TrendsTab() {
@@ -262,6 +379,7 @@ export default function TrendsTab() {
   const [githubWeeks, setGithubWeeks]   = useState([])
   const [aiWeeks, setAiWeeks]           = useState([])
   const [engineers, setEngineers]       = useState([])
+  const [browserWeeks, setBrowserWeeks] = useState([])
 
   useEffect(() => {
     let cancelled = false
@@ -274,9 +392,19 @@ export default function TrendsTab() {
       const curYear = ov.current_year
 
       // 2. GitHub metrics (already contains 8 weeks in weekly_chart) + AI history
-      const [devData, aiHistory] = await Promise.all([
+      const [devData, aiHistory, browserHistory] = await Promise.all([
         api.get(`/metrics/dev?week=${curWeek}&year=${curYear}`),
         api.get('/ai-usage/history?n=8'),
+        Promise.all(
+          Array.from({ length: 8 }, (_, i) => {
+            const w = curWeek - (7 - i)
+            return w > 0
+              ? api.get(`/ai-usage/browser?week=${w}&year=${curYear}`)
+                  .then(d => ({ week: `W${w}`, tools: d.tools || [] }))
+                  .catch(() => ({ week: `W${w}`, tools: [] }))
+              : Promise.resolve({ week: `W${w}`, tools: [] })
+          })
+        ),
       ])
 
       if (cancelled) return
@@ -351,6 +479,14 @@ export default function TrendsTab() {
       setGithubWeeks(ghWeeks)
       setAiWeeks(mergedAi)
       setEngineers([...engSet.entries()].map(([name, color]) => ({ name, color })))
+
+      // Build browser weeks array: [{week, chatgpt, 'claude.ai', ...}]
+      const bWeeks = browserHistory.map(({ week, tools }) => {
+        const row = { week }
+        tools.forEach(t => { row[t.tool] = t.total_minutes || 0 })
+        return row
+      })
+      setBrowserWeeks(bWeeks)
       setLoading(false)
     }
 
@@ -374,6 +510,7 @@ export default function TrendsTab() {
     <div style={{ marginTop: 20 }}>
       <GithubTrends weeks={githubWeeks} />
       <AiTrends weeks={aiWeeks} engineers={engineers} />
+      <BrowserAiTrends weeks={browserWeeks} />
     </div>
   )
 }
