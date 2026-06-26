@@ -413,7 +413,7 @@ export default function AIUsageTab({ departmentId = 1, departmentName }) {
                 name: e.name,
                 value: Math.round((e.tokens_input || 0) / 1000),
                 unit: 'K',
-              }))}
+              })).filter(r => r.value > 0)}
               color={COLOR_INPUT}
             />
             <BottleneckBars
@@ -422,7 +422,7 @@ export default function AIUsageTab({ departmentId = 1, departmentName }) {
                 name: e.name,
                 value: Math.round((e.tokens_output || 0) / 1000),
                 unit: 'K',
-              }))}
+              })).filter(r => r.value > 0)}
               color={COLOR_OUTPUT}
             />
           </div>
