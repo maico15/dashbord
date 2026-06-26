@@ -3671,6 +3671,48 @@ def receive_tool_session(data: ToolSessionRequest):
     return {"ok": True}
 
 
+@app.post("/api/admin/fix-tool-names")
+def fix_tool_names(password: str = ""):
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    conn = get_db()
+    c = conn.cursor()
+
+    # Merge "claude" → "claude.ai"
+    c.execute("""
+        UPDATE ai_tool_sessions
+           SET tool = 'claude.ai'
+         WHERE LOWER(tool) IN ('claude', 'claude.ai', 'Claude.ai', 'Claude')
+    """)
+    affected = c.rowcount
+
+    # Now merge any duplicate (engineer_id, date) rows for claude.ai
+    # Sum duplicates into one row per engineer+date
+    c.execute("""
+        SELECT engineer_id, date, SUM(duration_sec) as total_sec, SUM(session_count) as total_sess
+        FROM ai_tool_sessions
+        WHERE tool = 'claude.ai'
+        GROUP BY engineer_id, date
+        HAVING COUNT(*) > 1
+    """)
+    dups = c.fetchall()
+    for dup in dups:
+        # Delete all rows for this engineer+date+tool
+        c.execute("""
+            DELETE FROM ai_tool_sessions
+            WHERE engineer_id=? AND date=? AND tool='claude.ai'
+        """, (dup["engineer_id"], dup["date"]))
+        # Reinsert merged row
+        c.execute("""
+            INSERT INTO ai_tool_sessions (engineer_id, tool, date, duration_sec, session_count)
+            VALUES (?, 'claude.ai', ?, ?, ?)
+        """, (dup["engineer_id"], dup["date"], dup["total_sec"], dup["total_sess"]))
+
+    conn.commit()
+    conn.close()
+    return {"ok": True, "rows_updated": affected, "duplicates_merged": len(dups)}
+
+
 class ScoreRequest(BaseModel):
     engineer_id: int
     week:        int
