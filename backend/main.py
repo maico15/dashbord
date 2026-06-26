@@ -516,6 +516,33 @@ def init_db():
         except Exception as ex:
             print(f"[init] Fake dev weeks removal error: {ex}")
 
+    # ── Normalize ai_tool_sessions.tool to lowercase (idempotent) ─────────────
+    c = conn.cursor()
+    c.execute("""
+        SELECT id, engineer_id, tool, date, duration_sec, session_count
+        FROM ai_tool_sessions
+        WHERE tool != LOWER(tool)
+    """)
+    rows = c.fetchall()
+    for row in rows:
+        normalized = row["tool"].lower().strip()
+        c.execute("""
+            UPDATE ai_tool_sessions
+            SET duration_sec  = duration_sec  + ?,
+                session_count = session_count + ?
+            WHERE engineer_id = ? AND tool = ? AND date = ?
+              AND id != ?
+        """, (row["duration_sec"], row["session_count"],
+              row["engineer_id"], normalized, row["date"], row["id"]))
+        if c.rowcount > 0:
+            c.execute("DELETE FROM ai_tool_sessions WHERE id = ?", (row["id"],))
+        else:
+            c.execute("UPDATE ai_tool_sessions SET tool = ? WHERE id = ?",
+                      (normalized, row["id"]))
+    if rows:
+        conn.commit()
+        print(f"[init] Normalized {len(rows)} ai_tool_sessions tool name(s) to lowercase.")
+
     conn.close()
 
 
@@ -3638,7 +3665,7 @@ def receive_tool_session(data: ToolSessionRequest):
         ON CONFLICT(engineer_id, tool, date) DO UPDATE SET
             duration_sec  = duration_sec  + excluded.duration_sec,
             session_count = session_count + 1
-    """, (int(data.engineer_id), data.tool, data.date, data.duration_sec))
+    """, (int(data.engineer_id), data.tool.lower().strip(), data.date, data.duration_sec))
     conn.commit()
     conn.close()
     return {"ok": True}
