@@ -31,7 +31,7 @@ const T = {
     alpha: 'Alpha',
     inProgress: 'In Progress',
     context: 'Context',
-    contextText: 'The daily reporting system was established on Jun 15 (W25). Brunetkin was the only engineer writing daily throughout all of June. From Jun 15 onward — all 4 core engineers report daily (80–100% coverage). W23–W24 reports for Pogrebnyak, Romario, and Malyshev will be migrated into the dashboard.',
+    contextText: 'All 4 engineers reported consistently in June. Pogrebnyak improved most dramatically: 43% in May → 95% in June. Romario: 52% → 82%. Malyshev: 24% → 73%. Data verified from Slack and loaded into the dashboard.',
     fullMonthTracking: 'Full-month tracking begins July 2026.',
     trackerNote: 'Tracker deployed Jun 15. Romario used Lovable ~4h/day Jun 1–14 (untracked ~40h). Real June total estimated 140h+.',
     tracked: 'Tracked (2.5 wks)',
@@ -78,7 +78,7 @@ const T = {
     alpha: 'Альфа',
     inProgress: 'В процессе',
     context: 'Контекст',
-    contextText: 'Система ежедневных репортов запущена 15 июня (W25). Брунеткин единственный писал каждый день весь июнь. Начиная с 15 июня — все 4 инженера пишут ежедневно (80–100%). Репорты за W23–W24 для Погребняка, Ромарио и Малышева будут загружены в дашборд.',
+    contextText: 'Все 4 инженера писали репорты систематически в июне. Наибольший рост показал Погребняк: 43% в мае → 95% в июне. Ромарио: 52% → 82%. Малышев: 24% → 73%. Данные проверены в Slack и загружены в дашборд.',
     fullMonthTracking: 'Полный месячный трекинг начинается с июля 2026.',
     trackerNote: 'Трекер запущен 15 июня. Ромарио использовал Lovable ~4ч/день 1–14 июня (не отслеживалось ~40ч). Реальный итог июня: 140ч+.',
     tracked: 'Отслежено (2.5 нед)',
@@ -106,7 +106,8 @@ const ENGINEERS = [
     id: 'brunetkin', initials: 'AB', color: '#00cfff',
     name: { en: 'Andrey Brunetkin', ru: 'Андрей Брунеткин' },
     badge: 'shippedToProd',
-    reporting: { pct: 76, days: 16, total: 21, fromJun15: 100, note: null },
+    reporting:    { pct: 86, days: 19, total: 22, fromJun15: 100, note: null },
+    reportingMay: { pct: 95, days: 20, total: 21 },
     sections: {
       en: [
         {
@@ -182,7 +183,8 @@ const ENGINEERS = [
     id: 'pogrebnyak', initials: 'AP', color: '#7b61ff',
     name: { en: 'Andrey Pogrebnyak', ru: 'Андрей Погребняк' },
     badge: 'active',
-    reporting: { pct: 19, days: 4, total: 21, fromJun15: 80, note: 'notLoadedYet' },
+    reporting:    { pct: 95, days: 21, total: 22, fromJun15: 100, note: null },
+    reportingMay: { pct: 43, days: 9,  total: 21 },
     sections: {
       en: [
         {
@@ -260,7 +262,8 @@ const ENGINEERS = [
     id: 'romario', initials: 'RM', color: '#00ff9d',
     name: { en: 'Roman Misan', ru: 'Роман Мисан' },
     badge: 'alpha',
-    reporting: { pct: 24, days: 5, total: 21, fromJun15: 100, note: 'notLoadedYet' },
+    reporting:    { pct: 82, days: 18, total: 22, fromJun15: 100, note: null },
+    reportingMay: { pct: 52, days: 11, total: 21 },
     sections: {
       en: [
         {
@@ -324,7 +327,8 @@ const ENGINEERS = [
     id: 'malyshev', initials: 'AM', color: '#ffa200',
     name: { en: 'Aleksandr Malyshev', ru: 'Александр Малышев' },
     badge: 'shippedToProd',
-    reporting: { pct: 19, days: 4, total: 21, fromJun15: 80, note: 'dashboardFocus' },
+    reporting:    { pct: 73, days: 16, total: 22, fromJun15: 88, note: null },
+    reportingMay: { pct: 24, days: 5,  total: 21 },
     sections: {
       en: [
         {
@@ -710,8 +714,18 @@ export default function MonthlyReview() {
                 <div style={{ marginTop: 10, height: 3, background: 'var(--border)', borderRadius: 2 }}>
                   <div style={{ width: `${eng.reporting.pct}%`, height: 3, borderRadius: 2, background: eng.color }} />
                 </div>
+                {eng.reportingMay && (
+                  <div style={{ fontSize: 11, color: 'var(--muted)', marginTop: 6 }}>
+                    May: <span style={{ color: 'var(--muted)' }}>{eng.reportingMay.pct}%</span>
+                    {' → '}
+                    June: <span style={{ color: eng.color, fontWeight: 600 }}>{eng.reporting.pct}%</span>
+                    {eng.reporting.pct > eng.reportingMay.pct && (
+                      <span style={{ color: 'var(--success)', marginLeft: 4 }}>↑</span>
+                    )}
+                  </div>
+                )}
                 {eng.reporting.fromJun15 && (
-                  <div style={{ fontSize: 11, color: 'var(--success)', marginTop: 6 }}>{t.fromJun15}: {eng.reporting.fromJun15}%</div>
+                  <div style={{ fontSize: 11, color: 'var(--success)', marginTop: 4 }}>{t.fromJun15}: {eng.reporting.fromJun15}%</div>
                 )}
                 {eng.reporting.note && (
                   <div style={{ fontSize: 10, color: 'var(--warning, #f59e0b)', marginTop: 2 }}>{t[eng.reporting.note]}</div>
