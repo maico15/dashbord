@@ -706,7 +706,7 @@ export default function MonthlyReview() {
           <SectionLabel>{t.sectionMetrics}</SectionLabel>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 12 }}>
             <CompareCard label="AI Output Tokens (Claude Code)" mayVal="13.5M" juneVal="20.1M" delta="+49%" accent="var(--accent1)" footNote="W26 alone: 7.8M — highest week ever" />
-            <CompareCard label="Daily Reports Filed" mayVal="~10" juneVal="29" delta="×3" mayNote={t.sporadic} juneNote={t.systematic} accent="var(--success)" />
+            <CompareCard label="Daily Reports Filed" mayVal="~45" juneVal="71" delta="×1.6" mayNote={t.sporadic} juneNote={t.systematic} accent="var(--success)" />
             <CompareCard label="Browser AI Hours" mayVal="—" juneVal="101h+" delta="NEW" deltaType="new" mayNote={t.notTracked} juneNote="2.5 wks data" accent="#a78bfa" footNote="Romario est. 4h/day in Lovable (untracked W23–W24)" />
           </div>
         </div>
