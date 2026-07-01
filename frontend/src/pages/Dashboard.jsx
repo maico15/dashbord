@@ -349,6 +349,9 @@ export default function Dashboard() {
           <Link to="/releases" className="dashboard-footer-link">
             ⚡ CC Telemetry — Release History
           </Link>
+          <Link to="/review/june-2026" className="dashboard-footer-link">
+            📊 June 2026 Review
+          </Link>
           <a
             href="https://github.com/maico15/dashbord/releases/latest/download/cc_telemetry_tray.exe"
             className="dashboard-footer-dl"
