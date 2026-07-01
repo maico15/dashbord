@@ -688,11 +688,10 @@ export default function MonthlyReview() {
         {/* ── KEY METRICS ── */}
         <div style={{ marginBottom: 52 }}>
           <SectionLabel>{t.sectionMetrics}</SectionLabel>
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 12 }}>
             <CompareCard label="AI Output Tokens (Claude Code)" mayVal="13.5M" juneVal="20.1M" delta="+49%" accent="var(--accent1)" footNote="W26 alone: 7.8M — highest week ever" />
             <CompareCard label="Daily Reports Filed" mayVal="~10" juneVal="29" delta="×3" mayNote={t.sporadic} juneNote={t.systematic} accent="var(--success)" />
             <CompareCard label="Browser AI Hours" mayVal="—" juneVal="101h+" delta="NEW" deltaType="new" mayNote={t.notTracked} juneNote="2.5 wks data" accent="#a78bfa" footNote="Romario est. 4h/day in Lovable (untracked W23–W24)" />
-            <CompareCard label="Sites Connected" mayVal="43" juneVal="73+" delta="+70%" accent="var(--accent-orange, #f97316)" footNote="~30 new sites via n8n automations (Roman)" />
           </div>
         </div>
 
@@ -792,47 +791,6 @@ export default function MonthlyReview() {
           </div>
         </div>
 
-        {/* ── PROJECTS ── */}
-        <div style={{ marginBottom: 52 }}>
-          <SectionLabel>{t.sectionProjects}</SectionLabel>
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 12 }}>
-            {ENGINEERS.map(eng => (
-              <div key={eng.id} style={{ background: 'var(--card)', border: '1px solid var(--border)', borderRadius: 12, padding: '20px 24px' }}>
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 10, fontSize: 14, fontWeight: 600 }}>
-                    <div style={{ width: 30, height: 30, borderRadius: '50%', background: eng.color, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 11, fontWeight: 700, color: 'var(--bg)', flexShrink: 0 }}>{eng.initials}</div>
-                    {eng.name[lang]}
-                  </div>
-                  <BadgeLabel type={eng.badge} t={t} />
-                  <ScoreInput
-                    engId={ENGINEER_IDS[eng.id]}
-                    color={eng.color}
-                    scores={scores}
-                    saveScore={saveScore}
-                    savedId={savedId}
-                  />
-                </div>
-                {eng.sections[lang].map((sec, si) => (
-                  <div key={si}>
-                    <div style={{ fontSize: 10, fontWeight: 600, letterSpacing: '.08em', textTransform: 'uppercase', color: 'var(--muted)', margin: si === 0 ? '0 0 6px' : '12px 0 6px' }}>{sec.title}</div>
-                    <ul style={{ listStyle: 'none', padding: 0 }}>
-                      {sec.items.map((item, ii) => (
-                        <li key={ii} style={{ fontSize: 13, color: 'var(--muted)', padding: '4px 0', display: 'flex', alignItems: 'flex-start', gap: 8, lineHeight: 1.45, borderBottom: '1px solid var(--border)' }}>
-                          <span style={{ color: 'var(--success)', flexShrink: 0, fontSize: 11, marginTop: 3 }}>✓</span>
-                          <div>
-                            {item.text}
-                            {item.impact && <div style={{ fontSize: 11, fontWeight: 500, color: 'var(--warning, #f59e0b)', marginTop: 2 }}>{item.impact}</div>}
-                          </div>
-                        </li>
-                      ))}
-                    </ul>
-                  </div>
-                ))}
-              </div>
-            ))}
-          </div>
-        </div>
-
         {/* ── TELEMETRY ── */}
         <div style={{ marginBottom: 52 }}>
           <SectionLabel>{t.sectionTelemetry}</SectionLabel>
@@ -876,6 +834,47 @@ export default function MonthlyReview() {
                 </div>
               ))}
             </div>
+          </div>
+        </div>
+
+        {/* ── PROJECTS ── */}
+        <div style={{ marginBottom: 52 }}>
+          <SectionLabel>{t.sectionProjects}</SectionLabel>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 12 }}>
+            {ENGINEERS.map(eng => (
+              <div key={eng.id} style={{ background: 'var(--card)', border: '1px solid var(--border)', borderRadius: 12, padding: '20px 24px' }}>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 10, fontSize: 14, fontWeight: 600 }}>
+                    <div style={{ width: 30, height: 30, borderRadius: '50%', background: eng.color, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 11, fontWeight: 700, color: 'var(--bg)', flexShrink: 0 }}>{eng.initials}</div>
+                    {eng.name[lang]}
+                  </div>
+                  <BadgeLabel type={eng.badge} t={t} />
+                  <ScoreInput
+                    engId={ENGINEER_IDS[eng.id]}
+                    color={eng.color}
+                    scores={scores}
+                    saveScore={saveScore}
+                    savedId={savedId}
+                  />
+                </div>
+                {eng.sections[lang].map((sec, si) => (
+                  <div key={si}>
+                    <div style={{ fontSize: 10, fontWeight: 600, letterSpacing: '.08em', textTransform: 'uppercase', color: 'var(--muted)', margin: si === 0 ? '0 0 6px' : '12px 0 6px' }}>{sec.title}</div>
+                    <ul style={{ listStyle: 'none', padding: 0 }}>
+                      {sec.items.map((item, ii) => (
+                        <li key={ii} style={{ fontSize: 13, color: 'var(--muted)', padding: '4px 0', display: 'flex', alignItems: 'flex-start', gap: 8, lineHeight: 1.45, borderBottom: '1px solid var(--border)' }}>
+                          <span style={{ color: 'var(--success)', flexShrink: 0, fontSize: 11, marginTop: 3 }}>✓</span>
+                          <div>
+                            {item.text}
+                            {item.impact && <div style={{ fontSize: 11, fontWeight: 500, color: 'var(--warning, #f59e0b)', marginTop: 2 }}>{item.impact}</div>}
+                          </div>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                ))}
+              </div>
+            ))}
           </div>
         </div>
 
