@@ -294,7 +294,7 @@ const ENGINEERS = [
         {
           title: 'Founder OS — AI SaaS',
           items: [
-            { text: 'Трансформирован из frontend-демо в работающий multi-tenant SaaS с Google auth.', impact: '4 пользователя в альфа-тестировании к концу июня' },
+            { text: 'Трансформирован из frontend-демо в работающий multi-tenant SaaS с Google auth и реальным бэкендом.', impact: '4 пользователя в альфа-тестировании к концу июня' },
             { text: 'Live Google Calendar sync: AI классифицирует события, нераспознанное время упало с ~70% до нуля.' },
             { text: 'Полная интеграция Fireflies: читает встречи → OpenAI создаёт задачи и цели автоматически.' },
             { text: 'Функция "Convert to Meeting Notes" для встреч без записи Fireflies.' },
