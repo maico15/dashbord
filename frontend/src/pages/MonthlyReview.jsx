@@ -1,4 +1,5 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
+import React from 'react'
 import { Link } from 'react-router-dom'
 
 // ── Translations ─────────────────────────────────────────────────────────────
@@ -570,10 +571,73 @@ function CompareCard({ label, mayVal, juneVal, delta, deltaType = 'up', mayNote,
   )
 }
 
+// ── Engineer IDs ─────────────────────────────────────────────────────────────
+const ENGINEER_IDS = {
+  brunetkin:  1,
+  pogrebnyak: 13,
+  romario:    12,
+  malyshev:   10,
+  bachinskiy: 15,
+  kudlaev:    14,
+}
+
+// ── Score Input Component ─────────────────────────────────────────────────────
+function ScoreInput({ engId, color, scores, saveScore, savedId }) {
+  const [localScore, setLocalScore] = React.useState(scores[engId] || '')
+  React.useEffect(() => { setLocalScore(scores[engId] || '') }, [scores[engId]])
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginLeft: 8 }}>
+      <span style={{ fontSize: 12, color: 'var(--muted)' }}>Score</span>
+      <input
+        type="number" min="1" max="10"
+        value={localScore}
+        placeholder="—"
+        onChange={e => setLocalScore(e.target.value)}
+        onBlur={e => saveScore(engId, e.target.value)}
+        onKeyDown={e => e.key === 'Enter' && saveScore(engId, e.target.value)}
+        style={{
+          width: 52, textAlign: 'center', fontSize: 15, fontWeight: 600,
+          padding: '4px 6px', borderRadius: 8, outline: 'none',
+          border: `1.5px solid ${localScore ? color : 'var(--border)'}`,
+          background: localScore ? `${color}18` : 'var(--card)',
+          color: localScore ? color : 'var(--muted)',
+        }}
+      />
+      {savedId === engId && <span style={{ fontSize: 11, color: 'var(--success)' }}>✓</span>}
+    </div>
+  )
+}
+
 // ── Main Component ────────────────────────────────────────────────────────────
 export default function MonthlyReview() {
   const [lang, setLang] = useState('en')
   const t = T[lang]
+  const [scores, setScores] = useState({})
+  const [savedId, setSavedId] = useState(null)
+
+  useEffect(() => {
+    fetch('https://dashbord-5u0i.onrender.com/api/performance-scores?week=27&year=2026')
+      .then(r => r.json())
+      .then(setScores)
+      .catch(() => {})
+  }, [])
+
+  const saveScore = async (engineerId, val) => {
+    const num = parseInt(val)
+    if (!val || isNaN(num) || num < 1 || num > 10) return
+    try {
+      await fetch('https://dashbord-5u0i.onrender.com/api/performance-scores?password=admin123', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ engineer_id: engineerId, week: 27, year: 2026, score: num })
+      })
+      setScores(prev => ({ ...prev, [engineerId]: num }))
+      setSavedId(engineerId)
+      setTimeout(() => setSavedId(null), 1500)
+    } catch (e) {
+      console.error('Score save error:', e)
+    }
+  }
 
   return (
     <div style={{ minHeight: '100vh', background: 'var(--bg)' }}>
@@ -639,7 +703,7 @@ export default function MonthlyReview() {
             {ENGINEERS.filter(e => e.reporting).map(eng => (
               <div key={eng.id} style={{ background: 'var(--card)', border: '1px solid var(--border)', borderRadius: 10, padding: '16px 20px' }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 10 }}>
-                  <div style={{ width: 28, height: 28, borderRadius: '50%', background: eng.color, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 11, fontWeight: 700, color: '#080d1f', flexShrink: 0 }}>{eng.initials}</div>
+                  <div style={{ width: 28, height: 28, borderRadius: '50%', background: eng.color, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 11, fontWeight: 700, color: 'var(--bg)', flexShrink: 0 }}>{eng.initials}</div>
                   <div style={{ fontSize: 13, fontWeight: 500 }}>{eng.name[lang]}</div>
                 </div>
                 <div style={{ fontSize: 24, fontWeight: 700, color: eng.color }}>{eng.reporting.pct}%</div>
@@ -656,7 +720,7 @@ export default function MonthlyReview() {
               </div>
             ))}
           </div>
-          <div style={{ background: '#0d1018', border: '1px solid #1a2040', borderRadius: 8, padding: '12px 16px', fontSize: 12, color: 'var(--muted)', lineHeight: 1.7 }}>
+          <div style={{ background: 'var(--card2)', border: '1px solid var(--border)', borderRadius: 8, padding: '12px 16px', fontSize: 12, color: 'var(--muted)', lineHeight: 1.7 }}>
             <span style={{ color: 'var(--accent1)', fontWeight: 600 }}>{t.context}: </span>
             {t.contextText} <strong style={{ color: 'var(--success)' }}>{t.fullMonthTracking}</strong>
           </div>
@@ -697,7 +761,7 @@ export default function MonthlyReview() {
             {/* Browser AI */}
             <div style={{ background: 'var(--card)', border: '1px solid var(--border)', borderRadius: 12, padding: '20px 24px' }}>
               <div style={{ fontSize: 11, fontWeight: 600, letterSpacing: '.07em', textTransform: 'uppercase', color: 'var(--muted)', marginBottom: 14 }}>Browser AI Tools — Tracked from Jun 15</div>
-              <div style={{ fontSize: 12, color: 'var(--muted)', marginBottom: 14, lineHeight: 1.6, padding: '10px 12px', background: '#0d1018', borderRadius: 6, border: '1px solid #1a2040' }}>
+              <div style={{ fontSize: 12, color: 'var(--muted)', marginBottom: 14, lineHeight: 1.6, padding: '10px 12px', background: 'var(--card2)', borderRadius: 6, border: '1px solid var(--border)' }}>
                 ⚠ {t.trackerNote}
               </div>
               {[
@@ -736,17 +800,24 @@ export default function MonthlyReview() {
               <div key={eng.id} style={{ background: 'var(--card)', border: '1px solid var(--border)', borderRadius: 12, padding: '20px 24px' }}>
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 10, fontSize: 14, fontWeight: 600 }}>
-                    <div style={{ width: 30, height: 30, borderRadius: '50%', background: eng.color, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 11, fontWeight: 700, color: '#080d1f', flexShrink: 0 }}>{eng.initials}</div>
+                    <div style={{ width: 30, height: 30, borderRadius: '50%', background: eng.color, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 11, fontWeight: 700, color: 'var(--bg)', flexShrink: 0 }}>{eng.initials}</div>
                     {eng.name[lang]}
                   </div>
                   <BadgeLabel type={eng.badge} t={t} />
+                  <ScoreInput
+                    engId={ENGINEER_IDS[eng.id]}
+                    color={eng.color}
+                    scores={scores}
+                    saveScore={saveScore}
+                    savedId={savedId}
+                  />
                 </div>
                 {eng.sections[lang].map((sec, si) => (
                   <div key={si}>
                     <div style={{ fontSize: 10, fontWeight: 600, letterSpacing: '.08em', textTransform: 'uppercase', color: 'var(--muted)', margin: si === 0 ? '0 0 6px' : '12px 0 6px' }}>{sec.title}</div>
                     <ul style={{ listStyle: 'none', padding: 0 }}>
                       {sec.items.map((item, ii) => (
-                        <li key={ii} style={{ fontSize: 13, color: '#9ca3b8', padding: '4px 0', display: 'flex', alignItems: 'flex-start', gap: 8, lineHeight: 1.45, borderBottom: '1px solid #14161e' }}>
+                        <li key={ii} style={{ fontSize: 13, color: 'var(--muted)', padding: '4px 0', display: 'flex', alignItems: 'flex-start', gap: 8, lineHeight: 1.45, borderBottom: '1px solid var(--border)' }}>
                           <span style={{ color: 'var(--success)', flexShrink: 0, fontSize: 11, marginTop: 3 }}>✓</span>
                           <div>
                             {item.text}
@@ -795,11 +866,11 @@ export default function MonthlyReview() {
                   items: ['Rollout to all 8 engineers', 'Gemini / Grok detection', 'Multi-source scoring', 'Browser AI trend charts']
                 },
               ].map(box => (
-                <div key={box.title} style={{ background: '#0d1018', border: '1px solid #1a2040', borderRadius: 8, padding: '14px 16px' }}>
+                <div key={box.title} style={{ background: 'var(--card2)', border: '1px solid var(--border)', borderRadius: 8, padding: '14px 16px' }}>
                   <div style={{ fontSize: 11, fontWeight: 600, letterSpacing: '.06em', textTransform: 'uppercase', color: 'var(--muted)', marginBottom: 8 }}>{box.title}</div>
                   <ul style={{ listStyle: 'none', padding: 0 }}>
                     {box.items.map((item, i) => (
-                      <li key={i} style={{ fontSize: 12, color: '#9ca3b8', lineHeight: 2 }}>{item}</li>
+                      <li key={i} style={{ fontSize: 12, color: 'var(--muted)', lineHeight: 2 }}>{item}</li>
                     ))}
                   </ul>
                 </div>
