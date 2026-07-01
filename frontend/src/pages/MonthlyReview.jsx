@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
 import React from 'react'
 import { Link } from 'react-router-dom'
+import { useTheme, toggleTheme } from '../hooks/useTheme'
 
 // ── Translations ─────────────────────────────────────────────────────────────
 const T = {
@@ -615,6 +616,7 @@ function ScoreInput({ engId, color, scores, saveScore, savedId }) {
 // ── Main Component ────────────────────────────────────────────────────────────
 export default function MonthlyReview() {
   const [lang, setLang] = useState('en')
+  const theme = useTheme()
   const t = T[lang]
   const [scores, setScores] = useState({})
   const [savedId, setSavedId] = useState(null)
@@ -671,13 +673,23 @@ export default function MonthlyReview() {
 
             <div>{t.trackingSince}: <strong style={{ color: 'var(--text)' }}>Jun 1 (Code) · Jun 15 (Browser)</strong></div>
           </div>
-          {/* Language toggle */}
-          <div style={{ display: 'flex', gap: 6, marginTop: 16, justifyContent: 'flex-end' }}>
-            {['en', 'ru'].map(l => (
-              <button key={l} onClick={() => setLang(l)} style={{ padding: '5px 14px', borderRadius: 8, border: '1px solid var(--border)', cursor: 'pointer', fontSize: 12, fontWeight: 600, textTransform: 'uppercase', background: lang === l ? 'var(--accent)' : 'var(--card)', color: lang === l ? '#fff' : 'var(--muted)', transition: 'all .2s' }}>
-                {l}
-              </button>
-            ))}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, justifyContent: 'flex-end', marginTop: 16 }}>
+            {/* Theme toggle */}
+            <button
+              onClick={toggleTheme}
+              title={theme === 'dark' ? 'Switch to light' : 'Switch to dark'}
+              style={{ width: 32, height: 32, borderRadius: 8, border: '1px solid var(--border)', background: 'var(--card)', color: 'var(--muted)', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 16, transition: 'all .2s' }}
+            >
+              {theme === 'dark' ? '☀️' : '🌙'}
+            </button>
+            {/* Language toggle */}
+            <div style={{ display: 'flex', gap: 6 }}>
+              {['en', 'ru'].map(l => (
+                <button key={l} onClick={() => setLang(l)} style={{ padding: '5px 14px', borderRadius: 8, border: '1px solid var(--border)', cursor: 'pointer', fontSize: 12, fontWeight: 600, textTransform: 'uppercase', background: lang === l ? 'var(--accent)' : 'var(--card)', color: lang === l ? '#fff' : 'var(--muted)', transition: 'all .2s' }}>
+                  {l}
+                </button>
+              ))}
+            </div>
           </div>
         </div>
       </div>
