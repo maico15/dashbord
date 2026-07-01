@@ -664,7 +664,7 @@ export default function MonthlyReview() {
           <div style={{ fontSize: 12, color: 'var(--muted)', lineHeight: 2.2 }}>
             <div>{t.prevReview}: <strong style={{ color: 'var(--text)' }}>May 2026 — June 1</strong></div>
             <div>{t.teamSize}: May: <strong style={{ color: 'var(--text)' }}>7</strong> → <strong style={{ color: 'var(--success)' }}>June: 8</strong></div>
-            <div>{t.newThisMonth}: <strong style={{ color: 'var(--accent1)' }}>Evgeny Vinogradov</strong></div>
+
             <div>{t.trackingSince}: <strong style={{ color: 'var(--text)' }}>Jun 1 (Code) · Jun 15 (Browser)</strong></div>
           </div>
           {/* Language toggle */}
