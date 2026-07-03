@@ -34,8 +34,9 @@ CREATE_NO_WINDOW = 0x08000000  # Windows: don't flash a console window
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-APP_VERSION           = "2.9.9"
-APP_NAME              = f"Claude Telemetry v{APP_VERSION}"
+APP_VERSION           = "3.0"
+APP_NAME              = f"Claude Telemetry v{APP_VERSION}"   # for display in UI only
+AUTOSTART_NAME        = "CCTelemetry"                        # stable autostart name, WITHOUT version
 GITHUB_REPO           = "maico15/dashbord"
 UPDATE_CHECK_INTERVAL = 3600  # seconds
 HOME            = pathlib.Path.home()
@@ -627,32 +628,70 @@ def _flush_browser_buffer(cfg: dict) -> None:
 # ---------------------------------------------------------------------------
 # Autostart
 # ---------------------------------------------------------------------------
+def _permanent_exe_path() -> str:
+    """Return the canonical install path in LOCALAPPDATA."""
+    import os
+    return os.path.join(
+        os.environ.get("LOCALAPPDATA", os.path.expanduser("~")),
+        "CCTelemetry", "cc_telemetry_tray.exe"
+    )
+
 def _autostart_enabled() -> bool:
     try:
         import winreg
         key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, _REG_RUN)
-        winreg.QueryValueEx(key, APP_NAME)
+        winreg.QueryValueEx(key, AUTOSTART_NAME)
         winreg.CloseKey(key)
         return True
     except Exception:
         return False
 
-def _set_autostart(enable: bool) -> None:
+def _cleanup_old_autostart_keys() -> None:
+    """Remove old versioned registry keys (Claude Telemetry v2.4 etc)."""
     try:
         import winreg
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, _REG_RUN, 0, winreg.KEY_ALL_ACCESS)
+        to_delete = []
+        i = 0
+        while True:
+            try:
+                name, _, _ = winreg.EnumValue(key, i)
+                if name.startswith("Claude Telemetry v"):
+                    to_delete.append(name)
+                i += 1
+            except OSError:
+                break
+        for name in to_delete:
+            try:
+                winreg.DeleteValue(key, name)
+                _log(f"autostart: removed old key '{name}'")
+            except Exception:
+                pass
+        winreg.CloseKey(key)
+    except Exception:
+        pass
+
+def _set_autostart(enable: bool) -> None:
+    try:
+        import winreg, os, sys
         key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, _REG_RUN,
                              0, winreg.KEY_ALL_ACCESS)
         if enable:
-            exe = pathlib.Path(__file__).resolve()
-            if exe.suffix.lower() == ".py":
-                val = f'pythonw.exe "{exe}"'
-            else:
+            # ALWAYS point to the permanent path, not the running exe
+            if getattr(sys, "frozen", False):
+                exe = _permanent_exe_path()
+                # If not yet installed there (dev run), fall back to current
+                if not os.path.exists(exe):
+                    exe = sys.executable
                 val = f'"{exe}"'
-            winreg.SetValueEx(key, APP_NAME, 0, winreg.REG_SZ, val)
-            _log("autostart enabled")
+            else:
+                exe = pathlib.Path(__file__).resolve()
+                val = f'pythonw.exe "{exe}"'
+            winreg.SetValueEx(key, AUTOSTART_NAME, 0, winreg.REG_SZ, val)
+            _log(f"autostart enabled -> {val}")
         else:
             try:
-                winreg.DeleteValue(key, APP_NAME)
+                winreg.DeleteValue(key, AUTOSTART_NAME)
                 _log("autostart disabled")
             except FileNotFoundError:
                 pass
@@ -666,8 +705,9 @@ def _set_autostart(enable: bool) -> None:
 def _make_icon(color=_C_BLUE) -> Image.Image:
     img  = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
-    draw.ellipse([4, 4, 60, 60], fill=color)
-    draw.rectangle([20, 24, 44, 40], fill=(255, 255, 255, 220))
+    draw.rounded_rectangle([0, 0, 63, 63], radius=12, fill=(13, 16, 26, 255))
+    pts = [(33, 8), (19, 33), (29, 33), (24, 56), (44, 27), (32, 27), (40, 8)]
+    draw.polygon(pts, fill=color)
     return img
 
 # ---------------------------------------------------------------------------
@@ -1482,6 +1522,8 @@ class TelemetryTrayApp:
                     cfg_new["registered_dept"]  = data["department"]
                     self._write_cfg(cfg_new)
                     _create_desktop_shortcut()
+                    _set_autostart(True)
+                    _log("registration: autostart enabled automatically")
                     win.after(0, lambda: _show_success(data))
                 except urllib.error.HTTPError as e:
                     body = e.read().decode()
@@ -1785,6 +1827,13 @@ def _ensure_permanent_exe() -> str:
             os.makedirs(install_dir, exist_ok=True)
             shutil.copy2(current, permanent)
             _log(f"installed to {permanent}")
+            # Relaunch from the permanent location and exit this instance
+            import subprocess
+            subprocess.Popen([permanent], close_fds=True)
+            _log("relaunching from permanent path, exiting Downloads copy")
+            raise SystemExit(0)
+        except SystemExit:
+            raise
         except Exception as e:
             _log(f"install copy error: {e}")
             return current
@@ -1794,29 +1843,56 @@ def _ensure_permanent_exe() -> str:
     return permanent
 
 
+def _get_desktop_path() -> str:
+    """Resolve Desktop path: PowerShell first, fallback to standard locations."""
+    import os, subprocess
+    # Method 1: PowerShell (handles OneDrive-relocated Desktop)
+    try:
+        ps = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive",
+             "-ExecutionPolicy", "Bypass",
+             "-Command", "[Environment]::GetFolderPath('Desktop')"],
+            capture_output=True, timeout=5
+        )
+        if ps.returncode == 0:
+            path = ps.stdout.decode(errors="ignore").strip()
+            if path and os.path.isdir(path):
+                return path
+    except Exception:
+        pass
+    # Method 2: standard location
+    candidate = os.path.join(os.path.expanduser("~"), "Desktop")
+    if os.path.isdir(candidate):
+        return candidate
+    # Method 3: OneDrive standard
+    onedrive = os.environ.get("OneDrive", "")
+    if onedrive:
+        candidate = os.path.join(onedrive, "Desktop")
+        if os.path.isdir(candidate):
+            return candidate
+    return ""
+
+
 def _create_desktop_shortcut() -> None:
     """Create a desktop shortcut to this exe on Windows via PowerShell."""
     import os, sys, subprocess, tempfile
     try:
-        try:
-            exe_path = _EXE_PATH
-        except NameError:
-            exe_path = sys.executable if getattr(sys, "frozen", False) \
-                       else os.path.abspath(sys.argv[0])
+        # Always point the shortcut at the permanent install path
+        perm = _permanent_exe_path()
+        if getattr(sys, "frozen", False) and os.path.exists(perm):
+            exe_path = perm
+        else:
+            try:
+                exe_path = _EXE_PATH
+            except NameError:
+                exe_path = sys.executable if getattr(sys, "frozen", False) \
+                           else os.path.abspath(sys.argv[0])
 
-        # Use PowerShell to get real Desktop path (handles relocated folders)
-        ps_desktop = subprocess.run(
-            ["powershell", "-NoProfile", "-NonInteractive",
-             "-ExecutionPolicy", "Bypass",
-             "-Command",
-             "[Environment]::GetFolderPath('Desktop')"],
-            capture_output=True, timeout=5
-        )
-        if ps_desktop.returncode != 0:
-            _log("shortcut: could not resolve Desktop path")
+        desktop = _get_desktop_path()
+        if not desktop:
+            _log("shortcut: could not resolve Desktop path (all methods failed)")
             return
 
-        desktop = ps_desktop.stdout.decode(errors="ignore").strip()
         shortcut_path = os.path.join(desktop, "CC Telemetry.lnk")
 
         # Escape backslashes for PowerShell string
@@ -1893,20 +1969,20 @@ if __name__ == "__main__":
     import os as _os
     _EXE_PATH = _ensure_permanent_exe()
     _cleanup_mei_folders()
+    _cleanup_old_autostart_keys()
+
     if _os.path.exists(CONFIG_PATH):
-        import os as _os2
+        # Registered user: self-heal shortcut and autostart on every launch
         try:
-            import subprocess as _sp2
-            _ps = _sp2.run(
-                ["powershell", "-NoProfile", "-NonInteractive",
-                 "-ExecutionPolicy", "Bypass",
-                 "-Command", "[Environment]::GetFolderPath('Desktop')"],
-                capture_output=True, timeout=5
-            )
-            _desk = _ps.stdout.decode(errors="ignore").strip()
-            _sc = _os2.path.join(_desk, "CC Telemetry.lnk")
-            if not _os2.path.exists(_sc):
+            _desk = _get_desktop_path()
+            _sc = _os.path.join(_desk, "CC Telemetry.lnk") if _desk else None
+            if _sc and not _os.path.exists(_sc):
                 _create_desktop_shortcut()
         except Exception:
             _create_desktop_shortcut()
+
+        # Re-assert autostart if user hasn't explicitly disabled it
+        if not _autostart_enabled():
+            _set_autostart(True)
+
     TelemetryTrayApp().run()
