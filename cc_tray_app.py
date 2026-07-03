@@ -36,7 +36,7 @@ CREATE_NO_WINDOW = 0x08000000  # Windows: don't flash a console window
 # ---------------------------------------------------------------------------
 APP_VERSION           = "3.0"
 APP_NAME              = f"Claude Telemetry v{APP_VERSION}"   # for display in UI only
-REG_KEY_NAME          = "CCTelemetry"                        # stable registry key, WITHOUT version
+AUTOSTART_NAME        = "CCTelemetry"                        # stable autostart name, WITHOUT version
 GITHUB_REPO           = "maico15/dashbord"
 UPDATE_CHECK_INTERVAL = 3600  # seconds
 HOME            = pathlib.Path.home()
@@ -640,7 +640,7 @@ def _autostart_enabled() -> bool:
     try:
         import winreg
         key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, _REG_RUN)
-        winreg.QueryValueEx(key, REG_KEY_NAME)
+        winreg.QueryValueEx(key, AUTOSTART_NAME)
         winreg.CloseKey(key)
         return True
     except Exception:
@@ -687,11 +687,11 @@ def _set_autostart(enable: bool) -> None:
             else:
                 exe = pathlib.Path(__file__).resolve()
                 val = f'pythonw.exe "{exe}"'
-            winreg.SetValueEx(key, REG_KEY_NAME, 0, winreg.REG_SZ, val)
+            winreg.SetValueEx(key, AUTOSTART_NAME, 0, winreg.REG_SZ, val)
             _log(f"autostart enabled -> {val}")
         else:
             try:
-                winreg.DeleteValue(key, REG_KEY_NAME)
+                winreg.DeleteValue(key, AUTOSTART_NAME)
                 _log("autostart disabled")
             except FileNotFoundError:
                 pass
