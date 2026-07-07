@@ -4930,6 +4930,29 @@ def get_tasks(week: int, year: int):
     return {"tasks": tasks}
 
 
+class TaskStatusUpdate(BaseModel):
+    status: str
+
+
+@app.patch("/api/tasks/{task_id}/status")
+def update_task_status(task_id: int, data: TaskStatusUpdate, password: str = ""):
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    if data.status not in ("new", "todo", "in_progress", "done"):
+        raise HTTPException(422, "Invalid status")
+    conn = get_db()
+    cur = conn.execute(
+        "UPDATE tasks SET status=?, updated_at=? WHERE id=?",
+        (data.status, datetime.utcnow().isoformat(), task_id),
+    )
+    conn.commit()
+    updated = cur.rowcount
+    conn.close()
+    if not updated:
+        raise HTTPException(404, "Task not found")
+    return {"ok": True, "id": task_id, "status": data.status}
+
+
 @app.get("/api/tasks/archive")
 def get_tasks_archive(before_week: int, year: int):
     """Done tasks from weeks earlier than `before_week`, grouped by week."""

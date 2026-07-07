@@ -39,6 +39,8 @@ export default function TaskBoard() {
   const [syncing, setSyncing] = useState(false)
   const [syncMsg, setSyncMsg] = useState(null)
   const [filterEng, setFilterEng] = useState('all')
+  const [dragId, setDragId] = useState(null)
+  const [dragOverCol, setDragOverCol] = useState(null)
   const theme = useTheme()
   const pw = sessionStorage.getItem('admin_pw') || ''
 
@@ -77,6 +79,20 @@ export default function TaskBoard() {
       setSyncMsg({ ok: false, msg })
     } finally {
       setSyncing(false)
+    }
+  }
+
+  const moveTask = async (taskId, newStatus) => {
+    if (!pw) { setSyncMsg({ ok: false, msg: 'Login to Admin first to move tasks' }); return }
+    const prevTasks = tasks
+    setTasks(prev => prev.map(t => t.id === taskId ? { ...t, status: newStatus } : t))
+    try {
+      await api.patch(`/tasks/${taskId}/status`, { status: newStatus }, pw)
+    } catch (e) {
+      setTasks(prevTasks)
+      let msg = e.message
+      try { msg = JSON.parse(msg).detail || msg } catch {}
+      setSyncMsg({ ok: false, msg: `Move failed: ${msg}` })
     }
   }
 
@@ -152,7 +168,25 @@ export default function TaskBoard() {
             {COLUMNS.map(col => {
               const colTasks = shown.filter(t => t.status === col.key)
               return (
-                <div key={col.key} className="card" style={{ padding: 16 }}>
+                <div
+                  key={col.key}
+                  onDragOver={(e) => { e.preventDefault(); setDragOverCol(col.key) }}
+                  onDragLeave={() => setDragOverCol(null)}
+                  onDrop={(e) => {
+                    e.preventDefault()
+                    if (dragId != null) moveTask(dragId, col.key)
+                    setDragId(null)
+                    setDragOverCol(null)
+                  }}
+                  style={{
+                    background: 'var(--card)',
+                    border: dragOverCol === col.key ? `1.5px solid ${col.color}` : '1px solid var(--border)',
+                    borderRadius: 12,
+                    padding: 16,
+                    transition: 'border-color .15s',
+                    minHeight: 120,
+                  }}
+                >
                   <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 14 }}>
                     <div style={{ width: 8, height: 8, borderRadius: '50%', background: col.color }} />
                     <span style={{ fontSize: 13, fontWeight: 600 }}>{col.label}</span>
@@ -160,7 +194,21 @@ export default function TaskBoard() {
                   </div>
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                     {colTasks.map(t => (
-                      <div key={t.id} style={{ background: 'var(--card2)', border: '1px solid var(--border)', borderRadius: 8, padding: '10px 12px' }}>
+                      <div
+                        key={t.id}
+                        draggable
+                        onDragStart={(e) => { setDragId(t.id); e.dataTransfer.effectAllowed = 'move' }}
+                        onDragEnd={() => { setDragId(null); setDragOverCol(null) }}
+                        style={{
+                          background: 'var(--card2)',
+                          border: '1px solid var(--border)',
+                          borderRadius: 8,
+                          padding: '10px 12px',
+                          cursor: 'grab',
+                          opacity: dragId === t.id ? 0.4 : 1,
+                          transition: 'opacity .15s',
+                        }}
+                      >
                         <div style={{ fontSize: 13, lineHeight: 1.4, marginBottom: 6, color: 'var(--text)' }}>{t.title}</div>
                         <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                           {t.project && (
