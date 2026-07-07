@@ -345,14 +345,15 @@ def init_db():
         );
 
         CREATE TABLE IF NOT EXISTS tasks (
-            id          INTEGER PRIMARY KEY AUTOINCREMENT,
-            engineer_id INTEGER REFERENCES team_members(id) ON DELETE CASCADE,
-            title       TEXT NOT NULL,
-            project     TEXT,
-            status      TEXT NOT NULL DEFAULT 'todo',
-            week        INTEGER,
-            year        INTEGER,
-            updated_at  TEXT
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            engineer_id     INTEGER REFERENCES team_members(id) ON DELETE CASCADE,
+            title           TEXT NOT NULL,
+            project         TEXT,
+            status          TEXT NOT NULL DEFAULT 'todo',
+            week            INTEGER,
+            year            INTEGER,
+            updated_at      TEXT,
+            manual_override INTEGER NOT NULL DEFAULT 0
         );
     """)
     conn.commit()
@@ -420,6 +421,11 @@ def init_db():
         pass
     try:
         conn.execute("ALTER TABLE team_members ADD COLUMN email TEXT DEFAULT ''")
+        conn.commit()
+    except Exception:
+        pass
+    try:
+        conn.execute("ALTER TABLE tasks ADD COLUMN manual_override INTEGER NOT NULL DEFAULT 0")
         conn.commit()
     except Exception:
         pass
@@ -4895,7 +4901,11 @@ def sync_tasks_from_reports(week: int, year: int, password: str = ""):
             continue
 
         now = datetime.utcnow().isoformat()
-        c.execute("DELETE FROM tasks WHERE engineer_id=? AND week=? AND year=?", (eng_id, week, year))
+        # Preserve tasks the user manually moved on the board — only regenerate the rest.
+        c.execute(
+            "DELETE FROM tasks WHERE engineer_id=? AND week=? AND year=? AND manual_override=0",
+            (eng_id, week, year),
+        )
         for t in tasks:
             if not isinstance(t, dict) or not t.get("title"):
                 continue
@@ -4919,7 +4929,7 @@ def get_tasks(week: int, year: int):
     conn = get_db()
     c = conn.cursor()
     c.execute(
-        "SELECT t.id, t.engineer_id, t.title, t.project, t.status, "
+        "SELECT t.id, t.engineer_id, t.title, t.project, t.status, t.manual_override, "
         "e.name as engineer_name, e.avatar_color as engineer_color "
         "FROM tasks t JOIN team_members e ON e.id = t.engineer_id "
         "WHERE t.week=? AND t.year=? ORDER BY t.status, e.name",
@@ -4942,7 +4952,7 @@ def update_task_status(task_id: int, data: TaskStatusUpdate, password: str = "")
         raise HTTPException(422, "Invalid status")
     conn = get_db()
     cur = conn.execute(
-        "UPDATE tasks SET status=?, updated_at=? WHERE id=?",
+        "UPDATE tasks SET status=?, updated_at=?, manual_override=1 WHERE id=?",
         (data.status, datetime.utcnow().isoformat(), task_id),
     )
     conn.commit()
