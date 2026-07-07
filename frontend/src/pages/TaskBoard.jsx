@@ -33,6 +33,8 @@ export default function TaskBoard() {
   const [week, setWeek] = useState(null)
   const [year, setYear] = useState(null)
   const [tasks, setTasks] = useState([])
+  const [archive, setArchive] = useState([])
+  const [openWeeks, setOpenWeeks] = useState({})
   const [loading, setLoading] = useState(true)
   const [syncing, setSyncing] = useState(false)
   const [syncMsg, setSyncMsg] = useState(null)
@@ -54,6 +56,9 @@ export default function TaskBoard() {
       .then(d => setTasks(d.tasks || []))
       .catch(() => setTasks([]))
       .finally(() => setLoading(false))
+    api.get(`/tasks/archive?before_week=${week}&year=${year}`)
+      .then(d => setArchive(d.archive || []))
+      .catch(() => setArchive([]))
   }, [week, year])
 
   useEffect(() => { load() }, [load])
@@ -174,6 +179,52 @@ export default function TaskBoard() {
                       <div style={{ fontSize: 12, color: 'var(--muted)', textAlign: 'center', padding: 12 }}>—</div>
                     )}
                   </div>
+                </div>
+              )
+            })}
+          </div>
+        )}
+
+        {archive.length > 0 && (
+          <div style={{ marginTop: 40 }}>
+            <div style={{
+              fontSize: 11, fontWeight: 600, letterSpacing: '.1em', textTransform: 'uppercase',
+              color: 'var(--muted)', marginBottom: 16, paddingBottom: 10, borderBottom: '1px solid var(--border)',
+            }}>
+              Archive · completed in previous weeks
+            </div>
+            {archive.map(grp => {
+              const isOpen = !!openWeeks[grp.week]
+              return (
+                <div key={grp.week} className="card" style={{ padding: 0, marginBottom: 8, overflow: 'hidden' }}>
+                  <div
+                    onClick={() => setOpenWeeks(p => ({ ...p, [grp.week]: !p[grp.week] }))}
+                    style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '12px 16px', cursor: 'pointer' }}
+                  >
+                    <span style={{ fontSize: 12, color: 'var(--muted)', transform: isOpen ? 'rotate(90deg)' : 'none', transition: 'transform .15s' }}>▶</span>
+                    <span style={{ fontSize: 13, fontWeight: 600 }}>Week {grp.week}</span>
+                    <span style={{ fontSize: 12, color: 'var(--success)', marginLeft: 'auto' }}>{grp.count} completed</span>
+                  </div>
+                  {isOpen && (
+                    <div style={{ padding: '0 16px 16px', display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 8 }}>
+                      {grp.tasks.map(t => (
+                        <div key={t.id} style={{ background: 'var(--card2)', border: '1px solid var(--border)', borderRadius: 8, padding: '10px 12px' }}>
+                          <div style={{ fontSize: 13, lineHeight: 1.4, marginBottom: 6, color: 'var(--text)' }}>{t.title}</div>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                            {t.project && (
+                              <span style={{ fontSize: 10, padding: '2px 6px', borderRadius: 4, background: 'var(--border)', color: 'var(--muted)' }}>
+                                {t.project}
+                              </span>
+                            )}
+                            <span style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 11, color: 'var(--muted)', marginLeft: 'auto' }}>
+                              <span style={{ width: 8, height: 8, borderRadius: '50%', background: t.engineer_color || 'var(--muted)', display: 'inline-block' }} />
+                              {t.engineer_name?.split(' ')[0]}
+                            </span>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
               )
             })}
