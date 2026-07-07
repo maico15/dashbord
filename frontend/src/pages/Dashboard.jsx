@@ -352,6 +352,9 @@ export default function Dashboard() {
           <Link to="/review/june-2026" className="dashboard-footer-link">
             📊 June 2026 Review
           </Link>
+          <Link to="/tasks" className="dashboard-footer-link">
+            📋 Task Board
+          </Link>
           <a
             href="https://github.com/maico15/dashbord/releases/latest/download/cc_telemetry_tray.exe"
             className="dashboard-footer-dl"
