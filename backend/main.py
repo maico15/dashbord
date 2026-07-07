@@ -343,6 +343,17 @@ def init_db():
             score       INTEGER NOT NULL CHECK(score >= 1 AND score <= 10),
             UNIQUE(engineer_id, week, year)
         );
+
+        CREATE TABLE IF NOT EXISTS tasks (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            engineer_id INTEGER REFERENCES team_members(id) ON DELETE CASCADE,
+            title       TEXT NOT NULL,
+            project     TEXT,
+            status      TEXT NOT NULL DEFAULT 'todo',
+            week        INTEGER,
+            year        INTEGER,
+            updated_at  TEXT
+        );
     """)
     conn.commit()
     # Seed default departments
@@ -4764,6 +4775,152 @@ def delete_report(report_id: int, password: str = ""):
     conn.commit()
     conn.close()
     return {"ok": True}
+
+
+# ── Task Board ─────────────────────────────────────────────────────────────
+
+def _week_date_range(week: int, year: int):
+    jan4 = datetime(year, 1, 4).date()
+    week1_monday = jan4 - timedelta(days=jan4.weekday())
+    week_monday = week1_monday + timedelta(weeks=week - 1)
+    week_sunday = week_monday + timedelta(days=6)
+    return week_monday.strftime("%Y-%m-%d"), week_sunday.strftime("%Y-%m-%d")
+
+
+@app.post("/api/tasks/sync")
+def sync_tasks_from_reports(week: int, year: int, password: str = ""):
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+    if not api_key:
+        conn2 = get_db()
+        c2 = conn2.cursor()
+        c2.execute("SELECT value FROM config WHERE key='anthropic_admin_key'")
+        row2 = c2.fetchone()
+        conn2.close()
+        api_key = (row2["value"] if row2 else "").strip()
+    if not api_key:
+        raise HTTPException(400, "Anthropic API key not configured. Set ANTHROPIC_API_KEY env var on Render.")
+
+    start_date, end_date = _week_date_range(week, year)
+
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT id, name FROM team_members")
+    members = [(r["id"], r["name"]) for r in c.fetchall()]
+
+    total_tasks = 0
+    for eng_id, eng_name in members:
+        c.execute(
+            "SELECT report_date, completed, invisible_work, next_tasks, delayed_risks "
+            "FROM daily_reports WHERE engineer_id=? AND report_date BETWEEN ? AND ? "
+            "ORDER BY report_date",
+            (eng_id, start_date, end_date),
+        )
+        rows = [dict(r) for r in c.fetchall()]
+        if not rows:
+            continue
+
+        report_text = ""
+        for r in rows:
+            completed = json_lib.loads(r["completed"] or "[]")
+            invisible = json_lib.loads(r["invisible_work"] or "[]")
+            next_tasks = json_lib.loads(r["next_tasks"] or "[]")
+            risks = json_lib.loads(r["delayed_risks"] or "[]")
+            if not (completed or invisible or next_tasks or risks):
+                continue
+            report_text += f"\n[{r['report_date']}]\n"
+            if completed:
+                report_text += "COMPLETED:\n" + "\n".join(f"- {i}" for i in completed) + "\n"
+            if invisible:
+                report_text += "INVISIBLE WORK (completed, not ticket-tracked):\n" + "\n".join(f"- {i}" for i in invisible) + "\n"
+            if next_tasks:
+                report_text += "NEXT:\n" + "\n".join(f"- {i}" for i in next_tasks) + "\n"
+            if risks:
+                report_text += "DELAYED / AT RISK (still ongoing):\n" + "\n".join(f"- {i}" for i in risks) + "\n"
+
+        if not report_text.strip():
+            continue
+
+        prompt = (
+            "You are analyzing an engineer's daily reports for one week. "
+            "Group related mentions into distinct tasks. For each task determine its current status "
+            "based on the latest mention across the week.\n\n"
+            "Status rules:\n"
+            "- 'done': appeared in COMPLETED or INVISIBLE WORK\n"
+            "- 'in_progress': appeared in DELAYED / AT RISK, or mentioned as NEXT on an earlier day and again later without being marked completed\n"
+            "- 'todo': appeared only once, in NEXT, not started\n"
+            "- 'new': mentioned once, ambiguous\n\n"
+            "Merge mentions that refer to the same work even if worded differently.\n"
+            "Infer a short project name (e.g. 'Auth', 'CRM', 'Dashboard', 'HA OS') from context.\n\n"
+            f"REPORTS:\n{report_text}\n\n"
+            "Respond ONLY with a JSON array, no markdown, no preamble:\n"
+            '[{"title": "short task title", "project": "project name", "status": "done|in_progress|todo|new"}]'
+        )
+
+        payload = json_lib.dumps({
+            "model": "claude-sonnet-4-5",
+            "max_tokens": 2000,
+            "messages": [{"role": "user", "content": prompt}],
+        }).encode()
+        req = urllib.request.Request(
+            "https://api.anthropic.com/v1/messages",
+            data=payload,
+            headers={
+                "Content-Type": "application/json",
+                "x-api-key": api_key,
+                "anthropic-version": "2023-06-01",
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                result = json_lib.loads(resp.read())
+            text = (result.get("content") or [{}])[0].get("text", "").strip()
+            if text.startswith("```"):
+                nl = text.find("\n")
+                text = text[nl + 1:] if nl != -1 else text[3:]
+            if text.rstrip().endswith("```"):
+                text = text.rstrip()[:-3]
+            tasks = json_lib.loads(text.strip())
+        except Exception:
+            continue
+
+        now = datetime.utcnow().isoformat()
+        c.execute("DELETE FROM tasks WHERE engineer_id=? AND week=? AND year=?", (eng_id, week, year))
+        for t in tasks:
+            if not isinstance(t, dict) or not t.get("title"):
+                continue
+            status = t.get("status", "new")
+            if status not in ("new", "todo", "in_progress", "done"):
+                status = "new"
+            c.execute(
+                "INSERT INTO tasks (engineer_id, title, project, status, week, year, updated_at) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (eng_id, t["title"][:200], (t.get("project") or "")[:60], status, week, year, now),
+            )
+            total_tasks += 1
+
+    conn.commit()
+    conn.close()
+    return {"ok": True, "tasks_synced": total_tasks}
+
+
+@app.get("/api/tasks")
+def get_tasks(week: int, year: int):
+    conn = get_db()
+    c = conn.cursor()
+    c.execute(
+        "SELECT t.id, t.engineer_id, t.title, t.project, t.status, "
+        "e.name as engineer_name, e.avatar_color as engineer_color "
+        "FROM tasks t JOIN team_members e ON e.id = t.engineer_id "
+        "WHERE t.week=? AND t.year=? ORDER BY t.status, e.name",
+        (week, year),
+    )
+    tasks = [dict(r) for r in c.fetchall()]
+    conn.close()
+    return {"tasks": tasks}
 
 
 @app.post("/api/sync/slack-reports")
