@@ -4854,6 +4854,13 @@ def sync_tasks_from_reports(week: int, year: int, password: str = ""):
             "- 'new': mentioned once, ambiguous\n\n"
             "Merge mentions that refer to the same work even if worded differently.\n"
             "Infer a short project name (e.g. 'Auth', 'CRM', 'Dashboard', 'HA OS') from context.\n\n"
+            "IMPORTANT — do NOT create tasks for routine activities. Skip entirely:\n"
+            "- Meetings, standups, syncs, 1:1s, calls (e.g. 'Dev meet', 'weekly meeting', 'AI First meeting', 'team synchronization')\n"
+            "- Attending workshops, reviews, or presentations\n"
+            "- Writing/sending daily reports, status updates\n"
+            "- Generic coordination with no concrete deliverable\n"
+            "Only create tasks for actual engineering or product WORK with a concrete deliverable "
+            "(a feature, fix, integration, deployment, investigation, or artifact).\n\n"
             f"REPORTS:\n{report_text}\n\n"
             "Respond ONLY with a JSON array, no markdown, no preamble:\n"
             '[{"title": "short task title", "project": "project name", "status": "done|in_progress|todo|new"}]'
