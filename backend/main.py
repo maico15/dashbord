@@ -2814,8 +2814,10 @@ def register_engineer(data: RegisterEngineerRequest):
 
     email_norm = data.email.strip().lower()
 
-    if not email_norm.endswith("@homealliance.com"):
-        raise HTTPException(422, "Only @homealliance.com email addresses are allowed")
+    ALLOWED_EMAIL_DOMAINS = ("@homealliance.com", "@alliancevs.io", "@bigbrainmarketing.co")
+    if not any(email_norm.endswith(d) for d in ALLOWED_EMAIL_DOMAINS):
+        allowed = ", ".join(ALLOWED_EMAIL_DOMAINS)
+        raise HTTPException(422, f"Email must be from an allowed domain: {allowed}")
 
     if len(data.first_name.strip()) < 2 or len(data.last_name.strip()) < 2:
         raise HTTPException(422, "First name and last name must be at least 2 characters")

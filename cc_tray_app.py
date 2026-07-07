@@ -34,7 +34,7 @@ CREATE_NO_WINDOW = 0x08000000  # Windows: don't flash a console window
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-APP_VERSION           = "3.0"
+APP_VERSION           = "3.1"
 APP_NAME              = f"Claude Telemetry v{APP_VERSION}"   # for display in UI only
 AUTOSTART_NAME        = "CCTelemetry"                        # stable autostart name, WITHOUT version
 GITHUB_REPO           = "maico15/dashbord"
@@ -1441,7 +1441,7 @@ class TelemetryTrayApp:
 
         row("First name:", var_first)
         row("Last name:", var_last)
-        row("Email (@homealliance.com):", var_email)
+        row("Email (company domain):", var_email)
 
         tk.Label(frm, text="Department:", font=("Segoe UI", 10),
                  anchor="w").pack(fill="x", pady=(8, 0))
@@ -1486,8 +1486,9 @@ class TelemetryTrayApp:
             if len(last) < 2:
                 lbl_status.config(text="Last name must be at least 2 characters.")
                 return
-            if not email.lower().endswith("@homealliance.com"):
-                lbl_status.config(text="Only @homealliance.com email is allowed.")
+            _allowed_domains = ("@homealliance.com", "@alliancevs.io", "@bigbrainmarketing.co")
+            if not any(email.lower().endswith(d) for d in _allowed_domains):
+                lbl_status.config(text="Email must be from an allowed company domain.")
                 return
             if not dept_name or dept_name not in dept_map:
                 lbl_status.config(text="Please select a department.")
