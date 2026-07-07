@@ -209,7 +209,12 @@ export default function TaskBoard() {
                           transition: 'opacity .15s',
                         }}
                       >
-                        <div style={{ fontSize: 13, lineHeight: 1.4, marginBottom: 6, color: 'var(--text)' }}>{t.title}</div>
+                        <div style={{ fontSize: 13, lineHeight: 1.4, marginBottom: 6, color: 'var(--text)' }}>
+                          {t.title}
+                          {!!t.manual_override && (
+                            <span title="Manually moved — kept as-is on next sync" style={{ marginLeft: 6, fontSize: 11, opacity: 0.7 }}>📌</span>
+                          )}
+                        </div>
                         <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                           {t.project && (
                             <span style={{ fontSize: 10, padding: '2px 6px', borderRadius: 4, background: 'var(--border)', color: 'var(--muted)' }}>
