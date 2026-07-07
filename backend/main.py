@@ -4923,6 +4923,30 @@ def get_tasks(week: int, year: int):
     return {"tasks": tasks}
 
 
+@app.get("/api/tasks/archive")
+def get_tasks_archive(before_week: int, year: int):
+    """Done tasks from weeks earlier than `before_week`, grouped by week."""
+    conn = get_db()
+    c = conn.cursor()
+    c.execute(
+        "SELECT t.id, t.engineer_id, t.title, t.project, t.status, t.week, "
+        "e.name as engineer_name, e.avatar_color as engineer_color "
+        "FROM tasks t JOIN team_members e ON e.id = t.engineer_id "
+        "WHERE t.status='done' AND t.year=? AND t.week < ? "
+        "ORDER BY t.week DESC, e.name",
+        (year, before_week),
+    )
+    rows = [dict(r) for r in c.fetchall()]
+    conn.close()
+    weeks = {}
+    for r in rows:
+        wk = r["week"]
+        weeks.setdefault(wk, []).append(r)
+    result = [{"week": wk, "count": len(items), "tasks": items}
+              for wk, items in sorted(weeks.items(), reverse=True)]
+    return {"archive": result}
+
+
 @app.post("/api/sync/slack-reports")
 def sync_slack_reports(password: str = ""):
     if password != ADMIN_PASSWORD:
