@@ -334,6 +334,11 @@ export default function Dashboard() {
               {t.label}
             </button>
           ))}
+          {activeDept === IT_DEPT_ID && (
+            <Link to="/tasks" className="tab-btn" style={{ textDecoration: 'none', display: 'inline-flex', alignItems: 'center' }}>
+              🗂️ Task Board
+            </Link>
+          )}
         </div>
 
         {activeTab === 'dev'          && <DevTab />}
