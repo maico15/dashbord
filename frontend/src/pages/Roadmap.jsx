@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { Link } from 'react-router-dom'
 import { api } from '../api/client'
 
@@ -9,13 +9,224 @@ const PRIORITIES = {
   P3: { label: 'P3', color: '#7c3aed' },
 }
 
+const PRIO_BAR = {
+  P0: 'linear-gradient(90deg,#dc2626,#f97316)',
+  P1: 'linear-gradient(90deg,#f97316,#eab308)',
+  P2: 'linear-gradient(90deg,#2563eb,#06b6d4)',
+  P3: 'linear-gradient(90deg,#7c3aed,#a855f7)',
+}
+
+const WEEK_START = 27, WEEK_END = 38, WEEK_COUNT = 12 // Q3 weeks
+const ROW_HEIGHT = 44
+
 const EMPTY_DRAFT = { title: '', owner_id: '', priority: 'P2', description: '' }
+
+function GanttView({ tasks, setTasks, pw, openId, setOpenId, saveNote, setPriority }) {
+  const trackRef = useRef(null)
+  const barDrag = useRef(null)   // {id, mode:'move'|'left'|'right', startX, origStart, origEnd, weekPx}
+  const rowDrag = useRef(null)   // {id, startY}
+
+  const clamp = (w) => Math.max(WEEK_START, Math.min(WEEK_END, w))
+
+  const patchSchedule = async (id, start_week, end_week) => {
+    await api.patch(`/roadmap/${id}`, { start_week, end_week }, pw)
+  }
+  const persistOrder = async (order) => {
+    await api.patch('/roadmap/reorder', { order }, pw)
+  }
+
+  // ── Horizontal drag: reschedule / resize ──────────────────────────────
+  const onBarPointerDown = (e, task) => {
+    e.preventDefault()
+    e.stopPropagation()
+    const track = trackRef.current
+    if (!track) return
+    const weekPx = track.getBoundingClientRect().width / WEEK_COUNT
+    const rect = e.currentTarget.getBoundingClientRect()
+    const offsetInBar = e.clientX - rect.left
+    let mode = 'move'
+    if (offsetInBar < 8) mode = 'left'
+    else if (offsetInBar > rect.width - 8) mode = 'right'
+    barDrag.current = {
+      id: task.id, mode, startX: e.clientX,
+      origStart: task.start_week ?? WEEK_START,
+      origEnd: task.end_week ?? (task.start_week ?? WEEK_START),
+      weekPx,
+    }
+    window.addEventListener('pointermove', onBarPointerMove)
+    window.addEventListener('pointerup', onBarPointerUp)
+  }
+
+  const onBarPointerMove = (e) => {
+    const ds = barDrag.current
+    if (!ds) return
+    const deltaWeeks = Math.round((e.clientX - ds.startX) / ds.weekPx)
+    if (deltaWeeks === 0) return
+    setTasks(prev => prev.map(t => {
+      if (t.id !== ds.id) return t
+      let s = ds.origStart, en = ds.origEnd
+      if (ds.mode === 'move') { s = clamp(ds.origStart + deltaWeeks); en = clamp(ds.origEnd + deltaWeeks) }
+      if (ds.mode === 'left') { s = clamp(Math.min(ds.origStart + deltaWeeks, ds.origEnd)) }
+      if (ds.mode === 'right') { en = clamp(Math.max(ds.origEnd + deltaWeeks, ds.origStart)) }
+      return { ...t, start_week: s, end_week: en }
+    }))
+  }
+
+  const onBarPointerUp = () => {
+    const ds = barDrag.current
+    window.removeEventListener('pointermove', onBarPointerMove)
+    window.removeEventListener('pointerup', onBarPointerUp)
+    if (ds) {
+      setTasks(prev => {
+        const t = prev.find(x => x.id === ds.id)
+        if (t) patchSchedule(ds.id, t.start_week, t.end_week)
+        return prev
+      })
+    }
+    barDrag.current = null
+  }
+
+  // ── Vertical drag: reorder rows (priority order) ──────────────────────
+  const onRowPointerDown = (e, task) => {
+    rowDrag.current = { id: task.id, startY: e.clientY }
+    window.addEventListener('pointermove', onRowPointerMove)
+    window.addEventListener('pointerup', onRowPointerUp)
+  }
+
+  const onRowPointerMove = (e) => {
+    const rd = rowDrag.current
+    if (!rd) return
+    const deltaRows = Math.round((e.clientY - rd.startY) / ROW_HEIGHT)
+    if (deltaRows === 0) return
+    setTasks(prev => {
+      const ids = prev.map(t => t.id)
+      const from = ids.indexOf(rd.id)
+      const to = Math.max(0, Math.min(ids.length - 1, from + deltaRows))
+      if (from === to) return prev
+      const arr = [...prev]
+      const [m] = arr.splice(from, 1)
+      arr.splice(to, 0, m)
+      rd.startY = e.clientY
+      return arr
+    })
+  }
+
+  const onRowPointerUp = () => {
+    const rd = rowDrag.current
+    window.removeEventListener('pointermove', onRowPointerMove)
+    window.removeEventListener('pointerup', onRowPointerUp)
+    if (rd) setTasks(prev => { persistOrder(prev.map(t => t.id)); return prev })
+    rowDrag.current = null
+  }
+
+  const slotLeft = (w) => ((clamp(w) - WEEK_START) / WEEK_COUNT) * 100
+  const slotWidth = (s, en) => ((clamp(en) - clamp(s) + 1) / WEEK_COUNT) * 100
+
+  return (
+    <div style={{ background: 'var(--card)', border: '1px solid var(--border)', borderRadius: 14, padding: 20, overflowX: 'auto' }}>
+      <div style={{ display: 'grid', gridTemplateColumns: '250px repeat(6,1fr)', borderBottom: '1px solid var(--border)' }}>
+        <div />
+        {['July', 'August', 'September'].map(m => (
+          <div key={m} style={{ gridColumn: 'span 2', textAlign: 'center', fontSize: 12, fontWeight: 600, padding: '8px 0', borderLeft: '1px solid var(--border)' }}>
+            {m}
+          </div>
+        ))}
+      </div>
+
+      {tasks.map((t, index) => {
+        const initials = (t.owner_name || '??').split(' ').map(w => w[0]).slice(0, 2).join('')
+        const isOpen = openId === t.id
+        return (
+          <div key={t.id}>
+            <div style={{ display: 'grid', gridTemplateColumns: '250px repeat(6,1fr)', alignItems: 'center', minHeight: ROW_HEIGHT, borderBottom: '1px solid var(--border)' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 10px', fontSize: 12.5 }}>
+                <span
+                  onPointerDown={(e) => onRowPointerDown(e, t)}
+                  style={{ cursor: 'grab', color: 'var(--muted)', userSelect: 'none', touchAction: 'none' }}
+                >⠿</span>
+                <span style={{
+                  width: 22, height: 22, borderRadius: '50%', flexShrink: 0,
+                  background: t.owner_color || 'transparent', border: t.owner_color ? 'none' : '1px dashed var(--border)',
+                  display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 8, fontWeight: 700, color: '#08131f',
+                }}>{t.owner_color ? initials : '??'}</span>
+                <span
+                  onClick={() => setOpenId(isOpen ? null : t.id)}
+                  style={{ cursor: 'pointer', userSelect: 'none' }}
+                >{t.title}</span>
+                <span style={{ fontSize: 11, color: 'var(--muted)', marginLeft: 'auto', transform: isOpen ? 'rotate(90deg)' : 'none' }}>▶</span>
+              </div>
+              <div ref={index === 0 ? trackRef : null} style={{ gridColumn: '2 / -1', display: 'grid', gridTemplateColumns: 'repeat(6,1fr)', position: 'relative', height: '100%', alignItems: 'center' }}>
+                {[0, 1, 2, 3, 4, 5].map(i => <div key={i} style={{ borderLeft: '1px solid var(--border)', height: '100%' }} />)}
+                <div
+                  onPointerDown={(e) => onBarPointerDown(e, t)}
+                  style={{
+                    position: 'absolute', left: `${slotLeft(t.start_week ?? WEEK_START)}%`,
+                    width: `${slotWidth(t.start_week ?? WEEK_START, t.end_week ?? t.start_week ?? WEEK_START)}%`,
+                    height: 22, borderRadius: 5, background: PRIO_BAR[t.priority] || PRIO_BAR.P2,
+                    display: 'flex', alignItems: 'center', padding: '0 8px', fontSize: 9.5, fontWeight: 600, color: '#fff',
+                    cursor: 'grab', userSelect: 'none', touchAction: 'none',
+                  }}
+                  title="Drag to move · edges to resize"
+                >{t.priority}</div>
+              </div>
+            </div>
+            {isOpen && (
+              <div style={{ padding: '12px 16px 16px 56px', borderBottom: '1px solid var(--border)' }}>
+                <div style={{ margin: '8px 0' }}>
+                  <div style={{ fontSize: 11, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '.05em', marginBottom: 4 }}>Description</div>
+                  <div style={{ fontSize: 13, color: 'var(--text)', lineHeight: 1.5 }}>{t.description || '—'}</div>
+                </div>
+                <div style={{ margin: '8px 0' }}>
+                  <div style={{ fontSize: 11, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '.05em', marginBottom: 4 }}>Priority</div>
+                  <div style={{ display: 'flex', gap: 6 }}>
+                    {Object.keys(PRIORITIES).map(p => (
+                      <button key={p} onClick={() => setPriority(t.id, p)}
+                        style={{
+                          padding: '4px 12px', borderRadius: 6, border: `1px solid ${PRIORITIES[p].color}`, cursor: 'pointer',
+                          background: t.priority === p ? PRIORITIES[p].color : 'transparent',
+                          color: t.priority === p ? '#fff' : PRIORITIES[p].color, fontSize: 11, fontWeight: 600,
+                        }}>
+                        {p}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <div>
+                  <div style={{ fontSize: 11, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '.05em', marginBottom: 4 }}>Note</div>
+                  <textarea defaultValue={t.note}
+                    onBlur={e => saveNote(t.id, e.target.value)}
+                    placeholder="Add a note…"
+                    style={{
+                      width: '100%', minHeight: 60, background: 'var(--base)', border: '1px solid var(--border)',
+                      borderRadius: 8, padding: 10, color: 'var(--text)', fontSize: 13, resize: 'vertical', fontFamily: 'inherit',
+                    }} />
+                </div>
+              </div>
+            )}
+          </div>
+        )
+      })}
+
+      {tasks.length === 0 && (
+        <div style={{ textAlign: 'center', padding: '40px 20px', color: 'var(--muted)', fontSize: 13 }}>
+          No roadmap tasks yet.
+        </div>
+      )}
+
+      <div style={{ display: 'flex', gap: 16, marginTop: 14, flexWrap: 'wrap', fontSize: 11, color: 'var(--muted)' }}>
+        {Object.entries(PRIO_BAR).map(([l, bg]) => (
+          <span key={l}><span style={{ display: 'inline-block', width: 18, height: 9, borderRadius: 3, background: bg, marginRight: 5, verticalAlign: 'middle' }} />{l}</span>
+        ))}
+        <span style={{ marginLeft: 'auto', fontStyle: 'italic' }}>Drag bars to reschedule · edges to resize · drag ⠿ up/down to reorder</span>
+      </div>
+    </div>
+  )
+}
 
 export default function Roadmap() {
   const [tasks, setTasks] = useState([])
   const [members, setMembers] = useState([])
   const [openId, setOpenId] = useState(null)
-  const [dragId, setDragId] = useState(null)
   const [showAdd, setShowAdd] = useState(false)
   const [draft, setDraft] = useState(EMPTY_DRAFT)
   const pw = sessionStorage.getItem('admin_pw') || ''
@@ -48,17 +259,6 @@ export default function Roadmap() {
     await api.patch(`/roadmap/${id}`, { priority }, pw)
   }
 
-  const onDrop = async (targetId) => {
-    if (dragId == null || dragId === targetId) return
-    const ids = tasks.map(t => t.id)
-    const from = ids.indexOf(dragId), to = ids.indexOf(targetId)
-    ids.splice(to, 0, ids.splice(from, 1)[0])
-    const reordered = ids.map(id => tasks.find(t => t.id === id))
-    setTasks(reordered)
-    setDragId(null)
-    await api.patch('/roadmap/reorder', { order: ids }, pw)
-  }
-
   return (
     <div style={{ minHeight: '100vh', background: 'var(--base)' }}>
       <div className="topbar">
@@ -70,7 +270,7 @@ export default function Roadmap() {
       <div className="page" style={{ paddingTop: 24 }}>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
           <div style={{ fontSize: 13, color: 'var(--muted)' }}>
-            Drag rows to reorder priority · click a task for details and notes
+            Drag bars to reschedule · edges to resize · drag ⠿ to reorder · click a task for details and notes
           </div>
           <button
             onClick={() => setShowAdd(v => !v)}
@@ -125,68 +325,15 @@ export default function Roadmap() {
             </button>
           </div>
         )}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-          {tasks.map(t => {
-            const prio = PRIORITIES[t.priority] || PRIORITIES.P2
-            const isOpen = openId === t.id
-            return (
-              <div key={t.id}
-                draggable
-                onDragStart={() => setDragId(t.id)}
-                onDragOver={e => e.preventDefault()}
-                onDrop={() => onDrop(t.id)}
-                style={{ background: 'var(--card)', border: '1px solid var(--border)', borderRadius: 10, opacity: dragId === t.id ? 0.4 : 1 }}>
-                <div onClick={() => setOpenId(isOpen ? null : t.id)}
-                  style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '12px 16px', cursor: 'pointer' }}>
-                  <span style={{ cursor: 'grab', color: 'var(--muted)', fontSize: 14 }}>⠿</span>
-                  <span style={{ width: 28, fontSize: 11, fontWeight: 700, color: prio.color }}>{prio.label}</span>
-                  {t.owner_color && <span style={{ width: 22, height: 22, borderRadius: '50%', background: t.owner_color, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 9, fontWeight: 700, color: '#08131f' }}>{(t.owner_name || '?').split(' ').map(w => w[0]).slice(0, 2).join('')}</span>}
-                  <span style={{ flex: 1, fontSize: 14 }}>{t.title}</span>
-                  <span style={{ fontSize: 12, color: 'var(--muted)' }}>{t.owner_name || '—'}</span>
-                  <span style={{ fontSize: 12, color: 'var(--muted)', transform: isOpen ? 'rotate(90deg)' : 'none' }}>▶</span>
-                </div>
-                {isOpen && (
-                  <div style={{ padding: '0 16px 16px 56px', borderTop: '1px solid var(--border)' }}>
-                    <div style={{ margin: '12px 0' }}>
-                      <div style={{ fontSize: 11, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '.05em', marginBottom: 4 }}>Description</div>
-                      <div style={{ fontSize: 13, color: 'var(--text)', lineHeight: 1.5 }}>{t.description || '—'}</div>
-                    </div>
-                    <div style={{ margin: '12px 0' }}>
-                      <div style={{ fontSize: 11, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '.05em', marginBottom: 4 }}>Priority</div>
-                      <div style={{ display: 'flex', gap: 6 }}>
-                        {Object.keys(PRIORITIES).map(p => (
-                          <button key={p} onClick={() => setPriority(t.id, p)}
-                            style={{
-                              padding: '4px 12px', borderRadius: 6, border: `1px solid ${PRIORITIES[p].color}`, cursor: 'pointer',
-                              background: t.priority === p ? PRIORITIES[p].color : 'transparent',
-                              color: t.priority === p ? '#fff' : PRIORITIES[p].color, fontSize: 11, fontWeight: 600,
-                            }}>
-                            {p}
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-                    <div>
-                      <div style={{ fontSize: 11, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '.05em', marginBottom: 4 }}>Note</div>
-                      <textarea defaultValue={t.note}
-                        onBlur={e => saveNote(t.id, e.target.value)}
-                        placeholder="Add a note…"
-                        style={{
-                          width: '100%', minHeight: 60, background: 'var(--base)', border: '1px solid var(--border)',
-                          borderRadius: 8, padding: 10, color: 'var(--text)', fontSize: 13, resize: 'vertical', fontFamily: 'inherit',
-                        }} />
-                    </div>
-                  </div>
-                )}
-              </div>
-            )
-          })}
-          {tasks.length === 0 && (
-            <div style={{ textAlign: 'center', padding: '40px 20px', color: 'var(--muted)', fontSize: 13 }}>
-              No roadmap tasks yet.
-            </div>
-          )}
-        </div>
+        <GanttView
+          tasks={tasks}
+          setTasks={setTasks}
+          pw={pw}
+          openId={openId}
+          setOpenId={setOpenId}
+          saveNote={saveNote}
+          setPriority={setPriority}
+        />
       </div>
     </div>
   )
