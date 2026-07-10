@@ -4940,6 +4940,9 @@ def sync_tasks_from_reports(week: int, year: int, password: str = ""):
     c.execute("SELECT id, name FROM team_members")
     members = [(r["id"], r["name"]) for r in c.fetchall()]
 
+    GENERIC_TITLES = {"development", "work", "task", "tasks", "coding", "ongoing",
+                      "various", "misc", "other", "updates", "improvements", "fixes",
+                      "continuing development", "implementation"}
     total_tasks = 0
     for eng_id, eng_name in members:
         c.execute(
@@ -4992,8 +4995,14 @@ def sync_tasks_from_reports(week: int, year: int, password: str = ""):
             "Only create tasks for actual engineering or product WORK with a concrete deliverable "
             "(a feature, fix, integration, deployment, investigation, or artifact).\n\n"
             f"REPORTS:\n{report_text}\n\n"
+            "TITLE RULES:\n"
+            "- Each title must be specific and describe the actual work (what was built/fixed/investigated).\n"
+            "- BAD titles (never use): 'Development', 'Work', 'Ongoing', 'Various tasks', 'Improvements', 'Continuing X'.\n"
+            "- GOOD titles: 'Redis caching for PAID number lookups', 'Fix Google OAuth undefined index error', 'Customer 360 page with 5 tabs'.\n"
+            "- If a report line is too vague to form a specific title (e.g. 'continuing development', 'ongoing work'), DO NOT create a task for it — skip it entirely.\n"
+            "- Title length: 4-12 words, concrete nouns and verbs.\n\n"
             "Respond ONLY with a JSON array, no markdown, no preamble:\n"
-            '[{"title": "short task title", "project": "project name", "status": "done|in_progress|todo|new"}]'
+            '[{"title": "specific descriptive task title", "project": "project name", "status": "done|in_progress|todo|new"}]'
         )
 
         payload = json_lib.dumps({
@@ -5033,13 +5042,16 @@ def sync_tasks_from_reports(week: int, year: int, password: str = ""):
         for t in tasks:
             if not isinstance(t, dict) or not t.get("title"):
                 continue
+            title = t["title"].strip()
+            if title.lower() in GENERIC_TITLES or len(title) < 12:
+                continue
             status = t.get("status", "new")
             if status not in ("new", "todo", "in_progress", "done"):
                 status = "new"
             c.execute(
                 "INSERT INTO tasks (engineer_id, title, project, status, week, year, updated_at) "
                 "VALUES (?,?,?,?,?,?,?)",
-                (eng_id, t["title"][:200], (t.get("project") or "")[:60], status, week, year, now),
+                (eng_id, title[:200], (t.get("project") or "")[:60], status, week, year, now),
             )
             total_tasks += 1
 

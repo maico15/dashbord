@@ -223,7 +223,7 @@ export default function TaskBoard() {
                           )}
                           <span style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 11, color: 'var(--muted)', marginLeft: 'auto' }}>
                             <span style={{ width: 8, height: 8, borderRadius: '50%', background: t.engineer_color || 'var(--muted)', display: 'inline-block' }} />
-                            {t.engineer_name?.split(' ')[0]}
+                            {t.engineer_name}
                           </span>
                         </div>
                       </div>
@@ -271,7 +271,7 @@ export default function TaskBoard() {
                             )}
                             <span style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 11, color: 'var(--muted)', marginLeft: 'auto' }}>
                               <span style={{ width: 8, height: 8, borderRadius: '50%', background: t.engineer_color || 'var(--muted)', display: 'inline-block' }} />
-                              {t.engineer_name?.split(' ')[0]}
+                              {t.engineer_name}
                             </span>
                           </div>
                         </div>
