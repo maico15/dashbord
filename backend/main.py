@@ -368,6 +368,19 @@ def init_db():
             sort_order  INTEGER DEFAULT 0,
             updated_at  TEXT
         );
+
+        CREATE TABLE IF NOT EXISTS roadmap_meta (
+            key   TEXT PRIMARY KEY,
+            value TEXT DEFAULT ''
+        );
+
+        CREATE TABLE IF NOT EXISTS roadmap_objectives (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            title      TEXT NOT NULL,
+            metric     TEXT DEFAULT '',
+            color      TEXT DEFAULT '#2563eb',
+            sort_order INTEGER DEFAULT 0
+        );
     """)
     conn.commit()
     # Seed default departments
@@ -5186,6 +5199,60 @@ def create_roadmap_task(data: RoadmapTask, password: str = ""):
     tid = cur.lastrowid
     conn.close()
     return {"ok": True, "id": tid}
+
+
+class RoadmapStrategyUpdate(BaseModel):
+    north_star: Optional[str] = None
+    north_star_sub: Optional[str] = None
+    traj_q3: Optional[str] = None
+    traj_q4: Optional[str] = None
+    traj_q1: Optional[str] = None
+
+
+class RoadmapObjective(BaseModel):
+    title: str
+    metric: str = ""
+    color: str = "#2563eb"
+
+
+@app.get("/api/roadmap/strategy")
+def get_roadmap_strategy():
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT key, value FROM roadmap_meta")
+    meta = {r["key"]: r["value"] for r in c.fetchall()}
+    c.execute("SELECT * FROM roadmap_objectives ORDER BY sort_order, id")
+    objectives = [dict(r) for r in c.fetchall()]
+    conn.close()
+    return {"meta": meta, "objectives": objectives}
+
+
+@app.put("/api/roadmap/strategy")
+def update_roadmap_strategy(data: RoadmapStrategyUpdate, password: str = ""):
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    conn = get_db()
+    for k, v in data.dict(exclude_none=True).items():
+        conn.execute("INSERT OR REPLACE INTO roadmap_meta (key,value) VALUES (?,?)", (k, v))
+    conn.commit()
+    conn.close()
+    return {"ok": True}
+
+
+@app.post("/api/roadmap/objectives")
+def create_roadmap_objective(data: RoadmapObjective, password: str = ""):
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    conn = get_db()
+    mx = conn.execute("SELECT COALESCE(MAX(sort_order),0)+1 FROM roadmap_objectives").fetchone()[0]
+    cur = conn.execute(
+        "INSERT INTO roadmap_objectives (title, metric, color, sort_order) VALUES (?,?,?,?)",
+        (data.title, data.metric, data.color, mx),
+    )
+    conn.commit()
+    oid = cur.lastrowid
+    conn.close()
+    return {"ok": True, "id": oid}
 
 
 @app.patch("/api/roadmap/reorder")
