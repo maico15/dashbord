@@ -381,6 +381,14 @@ def init_db():
             color      TEXT DEFAULT '#2563eb',
             sort_order INTEGER DEFAULT 0
         );
+
+        CREATE TABLE IF NOT EXISTS weekly_changes (
+            week       INTEGER NOT NULL,
+            year       INTEGER NOT NULL,
+            content    TEXT DEFAULT '',
+            updated_at TEXT,
+            PRIMARY KEY (week, year)
+        );
     """)
     conn.commit()
     # Seed default departments
@@ -4612,6 +4620,31 @@ def post_weekly_tasks(data: WeeklyTasksBody, password: str = ""):
         conn.close()
         print(f"[weekly-tasks] DB error: {ex}")
         raise HTTPException(500, f"DB error: {ex}")
+    conn.close()
+    return {"ok": True}
+
+
+@app.get("/api/weekly-changes")
+def get_weekly_changes(week: int, year: int):
+    conn = get_db()
+    row = conn.execute(
+        "SELECT content FROM weekly_changes WHERE week=? AND year=?", (week, year)
+    ).fetchone()
+    conn.close()
+    return {"content": row["content"] if row else ""}
+
+
+@app.put("/api/weekly-changes")
+def put_weekly_changes(data: dict, week: int, year: int, password: str = ""):
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    conn = get_db()
+    conn.execute(
+        "INSERT INTO weekly_changes(week, year, content, updated_at) VALUES(?,?,?,?) "
+        "ON CONFLICT(week, year) DO UPDATE SET content=excluded.content, updated_at=excluded.updated_at",
+        (week, year, data.get("content", ""), datetime.utcnow().isoformat()),
+    )
+    conn.commit()
     conn.close()
     return {"ok": True}
 
