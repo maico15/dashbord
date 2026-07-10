@@ -106,6 +106,8 @@ export default function TaskBoard() {
           <div className="topbar-logo"><span>⬡</span> Task Board</div>
         </div>
         <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
+          <Link to="/north-star" className="topbar-admin-link">◆ North Star</Link>
+          <Link to="/roadmap" className="topbar-admin-link">Roadmap</Link>
           <Link to="/" className="topbar-admin-link">← Dashboard</Link>
           <Link to="/admin" className="topbar-admin-link">Admin ↗</Link>
           <button className="theme-toggle" onClick={toggleTheme} title="Toggle theme">
