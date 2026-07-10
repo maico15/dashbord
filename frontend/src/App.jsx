@@ -6,6 +6,7 @@ import Reports from './pages/Reports'
 import Releases from './pages/Releases'
 import MonthlyReview from './pages/MonthlyReview'
 import TaskBoard from './pages/TaskBoard'
+import Roadmap from './pages/Roadmap'
 
 export default function App() {
   return (
@@ -17,6 +18,7 @@ export default function App() {
       <Route path="/releases" element={<Releases />} />
       <Route path="/review/june-2026" element={<MonthlyReview />} />
       <Route path="/tasks" element={<TaskBoard />} />
+      <Route path="/roadmap" element={<Roadmap />} />
     </Routes>
   )
 }
