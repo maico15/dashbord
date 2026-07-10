@@ -156,6 +156,8 @@ export default function WeeklyReportTab() {
   const [genError, setGenError]     = useState(null)
   const [genDone, setGenDone]       = useState(false)
   const [scores, setScores]         = useState({})
+  const [changes, setChanges]       = useState('')
+  const [editingChanges, setEditingChanges] = useState(false)
 
   useEffect(() => {
     api.get('/overview').then(d => {
@@ -184,6 +186,20 @@ export default function WeeklyReportTab() {
       .then(setScores)
       .catch(() => {})
   }, [week, year])
+
+  useEffect(() => {
+    if (week == null || year == null) return
+    api.get(`/weekly-changes?week=${week}&year=${year}`)
+      .then(d => setChanges(d.content || ''))
+      .catch(() => setChanges(''))
+  }, [week, year])
+
+  const saveChanges = (text) => {
+    const pw = sessionStorage.getItem('admin_pw') || ''
+    setChanges(text)
+    setEditingChanges(false)
+    api.put(`/weekly-changes?week=${week}&year=${year}`, { content: text }, pw)
+  }
 
   const navigate = (delta) => {
     let w = (week ?? 1) + delta
@@ -290,6 +306,36 @@ export default function WeeklyReportTab() {
       )}
 
       <div style={{ marginBottom: 20 }} />
+
+      {/* Changes section */}
+      <div style={{ background: 'var(--card)', border: '1px solid var(--border)', borderRadius: 12, padding: '16px 20px', marginBottom: 20 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+          <span style={{ fontSize: 14 }}>📋</span>
+          <span style={{ fontSize: 13, fontWeight: 600, letterSpacing: '.03em' }}>Changes this week</span>
+          {!editingChanges && (
+            <button onClick={() => setEditingChanges(true)}
+              style={{ marginLeft: 'auto', background: 'none', border: 'none', color: 'var(--muted)', cursor: 'pointer', fontSize: 12 }}>
+              ✎ edit
+            </button>
+          )}
+        </div>
+        {editingChanges ? (
+          <textarea autoFocus defaultValue={changes}
+            onBlur={(e) => saveChanges(e.target.value)}
+            placeholder="Administrative changes this week — one per line…"
+            style={{
+              width: '100%', minHeight: 90, background: 'var(--base)', border: '1px solid var(--accent2)',
+              borderRadius: 8, padding: 10, color: 'var(--text)', fontSize: 13, lineHeight: 1.6,
+              resize: 'vertical', fontFamily: 'inherit',
+            }} />
+        ) : (
+          changes ? (
+            <div style={{ fontSize: 13, color: 'var(--text)', lineHeight: 1.7, whiteSpace: 'pre-wrap' }}>{changes}</div>
+          ) : (
+            <div style={{ fontSize: 13, color: 'var(--muted)', fontStyle: 'italic' }}>No changes recorded for this week. Click edit to add.</div>
+          )
+        )}
+      </div>
 
       {loading && (
         <div style={{ display: 'flex', justifyContent: 'center', padding: 48 }}>
