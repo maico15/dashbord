@@ -298,6 +298,45 @@ body {
 .lb-breakdown { font-size: 11px; color: var(--muted); }
 .lb-breakdown span { margin-right: 8px; }
 
+.lb-header-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin: 28px 0 12px;
+}
+.lb-scoring-toggle {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+.lb-scoring-toggle button {
+  padding: 4px 12px;
+  font-size: 12px;
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+.lb-scoring-toggle button.active {
+  background: var(--accent1-bg);
+  color: var(--accent1);
+  font-weight: 600;
+}
+
+.lb-breakdown-multi { display: flex; flex-direction: column; gap: 3px; min-width: 140px; }
+.lb-bbar-row { display: flex; align-items: center; gap: 6px; font-size: 10px; color: var(--muted); }
+.lb-bbar-label { width: 42px; flex-shrink: 0; text-align: right; }
+.lb-bbar-track {
+  flex: 1;
+  height: 5px;
+  border-radius: 3px;
+  background: var(--border);
+  overflow: hidden;
+}
+.lb-bbar-fill { height: 100%; border-radius: 3px; }
+.lb-bbar-val { width: 24px; flex-shrink: 0; text-align: left; }
+
 /* ── Badges ─────────────────────────────────────────── */
 .badges { display: flex; gap: 4px; flex-wrap: wrap; }
 .badge {

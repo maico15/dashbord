@@ -49,13 +49,60 @@ function BreakdownText({ breakdown, stream }) {
   )
 }
 
-export default function Leaderboard({ data }) {
+const MULTISOURCE_LABELS = {
+  github:     { label: 'GH',      color: 'var(--accent1)' },
+  ai_tokens:  { label: 'AI',      color: 'var(--accent2)' },
+  browser_ai: { label: 'Browser', color: 'var(--warning)' },
+  reports:    { label: 'Reports', color: 'var(--success)' },
+}
+
+function MultiSourceBreakdown({ breakdown }) {
+  if (!breakdown) return <span style={{ color: 'var(--muted)' }}>—</span>
+  return (
+    <div className="lb-breakdown-multi">
+      {Object.entries(MULTISOURCE_LABELS).map(([key, { label, color }]) => {
+        const v = breakdown[key] ?? 0
+        return (
+          <div key={key} className="lb-bbar-row" title={`${label}: ${v}/100`}>
+            <span className="lb-bbar-label">{label}</span>
+            <div className="lb-bbar-track">
+              <div className="lb-bbar-fill" style={{ width: `${v}%`, background: color }} />
+            </div>
+            <span className="lb-bbar-val">{v}</span>
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
+export default function Leaderboard({ data, scoringMode = 'github', onScoringModeChange }) {
   const navigate = useNavigate()
   if (!data) return null
 
   return (
     <div className="leaderboard">
-      <div className="section-title">Leaderboard · 8 weeks</div>
+      <div className="lb-header-row">
+        <div className="section-title" style={{ margin: 0 }}>
+          Leaderboard · {scoringMode === 'multisource' ? 'multi-source' : '8 weeks'}
+        </div>
+        {onScoringModeChange && (
+          <div className="lb-scoring-toggle">
+            <button
+              className={scoringMode === 'github' ? 'active' : ''}
+              onClick={() => onScoringModeChange('github')}
+            >
+              GitHub
+            </button>
+            <button
+              className={scoringMode === 'multisource' ? 'active' : ''}
+              onClick={() => onScoringModeChange('multisource')}
+            >
+              Multi-source
+            </button>
+          </div>
+        )}
+      </div>
       {data.length <= 1 ? (
         <div style={{ textAlign: 'center', padding: '32px 20px', color: 'var(--muted)', fontSize: 13 }}>
           No leaderboard yet — add more engineers to this department.
@@ -108,7 +155,9 @@ export default function Leaderboard({ data }) {
                   <span className="lb-score">{member.total_score.toLocaleString()}</span>
                 </td>
                 <td>
-                  <BreakdownText breakdown={member.breakdown} stream={member.stream} />
+                  {scoringMode === 'multisource'
+                    ? <MultiSourceBreakdown breakdown={member.breakdown} />
+                    : <BreakdownText breakdown={member.breakdown} stream={member.stream} />}
                 </td>
                 <td>
                   <div className="badges">
