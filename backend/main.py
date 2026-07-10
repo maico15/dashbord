@@ -355,6 +355,19 @@ def init_db():
             updated_at      TEXT,
             manual_override INTEGER NOT NULL DEFAULT 0
         );
+
+        CREATE TABLE IF NOT EXISTS roadmap_tasks (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            title       TEXT NOT NULL,
+            owner_id    INTEGER REFERENCES team_members(id) ON DELETE SET NULL,
+            priority    TEXT NOT NULL DEFAULT 'P2',
+            description TEXT DEFAULT '',
+            note        TEXT DEFAULT '',
+            start_week  INTEGER,
+            end_week    INTEGER,
+            sort_order  INTEGER DEFAULT 0,
+            updated_at  TEXT
+        );
     """)
     conn.commit()
     # Seed default departments
@@ -5121,6 +5134,104 @@ def get_tasks_archive(before_week: int, year: int):
     result = [{"week": wk, "count": len(items), "tasks": items}
               for wk, items in sorted(weeks.items(), reverse=True)]
     return {"archive": result}
+
+
+# ── Roadmap ────────────────────────────────────────────────────────────────
+
+class RoadmapTask(BaseModel):
+    title: str
+    owner_id: Optional[int] = None
+    priority: str = "P2"
+    description: str = ""
+    note: str = ""
+    start_week: Optional[int] = None
+    end_week: Optional[int] = None
+
+
+ROADMAP_PRIORITIES = {"P0", "P1", "P2", "P3"}
+ROADMAP_FIELDS = {"title", "owner_id", "priority", "description", "note",
+                   "start_week", "end_week", "sort_order"}
+
+
+@app.get("/api/roadmap")
+def get_roadmap():
+    conn = get_db()
+    c = conn.cursor()
+    c.execute(
+        "SELECT r.*, t.name as owner_name, t.avatar_color as owner_color "
+        "FROM roadmap_tasks r LEFT JOIN team_members t ON t.id = r.owner_id "
+        "ORDER BY r.sort_order, r.id"
+    )
+    tasks = [dict(row) for row in c.fetchall()]
+    conn.close()
+    return {"tasks": tasks}
+
+
+@app.post("/api/roadmap")
+def create_roadmap_task(data: RoadmapTask, password: str = ""):
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    if data.priority not in ROADMAP_PRIORITIES:
+        raise HTTPException(422, "Invalid priority")
+    conn = get_db()
+    mx = conn.execute("SELECT COALESCE(MAX(sort_order),0)+1 FROM roadmap_tasks").fetchone()[0]
+    cur = conn.execute(
+        "INSERT INTO roadmap_tasks "
+        "(title, owner_id, priority, description, note, start_week, end_week, sort_order, updated_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?)",
+        (data.title, data.owner_id, data.priority, data.description, data.note,
+         data.start_week, data.end_week, mx, datetime.utcnow().isoformat()),
+    )
+    conn.commit()
+    tid = cur.lastrowid
+    conn.close()
+    return {"ok": True, "id": tid}
+
+
+@app.patch("/api/roadmap/reorder")
+def reorder_roadmap(data: dict, password: str = ""):
+    """data = {"order": [taskId1, taskId2, ...]} in new top-to-bottom order"""
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    order = data.get("order", [])
+    conn = get_db()
+    for idx, tid in enumerate(order):
+        conn.execute("UPDATE roadmap_tasks SET sort_order=? WHERE id=?", (idx, tid))
+    conn.commit()
+    conn.close()
+    return {"ok": True, "count": len(order)}
+
+
+@app.patch("/api/roadmap/{task_id}")
+def update_roadmap_task(task_id: int, data: dict, password: str = ""):
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    fields = {k: v for k, v in data.items() if k in ROADMAP_FIELDS}
+    if not fields:
+        raise HTTPException(422, "No valid fields")
+    if "priority" in fields and fields["priority"] not in ROADMAP_PRIORITIES:
+        raise HTTPException(422, "Invalid priority")
+    conn = get_db()
+    sets = ", ".join(f"{k}=?" for k in fields)
+    vals = list(fields.values()) + [datetime.utcnow().isoformat(), task_id]
+    cur = conn.execute(f"UPDATE roadmap_tasks SET {sets}, updated_at=? WHERE id=?", vals)
+    conn.commit()
+    updated = cur.rowcount
+    conn.close()
+    if not updated:
+        raise HTTPException(404, "Not found")
+    return {"ok": True}
+
+
+@app.delete("/api/roadmap/{task_id}")
+def delete_roadmap_task(task_id: int, password: str = ""):
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    conn = get_db()
+    conn.execute("DELETE FROM roadmap_tasks WHERE id=?", (task_id,))
+    conn.commit()
+    conn.close()
+    return {"ok": True}
 
 
 @app.post("/api/sync/slack-reports")

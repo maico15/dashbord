@@ -369,6 +369,9 @@ export default function Dashboard() {
           <Link to="/tasks" className="dashboard-footer-link">
             📋 Task Board
           </Link>
+          <Link to="/roadmap" className="dashboard-footer-link">
+            🗺️ Roadmap
+          </Link>
           <a
             href="https://github.com/maico15/dashbord/releases/latest/download/cc_telemetry_tray.exe"
             className="dashboard-footer-dl"
