@@ -225,6 +225,9 @@ export default function Dashboard() {
     const saved = localStorage.getItem('active_department')
     return saved ? parseInt(saved) : 1
   })
+  const [scoringMode, setScoringMode] = useState(() => {
+    return localStorage.getItem('leaderboard_scoring') || 'github'
+  })
 
   useEffect(() => {
     api.get('/departments').then(data => {
@@ -248,12 +251,18 @@ export default function Dashboard() {
   }, [])
 
   useEffect(() => {
-    api.get(`/leaderboard?department_id=${activeDept}`).then(setLeaderboard).catch(console.error)
+    const url = `/leaderboard?department_id=${activeDept}&scoring=${scoringMode}`
+    api.get(url).then(setLeaderboard).catch(console.error)
     const refresh = setInterval(() => {
-      api.get(`/leaderboard?department_id=${activeDept}`).then(setLeaderboard).catch(() => {})
+      api.get(url).then(setLeaderboard).catch(() => {})
     }, 60_000)
     return () => clearInterval(refresh)
-  }, [activeDept])
+  }, [activeDept, scoringMode])
+
+  const handleScoringChange = (mode) => {
+    setScoringMode(mode)
+    localStorage.setItem('leaderboard_scoring', mode)
+  }
 
   useEffect(() => {
     // tabs that manage their own data fetching
@@ -340,7 +349,7 @@ export default function Dashboard() {
           </div>
         )}
 
-        <Leaderboard data={leaderboard} />
+        <Leaderboard data={leaderboard} scoringMode={scoringMode} onScoringModeChange={handleScoringChange} />
 
         <footer className="dashboard-footer">
           <span className="dashboard-footer-text">

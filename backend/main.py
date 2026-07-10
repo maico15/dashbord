@@ -2266,12 +2266,136 @@ def overview():
     }
 
 
+def _compute_multisource_scores(conn, week: int, year: int, weeks_back: int = 2,
+                                 department_id: Optional[int] = None):
+    """Model B: 4-source normalized weighted score.
+
+    score = 0.35*github_norm + 0.30*ai_tokens_norm + 0.20*browser_ai_norm + 0.15*reports_norm
+
+    Each source is normalized 0-100 against the team's max for the window, so an
+    engineer working mainly through Lovable/browser AI tools (no GitHub activity)
+    still scores instead of landing at 0.
+    """
+    c = conn.cursor()
+    earliest = max(1, week - (weeks_back - 1))
+
+    if department_id is not None:
+        c.execute("SELECT id, name, avatar_color, stream FROM team_members WHERE department_id=?", (department_id,))
+    else:
+        c.execute("SELECT id, name, avatar_color, stream FROM team_members")
+    members = {
+        r["id"]: {"name": r["name"], "color": r["avatar_color"], "stream": r["stream"],
+                  "prs": 0, "commits": 0, "tokens": 0, "browser_sec": 0, "reports": 0}
+        for r in c.fetchall()
+    }
+    if not members:
+        return []
+
+    # 1. GitHub PRs + commits (dev_metrics, keyed by member_id)
+    c.execute(
+        "SELECT member_id, SUM(prs_merged) prs, SUM(commits_count) commits "
+        "FROM dev_metrics WHERE week BETWEEN ? AND ? AND year=? GROUP BY member_id",
+        (earliest, week, year),
+    )
+    for r in c.fetchall():
+        if r["member_id"] in members:
+            members[r["member_id"]]["prs"] = r["prs"] or 0
+            members[r["member_id"]]["commits"] = r["commits"] or 0
+
+    # Date span covering the full window, for the timestamp/date-keyed sources below
+    span_start, _ = _iso_week_bounds(earliest, year)
+    _, span_end = _iso_week_bounds(week, year)
+    ts_from, ts_to = span_start.isoformat() + "T00:00:00", span_end.isoformat() + "T23:59:59"
+    date_from, date_to = span_start.isoformat(), span_end.isoformat()
+
+    # 2. Claude Code output tokens — ai_events is the source of truth (see /api/ai-usage/weekly)
+    c.execute(
+        "SELECT engineer_id, SUM(tokens_output) tok FROM ai_events "
+        "WHERE timestamp >= ? AND timestamp <= ? GROUP BY engineer_id",
+        (ts_from, ts_to),
+    )
+    for r in c.fetchall():
+        if r["engineer_id"] in members:
+            members[r["engineer_id"]]["tokens"] = r["tok"] or 0
+
+    # 3. Browser AI minutes — ai_tool_sessions, excluding claude/claude.ai (already
+    #    counted above as AI tokens) so Lovable/ChatGPT/Gemini/Copilot time counts here
+    c.execute(
+        "SELECT engineer_id, SUM(duration_sec) sec FROM ai_tool_sessions "
+        "WHERE date BETWEEN ? AND ? AND tool NOT IN ('claude', 'claude.ai') "
+        "GROUP BY engineer_id",
+        (date_from, date_to),
+    )
+    for r in c.fetchall():
+        if r["engineer_id"] in members:
+            members[r["engineer_id"]]["browser_sec"] = r["sec"] or 0
+
+    # 4. Daily report count
+    c.execute(
+        "SELECT engineer_id, COUNT(*) cnt FROM daily_reports "
+        "WHERE report_date BETWEEN ? AND ? GROUP BY engineer_id",
+        (date_from, date_to),
+    )
+    for r in c.fetchall():
+        if r["engineer_id"] in members:
+            members[r["engineer_id"]]["reports"] = r["cnt"] or 0
+
+    def maxof(key):
+        peak = max((m[key] for m in members.values()), default=0)
+        return peak if peak > 0 else 1
+
+    max_pr, max_com = maxof("prs"), maxof("commits")
+    max_tok, max_brw, max_rep = maxof("tokens"), maxof("browser_sec"), maxof("reports")
+
+    results = []
+    for mid, m in members.items():
+        github_n = ((m["prs"] / max_pr * 100) + (m["commits"] / max_com * 100)) / 2
+        tok_n = m["tokens"] / max_tok * 100
+        brw_n = m["browser_sec"] / max_brw * 100
+        rep_n = m["reports"] / max_rep * 100
+        score = 0.35 * github_n + 0.30 * tok_n + 0.20 * brw_n + 0.15 * rep_n
+        streams = parse_streams(m["stream"])
+        results.append({
+            "id": mid,
+            "name": m["name"],
+            "avatar_color": m["color"],
+            "stream": streams[0] if streams else "dev",
+            "streams": streams,
+            "total_score": round(score * 100),
+            "badges": [],
+            "breakdown": {
+                "github": round(github_n),
+                "ai_tokens": round(tok_n),
+                "browser_ai": round(brw_n),
+                "reports": round(rep_n),
+            },
+            "raw": {
+                "prs_merged": m["prs"],
+                "commits": m["commits"],
+                "ai_output_tokens": m["tokens"],
+                "browser_ai_minutes": round(m["browser_sec"] / 60),
+                "daily_reports": m["reports"],
+            },
+        })
+
+    results.sort(key=lambda x: -x["total_score"])
+    if results:
+        results[0]["badges"] = ["mvp"]
+    return results
+
+
 @app.get("/api/leaderboard")
-def leaderboard(department_id: Optional[int] = None):
+def leaderboard(department_id: Optional[int] = None, scoring: str = "github"):
     conn = get_db()
     c = conn.cursor()
-    rules = get_rules(conn)
     week, year = current_week_year(conn)
+
+    if scoring == "multisource":
+        board = _compute_multisource_scores(conn, week, year, weeks_back=2, department_id=department_id)
+        conn.close()
+        return board
+
+    rules = get_rules(conn)
 
     if department_id is not None:
         c.execute("SELECT * FROM team_members WHERE department_id=? ORDER BY id", (department_id,))
