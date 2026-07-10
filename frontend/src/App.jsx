@@ -7,6 +7,7 @@ import Releases from './pages/Releases'
 import MonthlyReview from './pages/MonthlyReview'
 import TaskBoard from './pages/TaskBoard'
 import Roadmap from './pages/Roadmap'
+import NorthStar from './pages/NorthStar'
 
 export default function App() {
   return (
@@ -19,6 +20,7 @@ export default function App() {
       <Route path="/review/june-2026" element={<MonthlyReview />} />
       <Route path="/tasks" element={<TaskBoard />} />
       <Route path="/roadmap" element={<Roadmap />} />
+      <Route path="/north-star" element={<NorthStar />} />
     </Routes>
   )
 }

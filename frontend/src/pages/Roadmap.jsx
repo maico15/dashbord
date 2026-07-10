@@ -265,7 +265,10 @@ export default function Roadmap() {
         <div className="topbar-left">
           <div className="topbar-logo"><span>⬡</span> Roadmap</div>
         </div>
-        <Link to="/" className="topbar-admin-link">← Dashboard</Link>
+        <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
+          <Link to="/north-star" className="topbar-admin-link">◆ North Star</Link>
+          <Link to="/" className="topbar-admin-link">← Dashboard</Link>
+        </div>
       </div>
       <div className="page" style={{ paddingTop: 24 }}>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>

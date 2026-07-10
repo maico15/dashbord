@@ -372,6 +372,9 @@ export default function Dashboard() {
           <Link to="/roadmap" className="dashboard-footer-link">
             🗺️ Roadmap
           </Link>
+          <Link to="/north-star" className="dashboard-footer-link">
+            ◆ North Star
+          </Link>
           <a
             href="https://github.com/maico15/dashbord/releases/latest/download/cc_telemetry_tray.exe"
             className="dashboard-footer-dl"
