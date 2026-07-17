@@ -12,45 +12,27 @@ const PRIORITIES = {
 const PALETTE = ['#7c3aed', '#2563eb', '#0891b2', '#dc2626', '#ea580c', '#16a34a', '#db2777', '#0d9488', '#9333ea', '#64748b']
 
 const APPROVAL = {
-  approved: { label: 'Согласован', icon: '✓', color: '#16a34a', bg: 'rgba(22,163,74,0.12)' },
-  review: { label: 'На рассмотрении', icon: '⋯', color: '#d97706', bg: 'rgba(217,119,6,0.12)' },
-  rejected: { label: 'Отклонён', icon: '✕', color: '#dc2626', bg: 'rgba(220,38,38,0.12)' },
+  approved: { label: 'Approved', icon: '✓', color: '#16a34a', bg: 'rgba(22,163,74,0.12)' },
+  review: { label: 'In review', icon: '⋯', color: '#d97706', bg: 'rgba(217,119,6,0.12)' },
+  rejected: { label: 'Rejected', icon: '✕', color: '#dc2626', bg: 'rgba(220,38,38,0.12)' },
 }
+const APPROVAL_CYCLE = ['review', 'approved', 'rejected']
 const approvalOf = (epic) => APPROVAL[epic?.approval] || APPROVAL.review
 
-function ApprovalBadge({ epic, large }) {
+function ApprovalBadge({ epic, large, onCycle }) {
   const a = approvalOf(epic)
   return (
-    <span style={{
-      display: 'inline-flex', alignItems: 'center', gap: 4, fontWeight: 600,
-      fontSize: large ? 12 : 10.5, padding: large ? '3px 10px' : '2px 8px', borderRadius: 10,
-      color: a.color, background: a.bg, marginLeft: 8,
-    }}>
+    <button
+      onClick={(e) => onCycle(epic, e)}
+      title="Click to change approval status"
+      style={{
+        display: 'inline-flex', alignItems: 'center', gap: 4, fontWeight: 600,
+        fontSize: large ? 12 : 10.5, padding: large ? '3px 10px' : '2px 8px', borderRadius: 10,
+        color: a.color, background: a.bg, border: `1px solid ${a.color}33`,
+        cursor: 'pointer', marginLeft: 8,
+      }}>
       <span>{a.icon}</span>{a.label}
-    </span>
-  )
-}
-
-function ApprovalSelector({ epic, onChange }) {
-  const current = epic.approval || 'review'
-  return (
-    <span style={{ display: 'inline-flex', gap: 2, marginLeft: 8 }}>
-      {['approved', 'review', 'rejected'].map(s => {
-        const a = APPROVAL[s]
-        const active = current === s
-        return (
-          <button key={s} title={a.label}
-            onClick={(e) => { e.stopPropagation(); onChange(epic.id, s) }}
-            style={{
-              width: 22, height: 22, borderRadius: 6, cursor: 'pointer', fontSize: 11,
-              border: active ? `1.5px solid ${a.color}` : '1px solid var(--border)',
-              background: active ? a.bg : 'transparent', color: active ? a.color : 'var(--muted)',
-            }}>
-            {a.icon}
-          </button>
-        )
-      })}
-    </span>
+    </button>
   )
 }
 
@@ -216,7 +198,12 @@ function GanttView({ tasks, setTasks, pw, openId, setOpenId, saveNote, setPriori
     await patchEpic(editingEpicId, { name: editName.trim() || undefined, color: editColor, outcome: editOutcome })
     setEditingEpicId(undefined)
   }
-  const setApproval = (epicId, value) => patchEpic(epicId, { approval: value })
+  const cycleApproval = (epic, e) => {
+    e.stopPropagation()
+    const cur = epic.approval || 'review'
+    const next = APPROVAL_CYCLE[(APPROVAL_CYCLE.indexOf(cur) + 1) % APPROVAL_CYCLE.length]
+    patchEpic(epic.id, { approval: next })
+  }
 
   const groups = groupByEpic(tasks, epics)
   const isBusiness = audience === 'business'
@@ -244,7 +231,7 @@ function GanttView({ tasks, setTasks, pw, openId, setOpenId, saveNote, setPriori
               <div style={{ padding: '8px 12px' }}>
                 <div style={{ display: 'flex', alignItems: 'center', fontSize: 14, fontWeight: 600 }}>
                   {epic.name}
-                  <ApprovalBadge epic={epic} large />
+                  <ApprovalBadge epic={epic} large onCycle={cycleApproval} />
                 </div>
                 <div style={{ fontSize: 11.5, color: 'var(--muted)', marginTop: 2 }}>{epic.outcome || '—'}</div>
               </div>
@@ -288,10 +275,7 @@ function GanttView({ tasks, setTasks, pw, openId, setOpenId, saveNote, setPriori
                   </span>
                 </span>
                 {group.id != null && (
-                  <>
-                    <ApprovalBadge epic={group} />
-                    <ApprovalSelector epic={group} onChange={setApproval} />
-                  </>
+                  <ApprovalBadge epic={group} onCycle={cycleApproval} />
                 )}
                 {group.id != null && (
                   <button
@@ -590,7 +574,7 @@ export default function Roadmap() {
           {audience === 'business' && (
             <label style={{ display: 'flex', alignItems: 'center', gap: 6, marginLeft: 12, fontSize: 12.5, color: 'var(--muted)', cursor: 'pointer' }}>
               <input type="checkbox" checked={onlyApproved} onChange={e => setOnlyApproved(e.target.checked)} />
-              Только согласованные
+              Only approved
             </label>
           )}
         </div>
