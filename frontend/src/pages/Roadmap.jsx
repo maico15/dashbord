@@ -74,7 +74,7 @@ function durationLabel(estimateDays) {
   return estimateDays >= 5 ? `${(estimateDays / 5).toFixed(1)}w` : `${estimateDays}d`
 }
 
-function GanttView({ tasks, setTasks, pw, openId, setOpenId, saveNote, setPriority, epics, patchEpic, setTaskEpic, setEstimate, audience, onlyApproved }) {
+function GanttView({ tasks, setTasks, pw, openId, setOpenId, saveNote, setPriority, epics, patchEpic, setTaskEpic, setEstimate, setStatus, audience, onlyApproved }) {
   const trackRef = useRef(null)
   const barDrag = useRef(null)   // {id, mode:'move'|'left'|'right', startX, origStart, origEnd, weekPx}
   const rowDrag = useRef(null)   // {id, startY, epicId}
@@ -204,6 +204,10 @@ function GanttView({ tasks, setTasks, pw, openId, setOpenId, saveNote, setPriori
     const next = APPROVAL_CYCLE[(APPROVAL_CYCLE.indexOf(cur) + 1) % APPROVAL_CYCLE.length]
     patchEpic(epic.id, { approval: next })
   }
+  const toggleEpicStatus = (epic, e) => {
+    e.stopPropagation()
+    patchEpic(epic.id, { status: epic.status === 'done' ? 'active' : 'done' })
+  }
 
   const groups = groupByEpic(tasks, epics)
   const isBusiness = audience === 'business'
@@ -226,6 +230,8 @@ function GanttView({ tasks, setTasks, pw, openId, setOpenId, saveNote, setPriori
           const eLeft = slotLeft(g.start_week ?? WEEK_START)
           const eWidth = slotWidth(g.start_week ?? WEEK_START, g.end_week ?? g.start_week ?? WEEK_START)
           const eApproval = epic.approval || 'review'
+          const gTasks = g.tasks || []
+          const epicDone = epic.status === 'done' || (gTasks.length > 0 && g.doneCount === gTasks.length)
           return (
             <div key={epic.id} ref={epicIndex === 0 ? trackRef : null} style={{ display: 'grid', gridTemplateColumns: '250px repeat(6,1fr)', alignItems: 'center', minHeight: 52, borderBottom: '1px solid var(--border)' }}>
               <div style={{ padding: '8px 12px' }}>
@@ -240,11 +246,14 @@ function GanttView({ tasks, setTasks, pw, openId, setOpenId, saveNote, setPriori
                 {g.start_week && (
                   <div style={{
                     position: 'absolute', left: `${eLeft}%`, width: `${eWidth}%`, height: 26, borderRadius: 6,
-                    background: epic.color, display: 'flex', alignItems: 'center', padding: '0 10px',
+                    background: epicDone
+                      ? `repeating-linear-gradient(45deg, rgba(255,255,255,0.35) 0, rgba(255,255,255,0.35) 5px, transparent 5px, transparent 10px), ${epic.color}`
+                      : epic.color,
+                    display: 'flex', alignItems: 'center', padding: '0 10px',
                     fontSize: 11, fontWeight: 600, color: '#ffffff',
                     whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
                     boxShadow: '0 1px 2px rgba(0,0,0,0.15)',
-                    opacity: eApproval === 'rejected' ? 0.4 : 1,
+                    opacity: eApproval === 'rejected' ? 0.4 : (epicDone ? 0.7 : 1),
                     border: eApproval === 'rejected' ? '1.5px dashed #dc2626'
                       : eApproval === 'approved' ? '1.5px solid rgba(22,163,74,0.6)'
                       : 'none',
@@ -257,7 +266,7 @@ function GanttView({ tasks, setTasks, pw, openId, setOpenId, saveNote, setPriori
       ) : groups.map((group, groupIndex) => {
         const key = group.id ?? 'none'
         const isExp = !!expandedEpics[key]
-        const allDone = group.tasks.length > 0 && group.doneCount === group.tasks.length
+        const allDone = group.status === 'done' || (group.tasks.length > 0 && group.doneCount === group.tasks.length)
         const color = group.color
         const isEditing = editingEpicId === group.id
         return (
@@ -276,6 +285,19 @@ function GanttView({ tasks, setTasks, pw, openId, setOpenId, saveNote, setPriori
                 </span>
                 {group.id != null && (
                   <ApprovalBadge epic={group} onCycle={cycleApproval} />
+                )}
+                {group.id != null && (
+                  <button
+                    title={group.status === 'done' ? 'Reopen epic' : 'Mark epic as done'}
+                    onClick={(e) => toggleEpicStatus(group, e)}
+                    style={{
+                      marginLeft: 8, padding: '2px 10px', borderRadius: 6, cursor: 'pointer', fontSize: 11, fontWeight: 600,
+                      border: group.status === 'done' ? '1px solid var(--success)' : '1px solid var(--border)',
+                      background: group.status === 'done' ? 'var(--success)' : 'transparent',
+                      color: group.status === 'done' ? '#fff' : 'var(--muted)',
+                    }}>
+                    {group.status === 'done' ? '✓ Done' : 'Mark done'}
+                  </button>
                 )}
                 {group.id != null && (
                   <button
@@ -437,6 +459,18 @@ function GanttView({ tasks, setTasks, pw, openId, setOpenId, saveNote, setPriori
                           placeholder="e.g. 2"
                           style={{ width: 100, padding: '6px 10px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--base)', color: 'var(--text)', fontSize: 12.5 }} />
                       </div>
+                      <div style={{ margin: '12px 0' }}>
+                        <div style={{ fontSize: 11, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '.05em', marginBottom: 4 }}>Status</div>
+                        <button onClick={() => setStatus(t.id, t.status === 'done' ? 'active' : 'done')}
+                          style={{
+                            padding: '4px 14px', borderRadius: 6, cursor: 'pointer', fontSize: 12, fontWeight: 600,
+                            border: '1px solid var(--success)',
+                            background: t.status === 'done' ? 'var(--success)' : 'transparent',
+                            color: t.status === 'done' ? '#fff' : 'var(--success)',
+                          }}>
+                          {t.status === 'done' ? '✓ Done' : 'Mark as done'}
+                        </button>
+                      </div>
                       <div>
                         <div style={{ fontSize: 11, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '.05em', marginBottom: 4 }}>Note</div>
                         <textarea defaultValue={t.note}
@@ -545,6 +579,11 @@ export default function Roadmap() {
   const setEstimate = async (id, estimate_days) => {
     setTasks(prev => prev.map(t => t.id === id ? { ...t, estimate_days } : t))
     await api.patch(`/roadmap/${id}`, { estimate_days }, pw)
+  }
+
+  const setStatus = async (id, status) => {
+    setTasks(prev => prev.map(t => t.id === id ? { ...t, status } : t))
+    await api.patch(`/roadmap/${id}`, { status }, pw)
   }
 
   return (
@@ -696,6 +735,7 @@ export default function Roadmap() {
           patchEpic={patchEpic}
           setTaskEpic={setTaskEpic}
           setEstimate={setEstimate}
+          setStatus={setStatus}
           audience={audience}
           onlyApproved={onlyApproved}
         />
