@@ -9,11 +9,22 @@ const PRIORITIES = {
   P3: { label: 'P3', color: '#7c3aed' },
 }
 
-const PRIO_BAR = {
-  P0: 'linear-gradient(90deg,#dc2626,#f97316)',
-  P1: 'linear-gradient(90deg,#f97316,#eab308)',
-  P2: 'linear-gradient(90deg,#2563eb,#06b6d4)',
-  P3: 'linear-gradient(90deg,#7c3aed,#a855f7)',
+const EPIC_COLORS = {
+  'Passport':             '#7c3aed',  // фиолетовый
+  'HomeAlliance ID':      '#2563eb',  // синий
+  'New Techapp':          '#0891b2',  // циан
+  'AI Operating Metrics': '#dc2626',  // красный
+  'FOS2':                 '#ea580c',  // оранжевый
+  'FlowPress':            '#16a34a',  // зелёный
+  'Alliance Capture':     '#db2777',  // розовый
+  'New CRM':              '#0d9488',  // teal
+  'SSO / IT':             '#9333ea',  // пурпурный
+  'Other':                '#64748b',  // серый
+}
+// запасные цвета для эпиков не из списка
+const FALLBACK_COLORS = ['#7c3aed', '#2563eb', '#0891b2', '#dc2626', '#ea580c', '#16a34a', '#db2777', '#0d9488', '#9333ea', '#c026d3', '#0284c7', '#65a30d']
+function epicColor(name, index) {
+  return EPIC_COLORS[name] || FALLBACK_COLORS[index % FALLBACK_COLORS.length]
 }
 
 const WEEK_START = 27, WEEK_END = 38, WEEK_COUNT = 12 // Q3 weeks
@@ -166,6 +177,8 @@ function GanttView({ tasks, setTasks, pw, openId, setOpenId, saveNote, setPriori
   const slotLeft = (w) => ((clamp(w) - WEEK_START) / WEEK_COUNT) * 100
   const slotWidth = (s, en) => ((clamp(en) - clamp(s) + 1) / WEEK_COUNT) * 100
 
+  const epics = groupIntoEpics(tasks)
+
   return (
     <div style={{ background: 'var(--card)', border: '1px solid var(--border)', borderRadius: 14, padding: 20, overflowX: 'auto' }}>
       <div style={{ display: 'grid', gridTemplateColumns: '250px repeat(6,1fr)', borderBottom: '1px solid var(--border)' }}>
@@ -177,10 +190,10 @@ function GanttView({ tasks, setTasks, pw, openId, setOpenId, saveNote, setPriori
         ))}
       </div>
 
-      {groupIntoEpics(tasks).map((epic, epicIndex) => {
+      {epics.map((epic, epicIndex) => {
         const isExp = !!expandedEpics[epic.name]
         const allDone = epic.count > 0 && epic.doneCount === epic.count
-        const epicBg = PRIO_BAR[epic.priority] || PRIO_BAR.P2
+        const color = epicColor(epic.name, epicIndex)
         return (
           <div key={epic.name}>
             <div style={{ display: 'grid', gridTemplateColumns: '250px repeat(6,1fr)', alignItems: 'center', minHeight: ROW_HEIGHT, borderBottom: '1px solid var(--border)', background: 'var(--base)' }}>
@@ -200,12 +213,15 @@ function GanttView({ tasks, setTasks, pw, openId, setOpenId, saveNote, setPriori
                   <div style={{
                     position: 'absolute', left: `${slotLeft(epic.start_week)}%`,
                     width: `${slotWidth(epic.start_week, epic.end_week ?? epic.start_week)}%`,
-                    height: 26, borderRadius: 6, background: epicBg,
-                    backgroundImage: allDone
-                      ? `repeating-linear-gradient(45deg, rgba(255,255,255,0.35) 0, rgba(255,255,255,0.35) 5px, transparent 5px, transparent 10px), ${epicBg}`
-                      : undefined,
+                    height: 26, borderRadius: 6,
+                    background: allDone
+                      ? `repeating-linear-gradient(45deg, rgba(255,255,255,0.35) 0, rgba(255,255,255,0.35) 5px, transparent 5px, transparent 10px), ${color}`
+                      : color,
                     opacity: allDone ? 0.7 : 1,
-                    display: 'flex', alignItems: 'center', padding: '0 10px', fontSize: 10, fontWeight: 600, color: '#fff',
+                    display: 'flex', alignItems: 'center', padding: '0 10px',
+                    fontSize: 11, fontWeight: 600, color: '#ffffff',
+                    whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+                    boxShadow: '0 1px 2px rgba(0,0,0,0.15)',
                   }}>{epic.name}</div>
                 )}
               </div>
@@ -215,7 +231,6 @@ function GanttView({ tasks, setTasks, pw, openId, setOpenId, saveNote, setPriori
               const initials = (t.owner_name || '??').split(' ').map(w => w[0]).slice(0, 2).join('')
               const isOpen = openId === t.id
               const isDone = t.status === 'done'
-              const barBg = PRIO_BAR[t.priority] || PRIO_BAR.P2
               return (
                 <div key={t.id}>
                   <div style={{ display: 'grid', gridTemplateColumns: '250px repeat(6,1fr)', alignItems: 'center', minHeight: ROW_HEIGHT, borderBottom: '1px solid var(--border)' }}>
@@ -233,6 +248,10 @@ function GanttView({ tasks, setTasks, pw, openId, setOpenId, saveNote, setPriori
                         onClick={() => setOpenId(isOpen ? null : t.id)}
                         style={{ cursor: 'pointer', userSelect: 'none', color: 'var(--muted)' }}
                       >{shortTitle(t.title)}</span>
+                      <span style={{
+                        fontSize: 9, fontWeight: 700, padding: '1px 5px', borderRadius: 4,
+                        background: 'var(--card2)', color: 'var(--muted)', border: '0.5px solid var(--border)',
+                      }}>{t.priority}</span>
                       <span style={{ fontSize: 11, color: 'var(--muted)', marginLeft: 'auto', transform: isOpen ? 'rotate(90deg)' : 'none' }}>▶</span>
                     </div>
                     <div style={{ gridColumn: '2 / -1', display: 'grid', gridTemplateColumns: 'repeat(6,1fr)', position: 'relative', height: '100%', alignItems: 'center' }}>
@@ -242,16 +261,17 @@ function GanttView({ tasks, setTasks, pw, openId, setOpenId, saveNote, setPriori
                         style={{
                           position: 'absolute', left: `${slotLeft(t.start_week ?? WEEK_START)}%`,
                           width: `${slotWidth(t.start_week ?? WEEK_START, t.end_week ?? t.start_week ?? WEEK_START)}%`,
-                          height: 22, borderRadius: 5, background: barBg,
-                          backgroundImage: isDone
-                            ? `repeating-linear-gradient(45deg, rgba(255,255,255,0.35) 0, rgba(255,255,255,0.35) 5px, transparent 5px, transparent 10px), ${barBg}`
-                            : undefined,
-                          opacity: isDone ? 0.65 : 1,
-                          display: 'flex', alignItems: 'center', padding: '0 8px', fontSize: 9.5, fontWeight: 600, color: '#fff',
+                          height: 20, borderRadius: 5,
+                          background: isDone
+                            ? `repeating-linear-gradient(45deg, rgba(255,255,255,0.35) 0, rgba(255,255,255,0.35) 5px, transparent 5px, transparent 10px), ${color}`
+                            : color,
+                          opacity: isDone ? 0.55 : 0.82,
+                          display: 'flex', alignItems: 'center', padding: '0 8px', fontSize: 9, fontWeight: 600, color: '#ffffff',
+                          whiteSpace: 'nowrap', overflow: 'hidden',
                           cursor: 'grab', userSelect: 'none', touchAction: 'none',
                         }}
                         title="Drag to move · edges to resize"
-                      >{isDone ? '✓ ' : ''}{t.priority}</div>
+                      >{isDone ? '✓ ' : ''}{shortTitle(t.title)}</div>
                     </div>
                   </div>
                   {isOpen && (
@@ -300,9 +320,12 @@ function GanttView({ tasks, setTasks, pw, openId, setOpenId, saveNote, setPriori
         </div>
       )}
 
-      <div style={{ display: 'flex', gap: 16, marginTop: 14, flexWrap: 'wrap', fontSize: 11, color: 'var(--muted)' }}>
-        {Object.entries(PRIO_BAR).map(([l, bg]) => (
-          <span key={l}><span style={{ display: 'inline-block', width: 18, height: 9, borderRadius: 3, background: bg, marginRight: 5, verticalAlign: 'middle' }} />{l}</span>
+      <div style={{ display: 'flex', gap: 12, marginTop: 14, flexWrap: 'wrap', fontSize: 11, color: 'var(--muted)' }}>
+        {epics.map((epic, i) => (
+          <span key={epic.name}>
+            <span style={{ display: 'inline-block', width: 14, height: 9, borderRadius: 3, background: epicColor(epic.name, i), marginRight: 5, verticalAlign: 'middle' }} />
+            {epic.name}
+          </span>
         ))}
         <span style={{ marginLeft: 'auto', fontStyle: 'italic' }}>Drag bars to reschedule · edges to resize · drag ⠿ up/down to reorder</span>
       </div>
