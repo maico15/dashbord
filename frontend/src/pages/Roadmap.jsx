@@ -569,6 +569,7 @@ export default function Roadmap() {
   const [newEpicName, setNewEpicName] = useState('')
   const [newEpicColor, setNewEpicColor] = useState('#2563eb')
   const [newEpicOwnerId, setNewEpicOwnerId] = useState('')
+  const [addEpicError, setAddEpicError] = useState('')
   const [audience, setAudience] = useState('engineering') // 'engineering' | 'business'
   const [onlyApproved, setOnlyApproved] = useState(false)
   const pw = sessionStorage.getItem('admin_pw') || ''
@@ -614,15 +615,21 @@ export default function Roadmap() {
 
   const addEpic = async () => {
     if (!newEpicName.trim()) return
-    await api.post('/roadmap/epics', {
-      name: newEpicName.trim(), color: newEpicColor,
-      owner_id: newEpicOwnerId === '' ? null : Number(newEpicOwnerId),
-    }, pw)
-    setNewEpicName('')
-    setNewEpicColor('#2563eb')
-    setNewEpicOwnerId('')
-    setShowAddEpic(false)
-    loadEpics()
+    setAddEpicError('')
+    try {
+      await api.post('/roadmap/epics', {
+        name: newEpicName.trim(), color: newEpicColor,
+        owner_id: newEpicOwnerId === '' ? null : Number(newEpicOwnerId),
+      }, pw)
+      setNewEpicName('')
+      setNewEpicColor('#2563eb')
+      setNewEpicOwnerId('')
+      setShowAddEpic(false)
+      loadEpics()
+    } catch (err) {
+      console.error('Failed to create epic:', err)
+      setAddEpicError('Failed to create epic')
+    }
   }
 
   const patchEpic = async (id, fields) => {
@@ -724,7 +731,7 @@ export default function Roadmap() {
             </div>
             <div style={{ display: 'flex', gap: 10 }}>
               <button
-                onClick={() => setShowAddEpic(v => !v)}
+                onClick={() => { setShowAddEpic(v => !v); setAddEpicError('') }}
                 style={{
                   padding: '6px 14px', borderRadius: 6, border: '1px solid var(--border)',
                   background: showAddEpic ? 'var(--card2)' : 'transparent',
@@ -745,39 +752,44 @@ export default function Roadmap() {
           </div>
         )}
         {audience === 'engineering' && showAddEpic && (
-          <div style={{ display: 'flex', alignItems: 'center', gap: 10, margin: '0 0 16px', padding: 12, background: 'var(--card)', border: '1px solid var(--border)', borderRadius: 10 }}>
-            <input
-              value={newEpicName}
-              onChange={e => setNewEpicName(e.target.value)}
-              placeholder="Epic name"
-              style={{ flex: 1, padding: '6px 10px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--base)', color: 'var(--text)', fontSize: 13 }}
-            />
-            <div style={{ display: 'flex', gap: 5 }}>
-              {PALETTE.map(c => (
-                <button key={c} onClick={() => setNewEpicColor(c)}
-                  style={{
-                    width: 22, height: 22, borderRadius: '50%', background: c, cursor: 'pointer',
-                    border: newEpicColor === c ? '2px solid var(--text)' : '2px solid transparent',
-                  }} />
-              ))}
+          <div style={{ margin: '0 0 16px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: 12, background: 'var(--card)', border: '1px solid var(--border)', borderRadius: 10 }}>
+              <input
+                value={newEpicName}
+                onChange={e => setNewEpicName(e.target.value)}
+                placeholder="Epic name"
+                style={{ flex: 1, padding: '6px 10px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--base)', color: 'var(--text)', fontSize: 13 }}
+              />
+              <div style={{ display: 'flex', gap: 5 }}>
+                {PALETTE.map(c => (
+                  <button key={c} onClick={() => setNewEpicColor(c)}
+                    style={{
+                      width: 22, height: 22, borderRadius: '50%', background: c, cursor: 'pointer',
+                      border: newEpicColor === c ? '2px solid var(--text)' : '2px solid transparent',
+                    }} />
+                ))}
+              </div>
+              <select
+                value={newEpicOwnerId}
+                onChange={e => setNewEpicOwnerId(e.target.value)}
+                style={{ padding: '6px 10px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--base)', color: 'var(--text)', fontSize: 13 }}
+              >
+                <option value="">— No lead —</option>
+                {(members ?? []).map(m => <option key={m.id} value={m.id}>{m.name}</option>)}
+              </select>
+              <button
+                onClick={addEpic}
+                disabled={!newEpicName.trim()}
+                style={{
+                  padding: '6px 14px', borderRadius: 6, border: 'none', background: 'var(--accent1)', color: '#fff',
+                  fontSize: 12, fontWeight: 600, cursor: newEpicName.trim() ? 'pointer' : 'not-allowed', opacity: newEpicName.trim() ? 1 : 0.5,
+                }}>
+                Add
+              </button>
             </div>
-            <select
-              value={newEpicOwnerId}
-              onChange={e => setNewEpicOwnerId(e.target.value)}
-              style={{ padding: '6px 10px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--base)', color: 'var(--text)', fontSize: 13 }}
-            >
-              <option value="">— No lead —</option>
-              {members.map(m => <option key={m.id} value={m.id}>{m.name}</option>)}
-            </select>
-            <button
-              onClick={addEpic}
-              disabled={!newEpicName.trim()}
-              style={{
-                padding: '6px 14px', borderRadius: 6, border: 'none', background: 'var(--accent1)', color: '#fff',
-                fontSize: 12, fontWeight: 600, cursor: newEpicName.trim() ? 'pointer' : 'not-allowed', opacity: newEpicName.trim() ? 1 : 0.5,
-              }}>
-              Add
-            </button>
+            {addEpicError && (
+              <div style={{ color: 'var(--danger)', fontSize: 12, marginTop: 6 }}>{addEpicError}</div>
+            )}
           </div>
         )}
         {audience === 'engineering' && showAdd && (
