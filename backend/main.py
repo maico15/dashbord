@@ -366,7 +366,15 @@ def init_db():
             start_week  INTEGER,
             end_week    INTEGER,
             sort_order  INTEGER DEFAULT 0,
-            updated_at  TEXT
+            updated_at  TEXT,
+            epic_id     INTEGER
+        );
+
+        CREATE TABLE IF NOT EXISTS roadmap_epics (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            name       TEXT NOT NULL,
+            color      TEXT DEFAULT '#2563eb',
+            sort_order INTEGER DEFAULT 0
         );
 
         CREATE TABLE IF NOT EXISTS roadmap_meta (
@@ -460,6 +468,11 @@ def init_db():
         pass
     try:
         conn.execute("ALTER TABLE tasks ADD COLUMN manual_override INTEGER NOT NULL DEFAULT 0")
+        conn.commit()
+    except Exception:
+        pass
+    try:
+        conn.execute("ALTER TABLE roadmap_tasks ADD COLUMN epic_id INTEGER")
         conn.commit()
     except Exception:
         pass
@@ -5192,11 +5205,18 @@ class RoadmapTask(BaseModel):
     note: str = ""
     start_week: Optional[int] = None
     end_week: Optional[int] = None
+    epic_id: Optional[int] = None
+
+
+class Epic(BaseModel):
+    name: str
+    color: str = "#2563eb"
 
 
 ROADMAP_PRIORITIES = {"P0", "P1", "P2", "P3"}
 ROADMAP_FIELDS = {"title", "owner_id", "priority", "description", "note",
-                   "start_week", "end_week", "sort_order"}
+                   "start_week", "end_week", "sort_order", "epic_id"}
+EPIC_FIELDS = {"name", "color", "sort_order"}
 
 
 @app.get("/api/roadmap")
@@ -5204,8 +5224,10 @@ def get_roadmap():
     conn = get_db()
     c = conn.cursor()
     c.execute(
-        "SELECT r.*, t.name as owner_name, t.avatar_color as owner_color "
+        "SELECT r.*, t.name as owner_name, t.avatar_color as owner_color, "
+        "e.name as epic_name, e.color as epic_color "
         "FROM roadmap_tasks r LEFT JOIN team_members t ON t.id = r.owner_id "
+        "LEFT JOIN roadmap_epics e ON e.id = r.epic_id "
         "ORDER BY r.sort_order, r.id"
     )
     tasks = [dict(row) for row in c.fetchall()]
@@ -5223,15 +5245,68 @@ def create_roadmap_task(data: RoadmapTask, password: str = ""):
     mx = conn.execute("SELECT COALESCE(MAX(sort_order),0)+1 FROM roadmap_tasks").fetchone()[0]
     cur = conn.execute(
         "INSERT INTO roadmap_tasks "
-        "(title, owner_id, priority, description, note, start_week, end_week, sort_order, updated_at) "
-        "VALUES (?,?,?,?,?,?,?,?,?)",
+        "(title, owner_id, priority, description, note, start_week, end_week, sort_order, updated_at, epic_id) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?)",
         (data.title, data.owner_id, data.priority, data.description, data.note,
-         data.start_week, data.end_week, mx, datetime.utcnow().isoformat()),
+         data.start_week, data.end_week, mx, datetime.utcnow().isoformat(), data.epic_id),
     )
     conn.commit()
     tid = cur.lastrowid
     conn.close()
     return {"ok": True, "id": tid}
+
+
+@app.get("/api/roadmap/epics")
+def list_epics():
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT * FROM roadmap_epics ORDER BY sort_order, id")
+    epics = [dict(r) for r in c.fetchall()]
+    conn.close()
+    return {"epics": epics}
+
+
+@app.post("/api/roadmap/epics")
+def create_epic(data: Epic, password: str = ""):
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    conn = get_db()
+    mx = conn.execute("SELECT COALESCE(MAX(sort_order),0)+1 FROM roadmap_epics").fetchone()[0]
+    cur = conn.execute(
+        "INSERT INTO roadmap_epics (name, color, sort_order) VALUES (?,?,?)",
+        (data.name, data.color, mx),
+    )
+    conn.commit()
+    eid = cur.lastrowid
+    conn.close()
+    return {"ok": True, "id": eid}
+
+
+@app.patch("/api/roadmap/epics/{epic_id}")
+def update_epic(epic_id: int, data: dict, password: str = ""):
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    fields = {k: v for k, v in data.items() if k in EPIC_FIELDS}
+    if not fields:
+        raise HTTPException(422, "No valid fields")
+    conn = get_db()
+    sets = ", ".join(f"{k}=?" for k in fields)
+    conn.execute(f"UPDATE roadmap_epics SET {sets} WHERE id=?", list(fields.values()) + [epic_id])
+    conn.commit()
+    conn.close()
+    return {"ok": True}
+
+
+@app.delete("/api/roadmap/epics/{epic_id}")
+def delete_epic(epic_id: int, password: str = ""):
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    conn = get_db()
+    conn.execute("UPDATE roadmap_tasks SET epic_id=NULL WHERE epic_id=?", (epic_id,))
+    conn.execute("DELETE FROM roadmap_epics WHERE id=?", (epic_id,))
+    conn.commit()
+    conn.close()
+    return {"ok": True}
 
 
 class RoadmapStrategyUpdate(BaseModel):

@@ -9,71 +9,39 @@ const PRIORITIES = {
   P3: { label: 'P3', color: '#7c3aed' },
 }
 
-const EPIC_COLORS = {
-  'Passport':             '#7c3aed',  // фиолетовый
-  'HomeAlliance ID':      '#2563eb',  // синий
-  'New Techapp':          '#0891b2',  // циан
-  'AI Operating Metrics': '#dc2626',  // красный
-  'FOS2':                 '#ea580c',  // оранжевый
-  'FlowPress':            '#16a34a',  // зелёный
-  'Alliance Capture':     '#db2777',  // розовый
-  'New CRM':              '#0d9488',  // teal
-  'SSO / IT':             '#9333ea',  // пурпурный
-  'Other':                '#64748b',  // серый
-}
-// запасные цвета для эпиков не из списка
-const FALLBACK_COLORS = ['#7c3aed', '#2563eb', '#0891b2', '#dc2626', '#ea580c', '#16a34a', '#db2777', '#0d9488', '#9333ea', '#c026d3', '#0284c7', '#65a30d']
-function epicColor(name, index) {
-  return EPIC_COLORS[name] || FALLBACK_COLORS[index % FALLBACK_COLORS.length]
-}
+const PALETTE = ['#7c3aed', '#2563eb', '#0891b2', '#dc2626', '#ea580c', '#16a34a', '#db2777', '#0d9488', '#9333ea', '#64748b']
 
 const WEEK_START = 27, WEEK_END = 38, WEEK_COUNT = 12 // Q3 weeks
 const ROW_HEIGHT = 44
-const EPIC_SEP = ' · '
 
-const EMPTY_DRAFT = { title: '', owner_id: '', priority: 'P2', description: '' }
+const EMPTY_DRAFT = { title: '', owner_id: '', priority: 'P2', description: '', epic_id: '' }
 
-function epicNameOf(title) {
-  const idx = (title || '').indexOf(EPIC_SEP)
-  return idx > 0 ? title.slice(0, idx) : 'Other'
-}
-
-function shortTitle(title) {
-  const idx = (title || '').indexOf(EPIC_SEP)
-  return idx > 0 ? title.slice(idx + EPIC_SEP.length) : title
-}
-
-function groupIntoEpics(tasks) {
-  const epics = {}
-  const order = []
-  for (const t of tasks) {
-    const name = epicNameOf(t.title)
-    if (!epics[name]) { epics[name] = []; order.push(name) }
-    epics[name].push(t)
+function groupByEpic(tasks, epics) {
+  const groups = epics.map(e => ({
+    ...e,
+    tasks: tasks.filter(t => t.epic_id === e.id),
+  }))
+  const orphan = tasks.filter(t => !t.epic_id || !epics.find(e => e.id === t.epic_id))
+  if (orphan.length) groups.push({ id: null, name: 'No epic', color: '#64748b', tasks: orphan })
+  for (const g of groups) {
+    const s = g.tasks.map(t => t.start_week).filter(Boolean)
+    const en = g.tasks.map(t => t.end_week).filter(Boolean)
+    g.start_week = s.length ? Math.min(...s) : null
+    g.end_week = en.length ? Math.max(...en) : null
+    g.doneCount = g.tasks.filter(t => t.status === 'done').length
   }
-  return order.map(name => {
-    const items = epics[name]
-    const starts = items.map(t => t.start_week).filter(Boolean)
-    const ends = items.map(t => t.end_week).filter(Boolean)
-    const prios = items.map(t => t.priority).filter(Boolean).sort()
-    return {
-      name,
-      tasks: items,
-      start_week: starts.length ? Math.min(...starts) : null,
-      end_week: ends.length ? Math.max(...ends) : null,
-      priority: prios[0] || 'P2',
-      count: items.length,
-      doneCount: items.filter(t => t.status === 'done').length,
-    }
-  })
+  return groups.filter(g => g.tasks.length)
 }
 
-function GanttView({ tasks, setTasks, pw, openId, setOpenId, saveNote, setPriority }) {
+function GanttView({ tasks, setTasks, pw, openId, setOpenId, saveNote, setPriority, epics, patchEpic, setTaskEpic }) {
   const trackRef = useRef(null)
   const barDrag = useRef(null)   // {id, mode:'move'|'left'|'right', startX, origStart, origEnd, weekPx}
-  const rowDrag = useRef(null)   // {id, startY, epicName}
+  const rowDrag = useRef(null)   // {id, startY, epicId}
   const [expandedEpics, setExpandedEpics] = useState({})
-  const toggleEpic = (name) => setExpandedEpics(prev => ({ ...prev, [name]: !prev[name] }))
+  const toggleEpic = (key) => setExpandedEpics(prev => ({ ...prev, [key]: !prev[key] }))
+  const [editingEpicId, setEditingEpicId] = useState(undefined) // undefined = none open; supports null id for "No epic" (not editable anyway)
+  const [editName, setEditName] = useState('')
+  const [editColor, setEditColor] = useState('#2563eb')
 
   const clamp = (w) => Math.max(WEEK_START, Math.min(WEEK_END, w))
 
@@ -137,7 +105,7 @@ function GanttView({ tasks, setTasks, pw, openId, setOpenId, saveNote, setPriori
 
   // ── Vertical drag: reorder rows within the same epic ───────────────────
   const onRowPointerDown = (e, task) => {
-    rowDrag.current = { id: task.id, startY: e.clientY, epicName: epicNameOf(task.title) }
+    rowDrag.current = { id: task.id, startY: e.clientY, epicId: task.epic_id ?? null }
     window.addEventListener('pointermove', onRowPointerMove)
     window.addEventListener('pointerup', onRowPointerUp)
   }
@@ -151,7 +119,7 @@ function GanttView({ tasks, setTasks, pw, openId, setOpenId, saveNote, setPriori
       const positions = []
       const ids = []
       prev.forEach((t, i) => {
-        if (epicNameOf(t.title) === rd.epicName) { positions.push(i); ids.push(t.id) }
+        if ((t.epic_id ?? null) === rd.epicId) { positions.push(i); ids.push(t.id) }
       })
       const from = ids.indexOf(rd.id)
       const to = Math.max(0, Math.min(ids.length - 1, from + deltaRows))
@@ -177,7 +145,18 @@ function GanttView({ tasks, setTasks, pw, openId, setOpenId, saveNote, setPriori
   const slotLeft = (w) => ((clamp(w) - WEEK_START) / WEEK_COUNT) * 100
   const slotWidth = (s, en) => ((clamp(en) - clamp(s) + 1) / WEEK_COUNT) * 100
 
-  const epics = groupIntoEpics(tasks)
+  const openEditEpic = (group) => {
+    setEditingEpicId(group.id)
+    setEditName(group.name)
+    setEditColor(group.color)
+  }
+  const saveEpicEdit = async () => {
+    if (editingEpicId == null) return
+    await patchEpic(editingEpicId, { name: editName.trim() || undefined, color: editColor })
+    setEditingEpicId(undefined)
+  }
+
+  const groups = groupByEpic(tasks, epics)
 
   return (
     <div style={{ background: 'var(--card)', border: '1px solid var(--border)', borderRadius: 14, padding: 20, overflowX: 'auto' }}>
@@ -190,29 +169,40 @@ function GanttView({ tasks, setTasks, pw, openId, setOpenId, saveNote, setPriori
         ))}
       </div>
 
-      {epics.map((epic, epicIndex) => {
-        const isExp = !!expandedEpics[epic.name]
-        const allDone = epic.count > 0 && epic.doneCount === epic.count
-        const color = epicColor(epic.name, epicIndex)
+      {groups.map((group, groupIndex) => {
+        const key = group.id ?? 'none'
+        const isExp = !!expandedEpics[key]
+        const allDone = group.tasks.length > 0 && group.doneCount === group.tasks.length
+        const color = group.color
+        const isEditing = editingEpicId === group.id
         return (
-          <div key={epic.name}>
+          <div key={key}>
             <div style={{ display: 'grid', gridTemplateColumns: '250px repeat(6,1fr)', alignItems: 'center', minHeight: ROW_HEIGHT, borderBottom: '1px solid var(--border)', background: 'var(--base)' }}>
-              <div
-                onClick={() => toggleEpic(epic.name)}
-                style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 10px', fontSize: 13, fontWeight: 600, cursor: 'pointer', userSelect: 'none' }}
-              >
-                <span style={{ transform: isExp ? 'rotate(90deg)' : 'none', transition: 'transform .15s', color: 'var(--muted)', fontSize: 11 }}>▶</span>
-                <span>{epic.name}</span>
-                <span style={{ fontSize: 11, fontWeight: 400, color: 'var(--muted)' }}>
-                  {epic.doneCount > 0 ? `${epic.doneCount}/${epic.count}` : epic.count} {epic.count === 1 ? 'task' : 'tasks'}
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '6px 10px', fontSize: 13, fontWeight: 600 }}>
+                <span
+                  onClick={() => toggleEpic(key)}
+                  style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', userSelect: 'none' }}
+                >
+                  <span style={{ transform: isExp ? 'rotate(90deg)' : 'none', transition: 'transform .15s', color: 'var(--muted)', fontSize: 11 }}>▶</span>
+                  <span>{group.name}</span>
+                  <span style={{ fontSize: 11, fontWeight: 400, color: 'var(--muted)' }}>
+                    {group.doneCount > 0 ? `${group.doneCount}/${group.tasks.length}` : group.tasks.length} {group.tasks.length === 1 ? 'task' : 'tasks'}
+                  </span>
                 </span>
+                {group.id != null && (
+                  <button
+                    onClick={() => openEditEpic(group)}
+                    title="Edit epic"
+                    style={{ marginLeft: 'auto', border: 'none', background: 'transparent', color: 'var(--muted)', cursor: 'pointer', fontSize: 12, padding: 2 }}
+                  >✎</button>
+                )}
               </div>
-              <div ref={epicIndex === 0 ? trackRef : null} style={{ gridColumn: '2 / -1', display: 'grid', gridTemplateColumns: 'repeat(6,1fr)', position: 'relative', height: '100%', alignItems: 'center' }}>
+              <div ref={groupIndex === 0 ? trackRef : null} style={{ gridColumn: '2 / -1', display: 'grid', gridTemplateColumns: 'repeat(6,1fr)', position: 'relative', height: '100%', alignItems: 'center' }}>
                 {[0, 1, 2, 3, 4, 5].map(i => <div key={i} style={{ borderLeft: '1px solid var(--border)', height: '100%' }} />)}
-                {epic.start_week && (
+                {group.start_week && (
                   <div style={{
-                    position: 'absolute', left: `${slotLeft(epic.start_week)}%`,
-                    width: `${slotWidth(epic.start_week, epic.end_week ?? epic.start_week)}%`,
+                    position: 'absolute', left: `${slotLeft(group.start_week)}%`,
+                    width: `${slotWidth(group.start_week, group.end_week ?? group.start_week)}%`,
                     height: 26, borderRadius: 6,
                     background: allDone
                       ? `repeating-linear-gradient(45deg, rgba(255,255,255,0.35) 0, rgba(255,255,255,0.35) 5px, transparent 5px, transparent 10px), ${color}`
@@ -222,12 +212,33 @@ function GanttView({ tasks, setTasks, pw, openId, setOpenId, saveNote, setPriori
                     fontSize: 11, fontWeight: 600, color: '#ffffff',
                     whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
                     boxShadow: '0 1px 2px rgba(0,0,0,0.15)',
-                  }}>{epic.name}</div>
+                  }}>{group.name}</div>
                 )}
               </div>
             </div>
 
-            {isExp && epic.tasks.map(t => {
+            {isEditing && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 16px', borderBottom: '1px solid var(--border)', background: 'var(--base)' }}>
+                <input
+                  value={editName}
+                  onChange={e => setEditName(e.target.value)}
+                  style={{ flex: 1, maxWidth: 240, padding: '6px 10px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--card)', color: 'var(--text)', fontSize: 12.5 }}
+                />
+                <div style={{ display: 'flex', gap: 5 }}>
+                  {PALETTE.map(c => (
+                    <button key={c} onClick={() => setEditColor(c)}
+                      style={{
+                        width: 20, height: 20, borderRadius: '50%', background: c, cursor: 'pointer',
+                        border: editColor === c ? '2px solid var(--text)' : '2px solid transparent',
+                      }} />
+                  ))}
+                </div>
+                <button onClick={saveEpicEdit} style={{ padding: '5px 12px', borderRadius: 6, border: 'none', background: 'var(--accent1)', color: '#fff', fontSize: 11.5, fontWeight: 600, cursor: 'pointer' }}>Save</button>
+                <button onClick={() => setEditingEpicId(undefined)} style={{ padding: '5px 10px', borderRadius: 6, border: '1px solid var(--border)', background: 'transparent', color: 'var(--muted)', fontSize: 11.5, cursor: 'pointer' }}>Cancel</button>
+              </div>
+            )}
+
+            {isExp && group.tasks.map(t => {
               const initials = (t.owner_name || '??').split(' ').map(w => w[0]).slice(0, 2).join('')
               const isOpen = openId === t.id
               const isDone = t.status === 'done'
@@ -247,7 +258,7 @@ function GanttView({ tasks, setTasks, pw, openId, setOpenId, saveNote, setPriori
                       <span
                         onClick={() => setOpenId(isOpen ? null : t.id)}
                         style={{ cursor: 'pointer', userSelect: 'none', color: 'var(--muted)' }}
-                      >{shortTitle(t.title)}</span>
+                      >{t.title}</span>
                       <span style={{
                         fontSize: 9, fontWeight: 700, padding: '1px 5px', borderRadius: 4,
                         background: 'var(--card2)', color: 'var(--muted)', border: '0.5px solid var(--border)',
@@ -271,7 +282,7 @@ function GanttView({ tasks, setTasks, pw, openId, setOpenId, saveNote, setPriori
                           cursor: 'grab', userSelect: 'none', touchAction: 'none',
                         }}
                         title="Drag to move · edges to resize"
-                      >{isDone ? '✓ ' : ''}{shortTitle(t.title)}</div>
+                      >{isDone ? '✓ ' : ''}{t.title}</div>
                     </div>
                   </div>
                   {isOpen && (
@@ -294,6 +305,17 @@ function GanttView({ tasks, setTasks, pw, openId, setOpenId, saveNote, setPriori
                             </button>
                           ))}
                         </div>
+                      </div>
+                      <div style={{ margin: '8px 0' }}>
+                        <div style={{ fontSize: 11, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '.05em', marginBottom: 4 }}>Epic</div>
+                        <select
+                          value={t.epic_id ?? ''}
+                          onChange={e => setTaskEpic(t.id, e.target.value ? Number(e.target.value) : null)}
+                          style={{ padding: '6px 10px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--base)', color: 'var(--text)', fontSize: 12.5 }}
+                        >
+                          <option value="">— No epic —</option>
+                          {epics.map(ep => <option key={ep.id} value={ep.id}>{ep.name}</option>)}
+                        </select>
                       </div>
                       <div>
                         <div style={{ fontSize: 11, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '.05em', marginBottom: 4 }}>Note</div>
@@ -321,10 +343,10 @@ function GanttView({ tasks, setTasks, pw, openId, setOpenId, saveNote, setPriori
       )}
 
       <div style={{ display: 'flex', gap: 12, marginTop: 14, flexWrap: 'wrap', fontSize: 11, color: 'var(--muted)' }}>
-        {epics.map((epic, i) => (
-          <span key={epic.name}>
-            <span style={{ display: 'inline-block', width: 14, height: 9, borderRadius: 3, background: epicColor(epic.name, i), marginRight: 5, verticalAlign: 'middle' }} />
-            {epic.name}
+        {groups.map(group => (
+          <span key={group.id ?? 'none'}>
+            <span style={{ display: 'inline-block', width: 14, height: 9, borderRadius: 3, background: group.color, marginRight: 5, verticalAlign: 'middle' }} />
+            {group.name}
           </span>
         ))}
         <span style={{ marginLeft: 'auto', fontStyle: 'italic' }}>Drag bars to reschedule · edges to resize · drag ⠿ up/down to reorder</span>
@@ -336,14 +358,20 @@ function GanttView({ tasks, setTasks, pw, openId, setOpenId, saveNote, setPriori
 export default function Roadmap() {
   const [tasks, setTasks] = useState([])
   const [members, setMembers] = useState([])
+  const [epics, setEpics] = useState([])
   const [openId, setOpenId] = useState(null)
   const [showAdd, setShowAdd] = useState(false)
   const [draft, setDraft] = useState(EMPTY_DRAFT)
+  const [showAddEpic, setShowAddEpic] = useState(false)
+  const [newEpicName, setNewEpicName] = useState('')
+  const [newEpicColor, setNewEpicColor] = useState('#2563eb')
   const pw = sessionStorage.getItem('admin_pw') || ''
 
   const load = () => api.get('/roadmap').then(d => setTasks(d.tasks || []))
+  const loadEpics = () => api.get('/roadmap/epics').then(d => setEpics(d.epics || []))
   useEffect(() => {
     load()
+    loadEpics()
     api.get('/team').then(setMembers).catch(() => {})
   }, [])
 
@@ -354,10 +382,25 @@ export default function Roadmap() {
       owner_id: draft.owner_id ? Number(draft.owner_id) : null,
       priority: draft.priority,
       description: draft.description,
+      epic_id: draft.epic_id ? Number(draft.epic_id) : null,
     }, pw)
     setDraft(EMPTY_DRAFT)
     setShowAdd(false)
     load()
+  }
+
+  const addEpic = async () => {
+    if (!newEpicName.trim()) return
+    await api.post('/roadmap/epics', { name: newEpicName.trim(), color: newEpicColor }, pw)
+    setNewEpicName('')
+    setNewEpicColor('#2563eb')
+    setShowAddEpic(false)
+    loadEpics()
+  }
+
+  const patchEpic = async (id, fields) => {
+    await api.patch(`/roadmap/epics/${id}`, fields, pw)
+    loadEpics()
   }
 
   const saveNote = async (id, note) => {
@@ -367,6 +410,12 @@ export default function Roadmap() {
   const setPriority = async (id, priority) => {
     setTasks(prev => prev.map(t => t.id === id ? { ...t, priority } : t))
     await api.patch(`/roadmap/${id}`, { priority }, pw)
+  }
+
+  const setTaskEpic = async (id, epic_id) => {
+    setTasks(prev => prev.map(t => t.id === id ? { ...t, epic_id } : t))
+    await api.patch(`/roadmap/${id}`, { epic_id }, pw)
+    load()
   }
 
   return (
@@ -385,16 +434,55 @@ export default function Roadmap() {
           <div style={{ fontSize: 13, color: 'var(--muted)' }}>
             Drag bars to reschedule · edges to resize · drag ⠿ to reorder · click a task for details and notes
           </div>
-          <button
-            onClick={() => setShowAdd(v => !v)}
-            style={{
-              padding: '6px 14px', borderRadius: 6, border: '1px solid var(--accent1)',
-              background: showAdd ? 'var(--accent1)' : 'transparent',
-              color: showAdd ? '#fff' : 'var(--accent1)', fontSize: 12, fontWeight: 600, cursor: 'pointer',
-            }}>
-            {showAdd ? '✕ Cancel' : '+ Add Task'}
-          </button>
+          <div style={{ display: 'flex', gap: 10 }}>
+            <button
+              onClick={() => setShowAddEpic(v => !v)}
+              style={{
+                padding: '6px 14px', borderRadius: 6, border: '1px solid var(--border)',
+                background: showAddEpic ? 'var(--card2)' : 'transparent',
+                color: 'var(--text)', fontSize: 12, fontWeight: 600, cursor: 'pointer',
+              }}>
+              {showAddEpic ? '✕ Cancel' : '+ Add Epic'}
+            </button>
+            <button
+              onClick={() => setShowAdd(v => !v)}
+              style={{
+                padding: '6px 14px', borderRadius: 6, border: '1px solid var(--accent1)',
+                background: showAdd ? 'var(--accent1)' : 'transparent',
+                color: showAdd ? '#fff' : 'var(--accent1)', fontSize: 12, fontWeight: 600, cursor: 'pointer',
+              }}>
+              {showAdd ? '✕ Cancel' : '+ Add Task'}
+            </button>
+          </div>
         </div>
+        {showAddEpic && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, margin: '0 0 16px', padding: 12, background: 'var(--card)', border: '1px solid var(--border)', borderRadius: 10 }}>
+            <input
+              value={newEpicName}
+              onChange={e => setNewEpicName(e.target.value)}
+              placeholder="Epic name"
+              style={{ flex: 1, padding: '6px 10px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--base)', color: 'var(--text)', fontSize: 13 }}
+            />
+            <div style={{ display: 'flex', gap: 5 }}>
+              {PALETTE.map(c => (
+                <button key={c} onClick={() => setNewEpicColor(c)}
+                  style={{
+                    width: 22, height: 22, borderRadius: '50%', background: c, cursor: 'pointer',
+                    border: newEpicColor === c ? '2px solid var(--text)' : '2px solid transparent',
+                  }} />
+              ))}
+            </div>
+            <button
+              onClick={addEpic}
+              disabled={!newEpicName.trim()}
+              style={{
+                padding: '6px 14px', borderRadius: 6, border: 'none', background: 'var(--accent1)', color: '#fff',
+                fontSize: 12, fontWeight: 600, cursor: newEpicName.trim() ? 'pointer' : 'not-allowed', opacity: newEpicName.trim() ? 1 : 0.5,
+              }}>
+              Add
+            </button>
+          </div>
+        )}
         {showAdd && (
           <div className="card" style={{ padding: 16, marginBottom: 16, display: 'flex', flexDirection: 'column', gap: 10 }}>
             <input
@@ -411,6 +499,14 @@ export default function Roadmap() {
               >
                 <option value="">No owner</option>
                 {members.map(m => <option key={m.id} value={m.id}>{m.name}</option>)}
+              </select>
+              <select
+                value={draft.epic_id}
+                onChange={e => setDraft(d => ({ ...d, epic_id: e.target.value }))}
+                style={{ padding: '8px 10px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--base)', color: 'var(--text)', fontSize: 13, flex: 1 }}
+              >
+                <option value="">— No epic —</option>
+                {epics.map(ep => <option key={ep.id} value={ep.id}>{ep.name}</option>)}
               </select>
               <select
                 value={draft.priority}
@@ -446,6 +542,9 @@ export default function Roadmap() {
           setOpenId={setOpenId}
           saveNote={saveNote}
           setPriority={setPriority}
+          epics={epics}
+          patchEpic={patchEpic}
+          setTaskEpic={setTaskEpic}
         />
       </div>
     </div>
