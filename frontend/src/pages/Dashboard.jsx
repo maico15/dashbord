@@ -335,9 +335,14 @@ export default function Dashboard() {
             </button>
           ))}
           {activeDept === IT_DEPT_ID && (
-            <Link to="/tasks" className="tab-btn" style={{ textDecoration: 'none', display: 'inline-flex', alignItems: 'center' }}>
-              🗂️ Task Board
-            </Link>
+            <>
+              <Link to="/tasks" className="tab-btn" style={{ textDecoration: 'none', display: 'inline-flex', alignItems: 'center' }}>
+                🗂️ Task Board
+              </Link>
+              <Link to="/roadmap" className="tab-btn" style={{ textDecoration: 'none', display: 'inline-flex', alignItems: 'center' }}>
+                🗺️ Roadmap
+              </Link>
+            </>
           )}
         </div>
 
