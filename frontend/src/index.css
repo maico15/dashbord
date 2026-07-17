@@ -719,6 +719,140 @@ body {
   padding-top: 8px;
   border-top: 1px solid var(--border);
 }
+/* ── Roadmap Gantt sidebar (epic rows) ───────────────── */
+.gantt-sidebar {
+  width: 300px;
+  min-width: 300px;
+  max-width: 300px;
+}
+
+.epic-row-side {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 6px;
+  padding: 8px 10px;
+  min-height: 56px;
+  box-sizing: border-box;
+}
+
+.epic-row-top {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.epic-expand {
+  flex: 0 0 auto;
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--muted);
+  padding: 0;
+  font-size: 11px;
+}
+
+.epic-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.epic-count {
+  flex: 0 0 auto;
+  font-size: 11px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.epic-row-controls {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* Approval badge: uniform compact size */
+.epic-row-controls .approval-badge {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  min-width: 84px;
+  height: 22px;
+  padding: 0 8px;
+  font-size: 11px;
+  line-height: 1;
+  white-space: nowrap;
+  border-radius: 11px;
+  box-sizing: border-box;
+}
+
+/* "Mark done" button: never wraps */
+.epic-row-controls .mark-done-btn {
+  flex: 0 0 auto;
+  height: 22px;
+  padding: 0 8px;
+  font-size: 11px;
+  line-height: 1;
+  white-space: nowrap;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.epic-row-controls .epic-edit-btn {
+  flex: 0 0 auto;
+  height: 22px;
+  width: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 12px;
+}
+
+/* Move up/down buttons */
+.epic-move-group {
+  flex: 0 0 auto;
+  display: inline-flex;
+  flex-direction: column;
+  gap: 1px;
+  margin-left: auto;
+}
+
+.epic-move-btn {
+  height: 11px;
+  width: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 8px;
+  line-height: 1;
+  padding: 0;
+}
+
+.epic-move-btn:hover:not(:disabled) {
+  color: var(--text);
+}
+
+.epic-move-btn:disabled {
+  opacity: 0.25;
+  cursor: default;
+}
+
 .releases-card-nobody {
   color: var(--muted);
   opacity: 0.4;
