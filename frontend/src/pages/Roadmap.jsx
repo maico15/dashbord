@@ -78,7 +78,7 @@ function durationLabel(estimateDays) {
   return estimateDays >= 5 ? `${(estimateDays / 5).toFixed(1)}w` : `${estimateDays}d`
 }
 
-function GanttView({ tasks, setTasks, pw, openId, setOpenId, saveNote, setPriority, epics, patchEpic, setTaskEpic, setEstimate, setStatus, moveEpic, audience, onlyApproved }) {
+function GanttView({ tasks, setTasks, pw, openId, setOpenId, saveNote, setPriority, epics, patchEpic, setTaskEpic, setEstimate, setStatus, moveEpic, audience, onlyApproved, team }) {
   const trackRef = useRef(null)
   const barDrag = useRef(null)   // {id, mode:'move'|'left'|'right', startX, origStart, origEnd, weekPx}
   const rowDrag = useRef(null)   // {id, startY, epicId}
@@ -88,6 +88,7 @@ function GanttView({ tasks, setTasks, pw, openId, setOpenId, saveNote, setPriori
   const [editName, setEditName] = useState('')
   const [editColor, setEditColor] = useState('#2563eb')
   const [editOutcome, setEditOutcome] = useState('')
+  const [editOwnerId, setEditOwnerId] = useState('')
 
   const clamp = (w) => Math.max(WEEK_START, Math.min(WEEK_END, w))
 
@@ -196,10 +197,14 @@ function GanttView({ tasks, setTasks, pw, openId, setOpenId, saveNote, setPriori
     setEditName(group.name)
     setEditColor(group.color)
     setEditOutcome(group.outcome || '')
+    setEditOwnerId(group.owner_id ?? '')
   }
   const saveEpicEdit = async () => {
     if (editingEpicId == null) return
-    await patchEpic(editingEpicId, { name: editName.trim() || undefined, color: editColor, outcome: editOutcome })
+    await patchEpic(editingEpicId, {
+      name: editName.trim() || undefined, color: editColor, outcome: editOutcome,
+      owner_id: editOwnerId === '' ? null : Number(editOwnerId),
+    })
     setEditingEpicId(undefined)
   }
   const cycleApproval = (epic, e) => {
@@ -244,6 +249,11 @@ function GanttView({ tasks, setTasks, pw, openId, setOpenId, saveNote, setPriori
                 <div style={{ display: 'flex', alignItems: 'center', fontSize: 14, fontWeight: 600 }}>
                   {epic.name}
                   <ApprovalBadge epic={epic} large onCycle={cycleApproval} />
+                  {epic.owner_name && (
+                    <span className="epic-owner" title={`Lead: ${epic.owner_name}`} style={{ marginLeft: 8 }}>
+                      · {epic.owner_name.split(' ')[0]}
+                    </span>
+                  )}
                 </div>
                 <div style={{ fontSize: 11.5, color: 'var(--muted)', marginTop: 2 }}>{epic.outcome || '—'}</div>
               </div>
@@ -287,6 +297,11 @@ function GanttView({ tasks, setTasks, pw, openId, setOpenId, saveNote, setPriori
                   <span className="epic-count">
                     {group.doneCount > 0 ? `${group.doneCount}/${group.tasks.length}` : group.tasks.length} {group.tasks.length === 1 ? 'task' : 'tasks'}
                   </span>
+                  {group.owner_name && (
+                    <span className="epic-owner" title={`Lead: ${group.owner_name}`}>
+                      · {group.owner_name.split(' ')[0]}
+                    </span>
+                  )}
                 </div>
                 {group.id != null && (
                   <div className="epic-row-controls">
@@ -376,6 +391,17 @@ function GanttView({ tasks, setTasks, pw, openId, setOpenId, saveNote, setPriori
                   placeholder="Business outcome (shown in Business view)"
                   style={{ padding: '6px 10px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--card)', color: 'var(--text)', fontSize: 12.5 }}
                 />
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <label style={{ fontSize: 11.5, color: 'var(--muted)' }}>Lead</label>
+                  <select
+                    value={editOwnerId}
+                    onChange={e => setEditOwnerId(e.target.value)}
+                    style={{ padding: '6px 10px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--card)', color: 'var(--text)', fontSize: 12.5 }}
+                  >
+                    <option value="">— No lead —</option>
+                    {team.map(m => <option key={m.id} value={m.id}>{m.name}</option>)}
+                  </select>
+                </div>
               </div>
             )}
 
@@ -542,6 +568,7 @@ export default function Roadmap() {
   const [showAddEpic, setShowAddEpic] = useState(false)
   const [newEpicName, setNewEpicName] = useState('')
   const [newEpicColor, setNewEpicColor] = useState('#2563eb')
+  const [newEpicOwnerId, setNewEpicOwnerId] = useState('')
   const [audience, setAudience] = useState('engineering') // 'engineering' | 'business'
   const [onlyApproved, setOnlyApproved] = useState(false)
   const pw = sessionStorage.getItem('admin_pw') || ''
@@ -587,9 +614,13 @@ export default function Roadmap() {
 
   const addEpic = async () => {
     if (!newEpicName.trim()) return
-    await api.post('/roadmap/epics', { name: newEpicName.trim(), color: newEpicColor }, pw)
+    await api.post('/roadmap/epics', {
+      name: newEpicName.trim(), color: newEpicColor,
+      owner_id: newEpicOwnerId === '' ? null : Number(newEpicOwnerId),
+    }, pw)
     setNewEpicName('')
     setNewEpicColor('#2563eb')
+    setNewEpicOwnerId('')
     setShowAddEpic(false)
     loadEpics()
   }
@@ -730,6 +761,14 @@ export default function Roadmap() {
                   }} />
               ))}
             </div>
+            <select
+              value={newEpicOwnerId}
+              onChange={e => setNewEpicOwnerId(e.target.value)}
+              style={{ padding: '6px 10px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--base)', color: 'var(--text)', fontSize: 13 }}
+            >
+              <option value="">— No lead —</option>
+              {members.map(m => <option key={m.id} value={m.id}>{m.name}</option>)}
+            </select>
             <button
               onClick={addEpic}
               disabled={!newEpicName.trim()}
@@ -808,6 +847,7 @@ export default function Roadmap() {
           moveEpic={moveEpic}
           audience={audience}
           onlyApproved={onlyApproved}
+          team={members}
         />
       </div>
     </div>
