@@ -488,6 +488,11 @@ def init_db():
         conn.commit()
     except Exception:
         pass
+    try:
+        conn.execute("ALTER TABLE roadmap_epics ADD COLUMN approval TEXT DEFAULT 'review'")
+        conn.commit()
+    except Exception:
+        pass
 
     # ── weekly_tasks schema migration ────────────────────────────────────────
     # Use PRAGMA table_info (not try/except) so failures are never swallowed.
@@ -5229,7 +5234,7 @@ class Epic(BaseModel):
 ROADMAP_PRIORITIES = {"P0", "P1", "P2", "P3"}
 ROADMAP_FIELDS = {"title", "owner_id", "priority", "description", "note",
                    "start_week", "end_week", "sort_order", "epic_id", "estimate_days"}
-EPIC_FIELDS = {"name", "color", "sort_order", "outcome"}
+EPIC_FIELDS = {"name", "color", "sort_order", "outcome", "approval"}
 
 
 @app.get("/api/roadmap")
