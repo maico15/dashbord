@@ -18,13 +18,51 @@ const PRIO_BAR = {
 
 const WEEK_START = 27, WEEK_END = 38, WEEK_COUNT = 12 // Q3 weeks
 const ROW_HEIGHT = 44
+const EPIC_SEP = ' · '
 
 const EMPTY_DRAFT = { title: '', owner_id: '', priority: 'P2', description: '' }
+
+function epicNameOf(title) {
+  const idx = (title || '').indexOf(EPIC_SEP)
+  return idx > 0 ? title.slice(0, idx) : 'Other'
+}
+
+function shortTitle(title) {
+  const idx = (title || '').indexOf(EPIC_SEP)
+  return idx > 0 ? title.slice(idx + EPIC_SEP.length) : title
+}
+
+function groupIntoEpics(tasks) {
+  const epics = {}
+  const order = []
+  for (const t of tasks) {
+    const name = epicNameOf(t.title)
+    if (!epics[name]) { epics[name] = []; order.push(name) }
+    epics[name].push(t)
+  }
+  return order.map(name => {
+    const items = epics[name]
+    const starts = items.map(t => t.start_week).filter(Boolean)
+    const ends = items.map(t => t.end_week).filter(Boolean)
+    const prios = items.map(t => t.priority).filter(Boolean).sort()
+    return {
+      name,
+      tasks: items,
+      start_week: starts.length ? Math.min(...starts) : null,
+      end_week: ends.length ? Math.max(...ends) : null,
+      priority: prios[0] || 'P2',
+      count: items.length,
+      doneCount: items.filter(t => t.status === 'done').length,
+    }
+  })
+}
 
 function GanttView({ tasks, setTasks, pw, openId, setOpenId, saveNote, setPriority }) {
   const trackRef = useRef(null)
   const barDrag = useRef(null)   // {id, mode:'move'|'left'|'right', startX, origStart, origEnd, weekPx}
-  const rowDrag = useRef(null)   // {id, startY}
+  const rowDrag = useRef(null)   // {id, startY, epicName}
+  const [expandedEpics, setExpandedEpics] = useState({})
+  const toggleEpic = (name) => setExpandedEpics(prev => ({ ...prev, [name]: !prev[name] }))
 
   const clamp = (w) => Math.max(WEEK_START, Math.min(WEEK_END, w))
 
@@ -86,9 +124,9 @@ function GanttView({ tasks, setTasks, pw, openId, setOpenId, saveNote, setPriori
     barDrag.current = null
   }
 
-  // ── Vertical drag: reorder rows (priority order) ──────────────────────
+  // ── Vertical drag: reorder rows within the same epic ───────────────────
   const onRowPointerDown = (e, task) => {
-    rowDrag.current = { id: task.id, startY: e.clientY }
+    rowDrag.current = { id: task.id, startY: e.clientY, epicName: epicNameOf(task.title) }
     window.addEventListener('pointermove', onRowPointerMove)
     window.addEventListener('pointerup', onRowPointerUp)
   }
@@ -99,13 +137,19 @@ function GanttView({ tasks, setTasks, pw, openId, setOpenId, saveNote, setPriori
     const deltaRows = Math.round((e.clientY - rd.startY) / ROW_HEIGHT)
     if (deltaRows === 0) return
     setTasks(prev => {
-      const ids = prev.map(t => t.id)
+      const positions = []
+      const ids = []
+      prev.forEach((t, i) => {
+        if (epicNameOf(t.title) === rd.epicName) { positions.push(i); ids.push(t.id) }
+      })
       const from = ids.indexOf(rd.id)
       const to = Math.max(0, Math.min(ids.length - 1, from + deltaRows))
       if (from === to) return prev
+      const reordered = [...ids]
+      const [m] = reordered.splice(from, 1)
+      reordered.splice(to, 0, m)
       const arr = [...prev]
-      const [m] = arr.splice(from, 1)
-      arr.splice(to, 0, m)
+      reordered.forEach((id, idx) => { arr[positions[idx]] = prev.find(t => t.id === id) })
       rd.startY = e.clientY
       return arr
     })
@@ -133,76 +177,119 @@ function GanttView({ tasks, setTasks, pw, openId, setOpenId, saveNote, setPriori
         ))}
       </div>
 
-      {tasks.map((t, index) => {
-        const initials = (t.owner_name || '??').split(' ').map(w => w[0]).slice(0, 2).join('')
-        const isOpen = openId === t.id
+      {groupIntoEpics(tasks).map((epic, epicIndex) => {
+        const isExp = !!expandedEpics[epic.name]
+        const allDone = epic.count > 0 && epic.doneCount === epic.count
+        const epicBg = PRIO_BAR[epic.priority] || PRIO_BAR.P2
         return (
-          <div key={t.id}>
-            <div style={{ display: 'grid', gridTemplateColumns: '250px repeat(6,1fr)', alignItems: 'center', minHeight: ROW_HEIGHT, borderBottom: '1px solid var(--border)' }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 10px', fontSize: 12.5 }}>
-                <span
-                  onPointerDown={(e) => onRowPointerDown(e, t)}
-                  style={{ cursor: 'grab', color: 'var(--muted)', userSelect: 'none', touchAction: 'none' }}
-                >⠿</span>
-                <span style={{
-                  width: 22, height: 22, borderRadius: '50%', flexShrink: 0,
-                  background: t.owner_color || 'transparent', border: t.owner_color ? 'none' : '1px dashed var(--border)',
-                  display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 8, fontWeight: 700, color: '#08131f',
-                }}>{t.owner_color ? initials : '??'}</span>
-                <span
-                  onClick={() => setOpenId(isOpen ? null : t.id)}
-                  style={{ cursor: 'pointer', userSelect: 'none' }}
-                >{t.title}</span>
-                <span style={{ fontSize: 11, color: 'var(--muted)', marginLeft: 'auto', transform: isOpen ? 'rotate(90deg)' : 'none' }}>▶</span>
+          <div key={epic.name}>
+            <div style={{ display: 'grid', gridTemplateColumns: '250px repeat(6,1fr)', alignItems: 'center', minHeight: ROW_HEIGHT, borderBottom: '1px solid var(--border)', background: 'var(--base)' }}>
+              <div
+                onClick={() => toggleEpic(epic.name)}
+                style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 10px', fontSize: 13, fontWeight: 600, cursor: 'pointer', userSelect: 'none' }}
+              >
+                <span style={{ transform: isExp ? 'rotate(90deg)' : 'none', transition: 'transform .15s', color: 'var(--muted)', fontSize: 11 }}>▶</span>
+                <span>{epic.name}</span>
+                <span style={{ fontSize: 11, fontWeight: 400, color: 'var(--muted)' }}>
+                  {epic.doneCount > 0 ? `${epic.doneCount}/${epic.count}` : epic.count} {epic.count === 1 ? 'task' : 'tasks'}
+                </span>
               </div>
-              <div ref={index === 0 ? trackRef : null} style={{ gridColumn: '2 / -1', display: 'grid', gridTemplateColumns: 'repeat(6,1fr)', position: 'relative', height: '100%', alignItems: 'center' }}>
+              <div ref={epicIndex === 0 ? trackRef : null} style={{ gridColumn: '2 / -1', display: 'grid', gridTemplateColumns: 'repeat(6,1fr)', position: 'relative', height: '100%', alignItems: 'center' }}>
                 {[0, 1, 2, 3, 4, 5].map(i => <div key={i} style={{ borderLeft: '1px solid var(--border)', height: '100%' }} />)}
-                <div
-                  onPointerDown={(e) => onBarPointerDown(e, t)}
-                  style={{
-                    position: 'absolute', left: `${slotLeft(t.start_week ?? WEEK_START)}%`,
-                    width: `${slotWidth(t.start_week ?? WEEK_START, t.end_week ?? t.start_week ?? WEEK_START)}%`,
-                    height: 22, borderRadius: 5, background: PRIO_BAR[t.priority] || PRIO_BAR.P2,
-                    display: 'flex', alignItems: 'center', padding: '0 8px', fontSize: 9.5, fontWeight: 600, color: '#fff',
-                    cursor: 'grab', userSelect: 'none', touchAction: 'none',
-                  }}
-                  title="Drag to move · edges to resize"
-                >{t.priority}</div>
+                {epic.start_week && (
+                  <div style={{
+                    position: 'absolute', left: `${slotLeft(epic.start_week)}%`,
+                    width: `${slotWidth(epic.start_week, epic.end_week ?? epic.start_week)}%`,
+                    height: 26, borderRadius: 6, background: epicBg,
+                    backgroundImage: allDone
+                      ? `repeating-linear-gradient(45deg, rgba(255,255,255,0.35) 0, rgba(255,255,255,0.35) 5px, transparent 5px, transparent 10px), ${epicBg}`
+                      : undefined,
+                    opacity: allDone ? 0.7 : 1,
+                    display: 'flex', alignItems: 'center', padding: '0 10px', fontSize: 10, fontWeight: 600, color: '#fff',
+                  }}>{epic.name}</div>
+                )}
               </div>
             </div>
-            {isOpen && (
-              <div style={{ padding: '12px 16px 16px 56px', borderBottom: '1px solid var(--border)' }}>
-                <div style={{ margin: '8px 0' }}>
-                  <div style={{ fontSize: 11, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '.05em', marginBottom: 4 }}>Description</div>
-                  <div style={{ fontSize: 13, color: 'var(--text)', lineHeight: 1.5 }}>{t.description || '—'}</div>
-                </div>
-                <div style={{ margin: '8px 0' }}>
-                  <div style={{ fontSize: 11, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '.05em', marginBottom: 4 }}>Priority</div>
-                  <div style={{ display: 'flex', gap: 6 }}>
-                    {Object.keys(PRIORITIES).map(p => (
-                      <button key={p} onClick={() => setPriority(t.id, p)}
+
+            {isExp && epic.tasks.map(t => {
+              const initials = (t.owner_name || '??').split(' ').map(w => w[0]).slice(0, 2).join('')
+              const isOpen = openId === t.id
+              const isDone = t.status === 'done'
+              const barBg = PRIO_BAR[t.priority] || PRIO_BAR.P2
+              return (
+                <div key={t.id}>
+                  <div style={{ display: 'grid', gridTemplateColumns: '250px repeat(6,1fr)', alignItems: 'center', minHeight: ROW_HEIGHT, borderBottom: '1px solid var(--border)' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 10px 6px 26px', fontSize: 12.5 }}>
+                      <span
+                        onPointerDown={(e) => onRowPointerDown(e, t)}
+                        style={{ cursor: 'grab', color: 'var(--muted)', userSelect: 'none', touchAction: 'none' }}
+                      >⠿</span>
+                      <span style={{
+                        width: 22, height: 22, borderRadius: '50%', flexShrink: 0,
+                        background: t.owner_color || 'transparent', border: t.owner_color ? 'none' : '1px dashed var(--border)',
+                        display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 8, fontWeight: 700, color: '#08131f',
+                      }}>{t.owner_color ? initials : '??'}</span>
+                      <span
+                        onClick={() => setOpenId(isOpen ? null : t.id)}
+                        style={{ cursor: 'pointer', userSelect: 'none', color: 'var(--muted)' }}
+                      >{shortTitle(t.title)}</span>
+                      <span style={{ fontSize: 11, color: 'var(--muted)', marginLeft: 'auto', transform: isOpen ? 'rotate(90deg)' : 'none' }}>▶</span>
+                    </div>
+                    <div style={{ gridColumn: '2 / -1', display: 'grid', gridTemplateColumns: 'repeat(6,1fr)', position: 'relative', height: '100%', alignItems: 'center' }}>
+                      {[0, 1, 2, 3, 4, 5].map(i => <div key={i} style={{ borderLeft: '1px solid var(--border)', height: '100%' }} />)}
+                      <div
+                        onPointerDown={(e) => onBarPointerDown(e, t)}
                         style={{
-                          padding: '4px 12px', borderRadius: 6, border: `1px solid ${PRIORITIES[p].color}`, cursor: 'pointer',
-                          background: t.priority === p ? PRIORITIES[p].color : 'transparent',
-                          color: t.priority === p ? '#fff' : PRIORITIES[p].color, fontSize: 11, fontWeight: 600,
-                        }}>
-                        {p}
-                      </button>
-                    ))}
+                          position: 'absolute', left: `${slotLeft(t.start_week ?? WEEK_START)}%`,
+                          width: `${slotWidth(t.start_week ?? WEEK_START, t.end_week ?? t.start_week ?? WEEK_START)}%`,
+                          height: 22, borderRadius: 5, background: barBg,
+                          backgroundImage: isDone
+                            ? `repeating-linear-gradient(45deg, rgba(255,255,255,0.35) 0, rgba(255,255,255,0.35) 5px, transparent 5px, transparent 10px), ${barBg}`
+                            : undefined,
+                          opacity: isDone ? 0.65 : 1,
+                          display: 'flex', alignItems: 'center', padding: '0 8px', fontSize: 9.5, fontWeight: 600, color: '#fff',
+                          cursor: 'grab', userSelect: 'none', touchAction: 'none',
+                        }}
+                        title="Drag to move · edges to resize"
+                      >{isDone ? '✓ ' : ''}{t.priority}</div>
+                    </div>
                   </div>
+                  {isOpen && (
+                    <div style={{ padding: '12px 16px 16px 62px', borderBottom: '1px solid var(--border)' }}>
+                      <div style={{ margin: '8px 0' }}>
+                        <div style={{ fontSize: 11, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '.05em', marginBottom: 4 }}>Description</div>
+                        <div style={{ fontSize: 13, color: 'var(--text)', lineHeight: 1.5 }}>{t.description || '—'}</div>
+                      </div>
+                      <div style={{ margin: '8px 0' }}>
+                        <div style={{ fontSize: 11, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '.05em', marginBottom: 4 }}>Priority</div>
+                        <div style={{ display: 'flex', gap: 6 }}>
+                          {Object.keys(PRIORITIES).map(p => (
+                            <button key={p} onClick={() => setPriority(t.id, p)}
+                              style={{
+                                padding: '4px 12px', borderRadius: 6, border: `1px solid ${PRIORITIES[p].color}`, cursor: 'pointer',
+                                background: t.priority === p ? PRIORITIES[p].color : 'transparent',
+                                color: t.priority === p ? '#fff' : PRIORITIES[p].color, fontSize: 11, fontWeight: 600,
+                              }}>
+                              {p}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                      <div>
+                        <div style={{ fontSize: 11, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '.05em', marginBottom: 4 }}>Note</div>
+                        <textarea defaultValue={t.note}
+                          onBlur={e => saveNote(t.id, e.target.value)}
+                          placeholder="Add a note…"
+                          style={{
+                            width: '100%', minHeight: 60, background: 'var(--base)', border: '1px solid var(--border)',
+                            borderRadius: 8, padding: 10, color: 'var(--text)', fontSize: 13, resize: 'vertical', fontFamily: 'inherit',
+                          }} />
+                      </div>
+                    </div>
+                  )}
                 </div>
-                <div>
-                  <div style={{ fontSize: 11, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '.05em', marginBottom: 4 }}>Note</div>
-                  <textarea defaultValue={t.note}
-                    onBlur={e => saveNote(t.id, e.target.value)}
-                    placeholder="Add a note…"
-                    style={{
-                      width: '100%', minHeight: 60, background: 'var(--base)', border: '1px solid var(--border)',
-                      borderRadius: 8, padding: 10, color: 'var(--text)', fontSize: 13, resize: 'vertical', fontFamily: 'inherit',
-                    }} />
-                </div>
-              </div>
-            )}
+              )
+            })}
           </div>
         )
       })}
