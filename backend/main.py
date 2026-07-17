@@ -503,6 +503,11 @@ def init_db():
         conn.commit()
     except Exception:
         pass
+    try:
+        conn.execute("ALTER TABLE roadmap_epics ADD COLUMN owner_id INTEGER REFERENCES team_members(id)")
+        conn.commit()
+    except Exception:
+        pass
 
     # ── weekly_tasks schema migration ────────────────────────────────────────
     # Use PRAGMA table_info (not try/except) so failures are never swallowed.
@@ -5239,12 +5244,21 @@ class RoadmapTask(BaseModel):
 class Epic(BaseModel):
     name: str
     color: str = "#2563eb"
+    owner_id: Optional[int] = None
 
 
 ROADMAP_PRIORITIES = {"P0", "P1", "P2", "P3"}
 ROADMAP_FIELDS = {"title", "owner_id", "priority", "description", "note",
                    "start_week", "end_week", "sort_order", "epic_id", "estimate_days", "status"}
-EPIC_FIELDS = {"name", "color", "sort_order", "outcome", "approval", "status"}
+EPIC_FIELDS = {"name", "color", "sort_order", "outcome", "approval", "status", "owner_id"}
+
+
+def _validate_owner_id(conn, owner_id):
+    if owner_id is None:
+        return
+    row = conn.execute("SELECT id FROM team_members WHERE id=?", (owner_id,)).fetchone()
+    if not row:
+        raise HTTPException(422, "Invalid owner_id")
 
 
 @app.get("/api/roadmap")
@@ -5288,7 +5302,11 @@ def create_roadmap_task(data: RoadmapTask, password: str = ""):
 def list_epics():
     conn = get_db()
     c = conn.cursor()
-    c.execute("SELECT * FROM roadmap_epics ORDER BY sort_order, id")
+    c.execute(
+        "SELECT e.*, t.name as owner_name, t.avatar_color as owner_color "
+        "FROM roadmap_epics e LEFT JOIN team_members t ON t.id = e.owner_id "
+        "ORDER BY e.sort_order, e.id"
+    )
     epics = [dict(r) for r in c.fetchall()]
     conn.close()
     return {"epics": epics}
@@ -5299,10 +5317,11 @@ def create_epic(data: Epic, password: str = ""):
     if password != ADMIN_PASSWORD:
         raise HTTPException(403, "Unauthorized")
     conn = get_db()
+    _validate_owner_id(conn, data.owner_id)
     mx = conn.execute("SELECT COALESCE(MAX(sort_order),0)+1 FROM roadmap_epics").fetchone()[0]
     cur = conn.execute(
-        "INSERT INTO roadmap_epics (name, color, sort_order) VALUES (?,?,?)",
-        (data.name, data.color, mx),
+        "INSERT INTO roadmap_epics (name, color, sort_order, owner_id) VALUES (?,?,?,?)",
+        (data.name, data.color, mx, data.owner_id),
     )
     conn.commit()
     eid = cur.lastrowid
@@ -5318,6 +5337,8 @@ def update_epic(epic_id: int, data: dict, password: str = ""):
     if not fields:
         raise HTTPException(422, "No valid fields")
     conn = get_db()
+    if "owner_id" in fields:
+        _validate_owner_id(conn, fields["owner_id"])
     sets = ", ".join(f"{k}=?" for k in fields)
     conn.execute(f"UPDATE roadmap_epics SET {sets} WHERE id=?", list(fields.values()) + [epic_id])
     conn.commit()
