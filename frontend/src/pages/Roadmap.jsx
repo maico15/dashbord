@@ -11,6 +11,49 @@ const PRIORITIES = {
 
 const PALETTE = ['#7c3aed', '#2563eb', '#0891b2', '#dc2626', '#ea580c', '#16a34a', '#db2777', '#0d9488', '#9333ea', '#64748b']
 
+const APPROVAL = {
+  approved: { label: 'Согласован', icon: '✓', color: '#16a34a', bg: 'rgba(22,163,74,0.12)' },
+  review: { label: 'На рассмотрении', icon: '⋯', color: '#d97706', bg: 'rgba(217,119,6,0.12)' },
+  rejected: { label: 'Отклонён', icon: '✕', color: '#dc2626', bg: 'rgba(220,38,38,0.12)' },
+}
+const approvalOf = (epic) => APPROVAL[epic?.approval] || APPROVAL.review
+
+function ApprovalBadge({ epic, large }) {
+  const a = approvalOf(epic)
+  return (
+    <span style={{
+      display: 'inline-flex', alignItems: 'center', gap: 4, fontWeight: 600,
+      fontSize: large ? 12 : 10.5, padding: large ? '3px 10px' : '2px 8px', borderRadius: 10,
+      color: a.color, background: a.bg, marginLeft: 8,
+    }}>
+      <span>{a.icon}</span>{a.label}
+    </span>
+  )
+}
+
+function ApprovalSelector({ epic, onChange }) {
+  const current = epic.approval || 'review'
+  return (
+    <span style={{ display: 'inline-flex', gap: 2, marginLeft: 8 }}>
+      {['approved', 'review', 'rejected'].map(s => {
+        const a = APPROVAL[s]
+        const active = current === s
+        return (
+          <button key={s} title={a.label}
+            onClick={(e) => { e.stopPropagation(); onChange(epic.id, s) }}
+            style={{
+              width: 22, height: 22, borderRadius: 6, cursor: 'pointer', fontSize: 11,
+              border: active ? `1.5px solid ${a.color}` : '1px solid var(--border)',
+              background: active ? a.bg : 'transparent', color: active ? a.color : 'var(--muted)',
+            }}>
+            {a.icon}
+          </button>
+        )
+      })}
+    </span>
+  )
+}
+
 const WEEK_START = 27, WEEK_END = 38, WEEK_COUNT = 12 // Q3 weeks
 const ROW_HEIGHT = 44
 
@@ -49,7 +92,7 @@ function durationLabel(estimateDays) {
   return estimateDays >= 5 ? `${(estimateDays / 5).toFixed(1)}w` : `${estimateDays}d`
 }
 
-function GanttView({ tasks, setTasks, pw, openId, setOpenId, saveNote, setPriority, epics, patchEpic, setTaskEpic, setEstimate, audience }) {
+function GanttView({ tasks, setTasks, pw, openId, setOpenId, saveNote, setPriority, epics, patchEpic, setTaskEpic, setEstimate, audience, onlyApproved }) {
   const trackRef = useRef(null)
   const barDrag = useRef(null)   // {id, mode:'move'|'left'|'right', startX, origStart, origEnd, weekPx}
   const rowDrag = useRef(null)   // {id, startY, epicId}
@@ -173,6 +216,7 @@ function GanttView({ tasks, setTasks, pw, openId, setOpenId, saveNote, setPriori
     await patchEpic(editingEpicId, { name: editName.trim() || undefined, color: editColor, outcome: editOutcome })
     setEditingEpicId(undefined)
   }
+  const setApproval = (epicId, value) => patchEpic(epicId, { approval: value })
 
   const groups = groupByEpic(tasks, epics)
   const isBusiness = audience === 'business'
@@ -190,14 +234,18 @@ function GanttView({ tasks, setTasks, pw, openId, setOpenId, saveNote, setPriori
       </div>
 
       {isBusiness ? (
-        epics.map((epic, epicIndex) => {
+        (onlyApproved ? epics.filter(e => e.approval === 'approved') : epics).map((epic, epicIndex) => {
           const g = groupById[epic.id] || { start_week: null, end_week: null }
           const eLeft = slotLeft(g.start_week ?? WEEK_START)
           const eWidth = slotWidth(g.start_week ?? WEEK_START, g.end_week ?? g.start_week ?? WEEK_START)
+          const eApproval = epic.approval || 'review'
           return (
             <div key={epic.id} ref={epicIndex === 0 ? trackRef : null} style={{ display: 'grid', gridTemplateColumns: '250px repeat(6,1fr)', alignItems: 'center', minHeight: 52, borderBottom: '1px solid var(--border)' }}>
               <div style={{ padding: '8px 12px' }}>
-                <div style={{ fontSize: 14, fontWeight: 600 }}>{epic.name}</div>
+                <div style={{ display: 'flex', alignItems: 'center', fontSize: 14, fontWeight: 600 }}>
+                  {epic.name}
+                  <ApprovalBadge epic={epic} large />
+                </div>
                 <div style={{ fontSize: 11.5, color: 'var(--muted)', marginTop: 2 }}>{epic.outcome || '—'}</div>
               </div>
               <div style={{ gridColumn: '2 / -1', display: 'grid', gridTemplateColumns: 'repeat(6,1fr)', position: 'relative', height: '100%', alignItems: 'center' }}>
@@ -209,6 +257,10 @@ function GanttView({ tasks, setTasks, pw, openId, setOpenId, saveNote, setPriori
                     fontSize: 11, fontWeight: 600, color: '#ffffff',
                     whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
                     boxShadow: '0 1px 2px rgba(0,0,0,0.15)',
+                    opacity: eApproval === 'rejected' ? 0.4 : 1,
+                    border: eApproval === 'rejected' ? '1.5px dashed #dc2626'
+                      : eApproval === 'approved' ? '1.5px solid rgba(22,163,74,0.6)'
+                      : 'none',
                   }}>{epic.name}</div>
                 )}
               </div>
@@ -236,6 +288,12 @@ function GanttView({ tasks, setTasks, pw, openId, setOpenId, saveNote, setPriori
                   </span>
                 </span>
                 {group.id != null && (
+                  <>
+                    <ApprovalBadge epic={group} />
+                    <ApprovalSelector epic={group} onChange={setApproval} />
+                  </>
+                )}
+                {group.id != null && (
                   <button
                     onClick={() => openEditEpic(group)}
                     title="Edit epic"
@@ -245,21 +303,27 @@ function GanttView({ tasks, setTasks, pw, openId, setOpenId, saveNote, setPriori
               </div>
               <div ref={groupIndex === 0 ? trackRef : null} style={{ gridColumn: '2 / -1', display: 'grid', gridTemplateColumns: 'repeat(6,1fr)', position: 'relative', height: '100%', alignItems: 'center' }}>
                 {[0, 1, 2, 3, 4, 5].map(i => <div key={i} style={{ borderLeft: '1px solid var(--border)', height: '100%' }} />)}
-                {group.start_week && (
-                  <div style={{
-                    position: 'absolute', left: `${slotLeft(group.start_week)}%`,
-                    width: `${slotWidth(group.start_week, group.end_week ?? group.start_week)}%`,
-                    height: 26, borderRadius: 6,
-                    background: allDone
-                      ? `repeating-linear-gradient(45deg, rgba(255,255,255,0.35) 0, rgba(255,255,255,0.35) 5px, transparent 5px, transparent 10px), ${color}`
-                      : color,
-                    opacity: allDone ? 0.7 : 1,
-                    display: 'flex', alignItems: 'center', padding: '0 10px',
-                    fontSize: 11, fontWeight: 600, color: '#ffffff',
-                    whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
-                    boxShadow: '0 1px 2px rgba(0,0,0,0.15)',
-                  }}>{group.name}</div>
-                )}
+                {group.start_week && (() => {
+                  const groupApproval = group.approval || 'review'
+                  return (
+                    <div style={{
+                      position: 'absolute', left: `${slotLeft(group.start_week)}%`,
+                      width: `${slotWidth(group.start_week, group.end_week ?? group.start_week)}%`,
+                      height: 26, borderRadius: 6,
+                      background: allDone
+                        ? `repeating-linear-gradient(45deg, rgba(255,255,255,0.35) 0, rgba(255,255,255,0.35) 5px, transparent 5px, transparent 10px), ${color}`
+                        : color,
+                      opacity: groupApproval === 'rejected' ? Math.min(allDone ? 0.7 : 1, 0.4) : (allDone ? 0.7 : 1),
+                      border: groupApproval === 'rejected' ? '1.5px dashed #dc2626'
+                        : groupApproval === 'approved' ? '1.5px solid rgba(22,163,74,0.6)'
+                        : 'none',
+                      display: 'flex', alignItems: 'center', padding: '0 10px',
+                      fontSize: 11, fontWeight: 600, color: '#ffffff',
+                      whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+                      boxShadow: '0 1px 2px rgba(0,0,0,0.15)',
+                    }}>{group.name}</div>
+                  )
+                })()}
               </div>
             </div>
 
@@ -440,6 +504,7 @@ export default function Roadmap() {
   const [newEpicName, setNewEpicName] = useState('')
   const [newEpicColor, setNewEpicColor] = useState('#2563eb')
   const [audience, setAudience] = useState('engineering') // 'engineering' | 'business'
+  const [onlyApproved, setOnlyApproved] = useState(false)
   const pw = sessionStorage.getItem('admin_pw') || ''
 
   const load = () => api.get('/roadmap').then(d => setTasks(d.tasks || []))
@@ -522,6 +587,12 @@ export default function Roadmap() {
               {a === 'engineering' ? '🛠 Engineering' : '📊 Business'}
             </button>
           ))}
+          {audience === 'business' && (
+            <label style={{ display: 'flex', alignItems: 'center', gap: 6, marginLeft: 12, fontSize: 12.5, color: 'var(--muted)', cursor: 'pointer' }}>
+              <input type="checkbox" checked={onlyApproved} onChange={e => setOnlyApproved(e.target.checked)} />
+              Только согласованные
+            </label>
+          )}
         </div>
         {audience === 'engineering' && (
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
@@ -642,6 +713,7 @@ export default function Roadmap() {
           setTaskEpic={setTaskEpic}
           setEstimate={setEstimate}
           audience={audience}
+          onlyApproved={onlyApproved}
         />
       </div>
     </div>
