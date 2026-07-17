@@ -357,24 +357,26 @@ def init_db():
         );
 
         CREATE TABLE IF NOT EXISTS roadmap_tasks (
-            id          INTEGER PRIMARY KEY AUTOINCREMENT,
-            title       TEXT NOT NULL,
-            owner_id    INTEGER REFERENCES team_members(id) ON DELETE SET NULL,
-            priority    TEXT NOT NULL DEFAULT 'P2',
-            description TEXT DEFAULT '',
-            note        TEXT DEFAULT '',
-            start_week  INTEGER,
-            end_week    INTEGER,
-            sort_order  INTEGER DEFAULT 0,
-            updated_at  TEXT,
-            epic_id     INTEGER
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            title         TEXT NOT NULL,
+            owner_id      INTEGER REFERENCES team_members(id) ON DELETE SET NULL,
+            priority      TEXT NOT NULL DEFAULT 'P2',
+            description   TEXT DEFAULT '',
+            note          TEXT DEFAULT '',
+            start_week    INTEGER,
+            end_week      INTEGER,
+            sort_order    INTEGER DEFAULT 0,
+            updated_at    TEXT,
+            epic_id       INTEGER,
+            estimate_days REAL
         );
 
         CREATE TABLE IF NOT EXISTS roadmap_epics (
             id         INTEGER PRIMARY KEY AUTOINCREMENT,
             name       TEXT NOT NULL,
             color      TEXT DEFAULT '#2563eb',
-            sort_order INTEGER DEFAULT 0
+            sort_order INTEGER DEFAULT 0,
+            outcome    TEXT DEFAULT ''
         );
 
         CREATE TABLE IF NOT EXISTS roadmap_meta (
@@ -473,6 +475,16 @@ def init_db():
         pass
     try:
         conn.execute("ALTER TABLE roadmap_tasks ADD COLUMN epic_id INTEGER")
+        conn.commit()
+    except Exception:
+        pass
+    try:
+        conn.execute("ALTER TABLE roadmap_tasks ADD COLUMN estimate_days REAL")
+        conn.commit()
+    except Exception:
+        pass
+    try:
+        conn.execute("ALTER TABLE roadmap_epics ADD COLUMN outcome TEXT DEFAULT ''")
         conn.commit()
     except Exception:
         pass
@@ -5206,6 +5218,7 @@ class RoadmapTask(BaseModel):
     start_week: Optional[int] = None
     end_week: Optional[int] = None
     epic_id: Optional[int] = None
+    estimate_days: Optional[float] = None
 
 
 class Epic(BaseModel):
@@ -5215,8 +5228,8 @@ class Epic(BaseModel):
 
 ROADMAP_PRIORITIES = {"P0", "P1", "P2", "P3"}
 ROADMAP_FIELDS = {"title", "owner_id", "priority", "description", "note",
-                   "start_week", "end_week", "sort_order", "epic_id"}
-EPIC_FIELDS = {"name", "color", "sort_order"}
+                   "start_week", "end_week", "sort_order", "epic_id", "estimate_days"}
+EPIC_FIELDS = {"name", "color", "sort_order", "outcome"}
 
 
 @app.get("/api/roadmap")
@@ -5245,10 +5258,10 @@ def create_roadmap_task(data: RoadmapTask, password: str = ""):
     mx = conn.execute("SELECT COALESCE(MAX(sort_order),0)+1 FROM roadmap_tasks").fetchone()[0]
     cur = conn.execute(
         "INSERT INTO roadmap_tasks "
-        "(title, owner_id, priority, description, note, start_week, end_week, sort_order, updated_at, epic_id) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?)",
+        "(title, owner_id, priority, description, note, start_week, end_week, sort_order, updated_at, epic_id, estimate_days) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
         (data.title, data.owner_id, data.priority, data.description, data.note,
-         data.start_week, data.end_week, mx, datetime.utcnow().isoformat(), data.epic_id),
+         data.start_week, data.end_week, mx, datetime.utcnow().isoformat(), data.epic_id, data.estimate_days),
     )
     conn.commit()
     tid = cur.lastrowid
