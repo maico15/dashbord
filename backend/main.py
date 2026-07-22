@@ -457,6 +457,11 @@ def init_db():
         conn.commit()
     except Exception:
         pass
+    try:
+        conn.execute("ALTER TABLE gantt_assignments ADD COLUMN depends_on INTEGER DEFAULT NULL")
+        conn.commit()
+    except Exception:
+        pass
     # ai_events and ai_usage_daily are created via executescript above (IF NOT EXISTS);
     # these no-op try/except blocks handle the case where CREATE INDEX runs on a DB
     # that was initialized before those statements were added to the script.
@@ -5476,7 +5481,7 @@ def delete_roadmap_task(task_id: int, password: str = ""):
     return {"ok": True}
 
 
-GANTT_FIELDS = {"project", "start_date", "est_days", "percent", "status", "queue_start", "note"}
+GANTT_FIELDS = {"project", "start_date", "est_days", "percent", "status", "queue_start", "note", "depends_on"}
 GANTT_STATUSES = {"active", "queued", "continuous"}
 
 
@@ -5604,7 +5609,36 @@ def update_gantt_assignment(assignment_id: int, data: dict, password: str = ""):
         raise HTTPException(422, "Invalid status")
     if "percent" in fields:
         fields["percent"] = max(0, min(100, int(fields["percent"])))
+
     conn = get_db()
+    c = conn.cursor()
+
+    if "depends_on" in fields and fields["depends_on"] is not None:
+        predecessor_id = fields["depends_on"]
+        if predecessor_id == assignment_id:
+            conn.close()
+            raise HTTPException(422, "An assignment cannot depend on itself")
+        c.execute("SELECT id FROM gantt_assignments WHERE id=?", (predecessor_id,))
+        if not c.fetchone():
+            conn.close()
+            raise HTTPException(422, "Predecessor assignment not found")
+        # walk the chain from the proposed predecessor; if we ever reach assignment_id,
+        # linking it would create a cycle
+        seen = set()
+        cur_id = predecessor_id
+        depth = 0
+        while cur_id is not None and depth < 50:
+            if cur_id == assignment_id:
+                conn.close()
+                raise HTTPException(422, "That would create a circular dependency")
+            if cur_id in seen:
+                break
+            seen.add(cur_id)
+            c.execute("SELECT depends_on FROM gantt_assignments WHERE id=?", (cur_id,))
+            row = c.fetchone()
+            cur_id = row["depends_on"] if row else None
+            depth += 1
+
     sets = ", ".join(f"{k}=?" for k in fields)
     vals = list(fields.values()) + [datetime.utcnow().isoformat(), assignment_id]
     cur = conn.execute(f"UPDATE gantt_assignments SET {sets}, updated_at=? WHERE id=?", vals)
