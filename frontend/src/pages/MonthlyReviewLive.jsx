@@ -30,7 +30,6 @@ const T = {
     noTelemetry: "no AI telemetry",
     noActiveProject: "no active project reported",
     queueUndefined: "queue undefined — assign from backlog",
-    noReportDays: (d) => `no report ${d}d`,
     legendCurrent: "active project (latest report)",
     legendNext: "next in queue",
     legendUndefined: "queue undefined / idle — needs backlog assignment",
@@ -55,7 +54,6 @@ const T = {
     noTelemetry: "нет данных AI",
     noActiveProject: "активный проект не указан",
     queueUndefined: "очередь не определена — назначить из бэклога",
-    noReportDays: (d) => `нет отчёта ${d}д`,
     legendCurrent: "активный проект (последний отчёт)",
     legendNext: "следующий в очереди",
     legendUndefined: "очередь не определена / простой — нужна задача из бэклога",
@@ -428,11 +426,6 @@ export default function MonthlyReviewLive() {
     ? [`W${allWeeks[0].week}`, `W${allWeeks[allWeeks.length - 1].week}`]
     : ["", ""];
 
-  const daysAgo = (iso) => {
-    if (!iso) return null;
-    return Math.floor((now - new Date(iso + "T00:00:00")) / 86400000);
-  };
-
   /* ---------- render ---------- */
 
   if (state.loading)
@@ -562,7 +555,6 @@ export default function MonthlyReviewLive() {
           .filter((e) => !weeklyOverrides[e.id]?.hidden)
           .map((e) => {
             const s = summaries[e.id] || {};
-            const stale = daysAgo(s.lastDate);
             const ov = weeklyOverrides[e.id];
             const currentLabel = ov
               ? ov.current
@@ -575,9 +567,6 @@ export default function MonthlyReviewLive() {
                 <div className="mr-g-name">
                   <span className="mr-dot" style={{ background: e.color || "var(--accent1)" }} />
                   {e.name}
-                  {stale != null && stale > 7 && (
-                    <span className="mr-stale">{t.noReportDays(stale)}</span>
-                  )}
                 </div>
                 <div className="mr-g-lane">
                   {currentLabel ? (
@@ -676,7 +665,6 @@ function Style() {
       .mr-g-row:last-of-type{border-bottom:none}
       .mr-g-name{font-size:13px;font-weight:600;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
       .mr-g-name .mr-dot{width:8px;height:8px}
-      .mr-stale{font-size:10px;color:var(--warning);border:1px solid var(--warning);border-radius:10px;padding:1px 7px}
       .mr-g-lane{display:flex;gap:8px;flex-wrap:wrap}
       .mr-bar{min-height:24px;border-radius:6px;display:inline-flex;align-items:center;padding:4px 10px;font-size:11px;font-weight:600;white-space:normal;line-height:1.35;max-width:260px;word-break:break-word}
       .mr-bar.cur{color:#06091a}
