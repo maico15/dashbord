@@ -412,6 +412,11 @@ def init_db():
             note TEXT DEFAULT '',
             updated_at TEXT
         );
+
+        CREATE TABLE IF NOT EXISTS gantt_visibility (
+            engineer_id INTEGER PRIMARY KEY,
+            hidden INTEGER NOT NULL DEFAULT 0
+        );
     """)
     conn.commit()
     # Seed default departments
@@ -5502,6 +5507,9 @@ def get_gantt():
     c.execute("SELECT id, name, avatar_color FROM team_members ORDER BY id")
     members = [dict(r) for r in c.fetchall()]
 
+    c.execute("SELECT engineer_id, hidden FROM gantt_visibility")
+    hidden_map = {r["engineer_id"]: bool(r["hidden"]) for r in c.fetchall()}
+
     engineers = []
     for m in members:
         c.execute(
@@ -5538,9 +5546,30 @@ def get_gantt():
             "assignments": assignments,
             "latest_report_date": latest_report_date,
             "suggested_next": suggested_next,
+            "hidden": hidden_map.get(m["id"], False),
         })
     conn.close()
     return {"engineers": engineers}
+
+
+class GanttVisibility(BaseModel):
+    engineer_id: int
+    hidden: bool
+
+
+@app.post("/api/gantt/visibility")
+def set_gantt_visibility(data: GanttVisibility, password: str = ""):
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    conn = get_db()
+    conn.execute(
+        "INSERT INTO gantt_visibility (engineer_id, hidden) VALUES (?, ?) "
+        "ON CONFLICT(engineer_id) DO UPDATE SET hidden = excluded.hidden",
+        (data.engineer_id, 1 if data.hidden else 0),
+    )
+    conn.commit()
+    conn.close()
+    return {"ok": True}
 
 
 @app.post("/api/gantt")
