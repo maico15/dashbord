@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useRef } from "react";
+import { useState, useEffect, useLayoutEffect, useMemo, useRef } from "react";
 import { Link } from "react-router-dom";
 import { useTheme, toggleTheme } from "../hooks/useTheme";
 import { api } from "../api/client";
@@ -155,9 +155,48 @@ function buildLanes(engineers, rangeStart, today) {
   return { lanes, totalRows: rowCursor - 1 };
 }
 
+/* ---------------- dependency arrows ---------------- */
+
+/** Rounded finish-to-start elbow: short stub out of the predecessor, vertical
+ *  segment, short stub into the dependent. Coordinates are relative to the
+ *  grid container (measured via getBoundingClientRect, not grid math, since
+ *  grid columns are responsive `minmax(28px,1fr)` widths). */
+function elbowPath(x1, y1, x2, y2) {
+  if (Math.abs(y2 - y1) < 0.5) return `M ${x1} ${y1} L ${x2} ${y2}`;
+  const gap = x2 - x1;
+  const bendX = x1 + Math.max(4, Math.min(12, gap / 2));
+  const r = 4;
+  const dirX = gap >= 0 ? 1 : -1;
+  const dirY = y2 >= y1 ? 1 : -1;
+  return [
+    `M ${x1} ${y1}`,
+    `L ${bendX - dirX * r} ${y1}`,
+    `Q ${bendX} ${y1} ${bendX} ${y1 + dirY * r}`,
+    `L ${bendX} ${y2 - dirY * r}`,
+    `Q ${bendX} ${y2} ${bendX + dirX * r} ${y2}`,
+    `L ${x2} ${y2}`,
+  ].join(" ");
+}
+
+/** Soft scheduling check: does this assignment start before its predecessor
+ *  ends? effectiveStartDate is start_date for active bars, or the effective
+ *  (explicit or computed-fallback) start for queued bars. */
+function dependencyWarning(assignment, assignmentsById, effectiveStartDate) {
+  if (!assignment.depends_on) return null;
+  const pred = assignmentsById[assignment.depends_on];
+  if (!pred || !pred.start_date) return null;
+  const predStart = parseISODate(pred.start_date);
+  const predEnd = nthWorkingDay(predStart, pred.est_days);
+  const thisStart = parseISODate(effectiveStartDate);
+  if (thisStart && thisStart < predEnd) {
+    return { predEnd, predProject: pred.project || "Untitled" };
+  }
+  return null;
+}
+
 /* ---------------- inline edit controls ---------------- */
 
-function AssignmentEditor({ a, hidePercentEst, onChange, onDelete }) {
+function AssignmentEditor({ a, hidePercentEst, onChange, onDelete, predecessorLabel, onStartLink, linking, snapWarning, onSnap }) {
   return (
     <div className="tg-editor" onClick={(e) => e.stopPropagation()} onMouseDown={(e) => e.stopPropagation()}>
       <input
@@ -204,6 +243,25 @@ function AssignmentEditor({ a, hidePercentEst, onChange, onDelete }) {
           </button>
         ))}
       </div>
+      <div className="tg-e-depends">
+        <span className="tg-e-depends-label">Depends on:</span>
+        {a.depends_on ? (
+          <>
+            <span className="tg-e-depends-name">{predecessorLabel || `#${a.depends_on}`}</span>
+            <button onClick={() => onChange({ depends_on: null })} title="Clear dependency">×</button>
+          </>
+        ) : linking ? (
+          <span className="tg-e-depends-hint">Click the predecessor bar… (Esc to cancel)</span>
+        ) : (
+          <button onClick={onStartLink} title="Link to a predecessor">🔗 Link</button>
+        )}
+      </div>
+      {snapWarning && (
+        <div className="tg-e-snap-warn">
+          <span>⚠ starts before "{snapWarning.predProject}" ends</span>
+          <button onClick={onSnap}>Snap to predecessor end</button>
+        </div>
+      )}
       <button className="tg-e-del" onClick={onDelete} title="Delete assignment">✕</button>
     </div>
   );
@@ -225,6 +283,11 @@ export default function TeamGantt() {
   const [dragVisual, setDragVisual] = useState(null); // mirrors dragRef to trigger re-render for the live preview
   const [manageOpen, setManageOpen] = useState(false);
   const [pendingHideId, setPendingHideId] = useState(null); // engineer awaiting second-click confirm to hide
+  const gridRef = useRef(null);
+  const barRefs = useRef({}); // assignmentId -> bar DOM node, for arrow measurement
+  const [arrows, setArrows] = useState([]);
+  const [hoveredId, setHoveredId] = useState(null);
+  const [linkingFor, setLinkingFor] = useState(null); // assignmentId currently picking a predecessor
 
   const today = useMemo(() => {
     const t = new Date();
@@ -391,11 +454,13 @@ export default function TeamGantt() {
       setDragVisual(null);
     }
     function onKeyDown(e) {
-      if (e.key === "Escape" && dragRef.current) {
+      if (e.key !== "Escape") return;
+      if (dragRef.current) {
         dragRef.current = null;
         setDragVisual(null);
         document.body.style.userSelect = "";
       }
+      setLinkingFor(null);
     }
     window.addEventListener("mousemove", onMouseMove);
     window.addEventListener("mouseup", onMouseUp);
@@ -434,7 +499,70 @@ export default function TeamGantt() {
     return max;
   }, [data.engineers]);
 
+  const assignmentsById = useMemo(() => {
+    const m = {};
+    for (const e of data.engineers || [])
+      for (const a of e.assignments || []) m[a.id] = a;
+    return m;
+  }, [data.engineers]);
+
+  // Undirected adjacency over depends_on links, used to find the full connected
+  // chain to highlight when hovering any bar in it.
+  const depGraph = useMemo(() => {
+    const adj = {};
+    const addEdge = (x, y) => {
+      (adj[x] ||= new Set()).add(y);
+      (adj[y] ||= new Set()).add(x);
+    };
+    for (const a of Object.values(assignmentsById)) if (a.depends_on) addEdge(a.depends_on, a.id);
+    return adj;
+  }, [assignmentsById]);
+
+  const hoveredChain = useMemo(() => {
+    if (hoveredId == null) return new Set();
+    const seen = new Set([hoveredId]);
+    const queue = [hoveredId];
+    while (queue.length) {
+      const cur = queue.shift();
+      for (const n of depGraph[cur] || []) if (!seen.has(n)) { seen.add(n); queue.push(n) }
+    }
+    return seen;
+  }, [hoveredId, depGraph]);
+
+  function recomputeArrows() {
+    const gridEl = gridRef.current;
+    if (!gridEl) return;
+    const gridRect = gridEl.getBoundingClientRect();
+    const next = [];
+    for (const a of Object.values(assignmentsById)) {
+      if (!a.depends_on) continue;
+      const fromEl = barRefs.current[a.depends_on];
+      const toEl = barRefs.current[a.id];
+      if (!fromEl || !toEl) continue; // predecessor/dependent lane hidden or not rendered
+      const fromRect = fromEl.getBoundingClientRect();
+      const toRect = toEl.getBoundingClientRect();
+      const x1 = fromRect.right - gridRect.left;
+      const y1 = fromRect.top + fromRect.height / 2 - gridRect.top;
+      const x2 = toRect.left - gridRect.left;
+      const y2 = toRect.top + toRect.height / 2 - gridRect.top;
+      next.push({ key: `${a.depends_on}-${a.id}`, from: a.depends_on, to: a.id, path: elbowPath(x1, y1, x2, y2) });
+    }
+    setArrows(next);
+  }
+
+  useLayoutEffect(() => { recomputeArrows() }, [data, dragVisual, editMode]);
+  useEffect(() => {
+    function onResize() { recomputeArrows() }
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, [data]);
+
   const gridTemplateRows = `28px 24px ${Array(Math.max(0, totalRows - 2)).fill("minmax(40px,auto)").join(" ")}`;
+
+  const setBarRef = (id) => (el) => {
+    if (el) barRefs.current[id] = el;
+    else delete barRefs.current[id];
+  };
 
   if (loading)
     return (
@@ -464,7 +592,7 @@ export default function TeamGantt() {
           <button
             className={`tg-btn${editMode ? " on" : ""}`}
             onClick={() => {
-              if (editMode) { setEditMode(false); setManageOpen(false); setPendingHideId(null) }
+              if (editMode) { setEditMode(false); setManageOpen(false); setPendingHideId(null); setLinkingFor(null) }
               else enableEdit();
             }}
           >
@@ -485,6 +613,12 @@ export default function TeamGantt() {
         <span><i className="sw red" /> IDLE — no active project</span>
         <span><i className="sw amber" /> overdue</span>
       </div>
+
+      {linkingFor != null && (
+        <div className="tg-toast tg-toast-link">
+          🔗 Click the predecessor bar… (Escape to cancel)
+        </div>
+      )}
 
       {manageOpen && (
         <div
@@ -546,9 +680,34 @@ export default function TeamGantt() {
 
       <div className="tg-scroll">
         <div
+          ref={gridRef}
           className="tg-grid"
           style={{ gridTemplateColumns: `200px repeat(${DAY_COLS}, minmax(28px,1fr))`, gridTemplateRows }}
         >
+          <svg className="tg-arrows" overflow="visible">
+            <defs>
+              <marker id="tg-arrowhead" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+                <path d="M0,0 L10,5 L0,10 z" fill="var(--muted)" />
+              </marker>
+              <marker id="tg-arrowhead-hi" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+                <path d="M0,0 L10,5 L0,10 z" fill="var(--accent1)" />
+              </marker>
+            </defs>
+            {arrows.map((arr) => {
+              const hi = hoveredChain.has(arr.from) && hoveredChain.has(arr.to);
+              return (
+                <path
+                  key={arr.key}
+                  d={arr.path}
+                  fill="none"
+                  stroke={hi ? "var(--accent1)" : "var(--muted)"}
+                  strokeWidth={hi ? 2 : 1.5}
+                  markerEnd={hi ? "url(#tg-arrowhead-hi)" : "url(#tg-arrowhead)"}
+                />
+              );
+            })}
+          </svg>
+
           {/* weekend background columns (lane area only) */}
           {days.map((d, i) => isWeekend(d) && (
             <div key={`we-${i}`} className="tg-weekend-col" style={{ gridColumn: i + 2, gridRow: `3 / ${totalRows + 1}` }} />
@@ -596,6 +755,15 @@ export default function TeamGantt() {
                 : { colStart: secondary.colStart, colEnd: Math.max(secondary.colStart + 1, secondary.colEnd + queuedDrag.deltaCols) }
               : secondary ? { colStart: secondary.colStart, colEnd: secondary.colEnd } : null;
 
+            const activeWarn = primary.kind === "active"
+              ? dependencyWarning(primary.assignment, assignmentsById, primary.assignment.start_date) : null;
+            const queuedWarn = secondary
+              ? dependencyWarning(secondary.assignment, assignmentsById, secondary.startLabel) : null;
+            const activePredLabel = primary.kind === "active" && primary.assignment.depends_on
+              ? (assignmentsById[primary.assignment.depends_on]?.project || null) : null;
+            const queuedPredLabel = secondary && secondary.assignment.depends_on
+              ? (assignmentsById[secondary.assignment.depends_on]?.project || null) : null;
+
             return (
               <div key={e.id} style={{ display: "contents" }}>
                 <div
@@ -634,9 +802,17 @@ export default function TeamGantt() {
 
                 {primary.kind === "active" && (
                   <div
+                    ref={setBarRef(primary.assignment.id)}
                     className={`tg-bar tg-active${primary.overdue ? " tg-overdue" : ""}${editMode ? " tg-editing tg-draggable" : ""}${activeDrag ? " tg-dragging" : ""}`}
                     style={{ gridColumn: `${activeCols.colStart + 2} / ${activeCols.colEnd + 2}`, gridRow: primaryRow }}
-                    onMouseDown={editMode ? (e) => beginDrag(e, "move", primary.assignment, false, primary.colStart, primary.colEnd, primary.startDate) : undefined}
+                    onMouseDown={editMode && linkingFor == null ? (e) => beginDrag(e, "move", primary.assignment, false, primary.colStart, primary.colEnd, primary.startDate) : undefined}
+                    onClick={editMode && linkingFor != null ? (e) => {
+                      e.stopPropagation();
+                      if (linkingFor !== primary.assignment.id) updateAssignment(linkingFor, { depends_on: primary.assignment.id });
+                      setLinkingFor(null);
+                    } : undefined}
+                    onMouseEnter={() => setHoveredId(primary.assignment.id)}
+                    onMouseLeave={() => setHoveredId((h) => (h === primary.assignment.id ? null : h))}
                   >
                     <div className="tg-bar-fillwrap">
                       <div className="tg-bar-fill" style={{ width: `${primary.assignment.percent}%`, background: color }} />
@@ -646,6 +822,9 @@ export default function TeamGantt() {
                       {primary.assignment.project || "Untitled"} · day {primary.dayX} of ~{primary.estY} · {primary.assignment.percent}%
                     </span>
                     {primary.overdue && <span className="tg-overdue-tag">overdue</span>}
+                    {activeWarn && (
+                      <span className="tg-dep-warn" title={`Starts before "${activeWarn.predProject}" ends`}>⚠</span>
+                    )}
                     {editMode && (
                       <div
                         className="tg-bar-resize"
@@ -657,6 +836,13 @@ export default function TeamGantt() {
                         a={primary.assignment}
                         onChange={(patch) => updateAssignment(primary.assignment.id, patch)}
                         onDelete={() => deleteAssignment(primary.assignment.id, primary.assignment.project)}
+                        predecessorLabel={activePredLabel}
+                        onStartLink={() => setLinkingFor(primary.assignment.id)}
+                        linking={linkingFor === primary.assignment.id}
+                        snapWarning={activeWarn}
+                        onSnap={() => activeWarn && updateAssignment(primary.assignment.id, {
+                          start_date: toISODate(addDays(activeWarn.predEnd, 1)),
+                        })}
                       />
                     )}
                   </div>
@@ -664,11 +850,22 @@ export default function TeamGantt() {
 
                 {secondary && (
                   <div
+                    ref={setBarRef(secondary.assignment.id)}
                     className={`tg-bar tg-queued${editMode ? " tg-editing tg-draggable" : ""}${queuedDrag ? " tg-dragging" : ""}`}
                     style={{ gridColumn: `${queuedCols.colStart + 2} / ${queuedCols.colEnd + 2}`, gridRow: queuedRow, borderColor: color, color }}
-                    onMouseDown={editMode ? (e) => beginDrag(e, "move", secondary.assignment, true, secondary.colStart, secondary.colEnd, secondary.startLabel) : undefined}
+                    onMouseDown={editMode && linkingFor == null ? (e) => beginDrag(e, "move", secondary.assignment, true, secondary.colStart, secondary.colEnd, secondary.startLabel) : undefined}
+                    onClick={editMode && linkingFor != null ? (e) => {
+                      e.stopPropagation();
+                      if (linkingFor !== secondary.assignment.id) updateAssignment(linkingFor, { depends_on: secondary.assignment.id });
+                      setLinkingFor(null);
+                    } : undefined}
+                    onMouseEnter={() => setHoveredId(secondary.assignment.id)}
+                    onMouseLeave={() => setHoveredId((h) => (h === secondary.assignment.id ? null : h))}
                   >
                     <span className="tg-bar-label">NEXT: {secondary.assignment.project || "Untitled"} · starts {secondary.startLabel}</span>
+                    {queuedWarn && (
+                      <span className="tg-dep-warn" title={`Starts before "${queuedWarn.predProject}" ends`}>⚠</span>
+                    )}
                     {editMode && (
                       <div
                         className="tg-bar-resize"
@@ -680,6 +877,13 @@ export default function TeamGantt() {
                         a={secondary.assignment}
                         onChange={(patch) => updateAssignment(secondary.assignment.id, patch)}
                         onDelete={() => deleteAssignment(secondary.assignment.id, secondary.assignment.project)}
+                        predecessorLabel={queuedPredLabel}
+                        onStartLink={() => setLinkingFor(secondary.assignment.id)}
+                        linking={linkingFor === secondary.assignment.id}
+                        snapWarning={queuedWarn}
+                        onSnap={() => queuedWarn && updateAssignment(secondary.assignment.id, {
+                          queue_start: toISODate(addDays(queuedWarn.predEnd, 1)),
+                        })}
                       />
                     )}
                   </div>
@@ -713,6 +917,7 @@ function Style() {
       .tg-btn.on{background:var(--accent1);color:#06091a;border-color:var(--accent1)}
       .tg-icon-btn{width:32px;height:32px;border-radius:8px;border:1px solid var(--border);background:var(--card);color:var(--muted);cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:15px}
       .tg-toast{margin-top:12px;padding:8px 14px;border-radius:8px;background:rgba(34,197,94,.12);color:var(--success);font-size:12.5px;font-weight:600}
+      .tg-toast-link{background:rgba(0,207,255,.12);color:var(--accent1)}
 
       .tg-legend{display:flex;gap:20px;flex-wrap:wrap;margin:18px 0;font-size:11px;color:var(--muted)}
       .tg-legend span{display:flex;align-items:center;gap:6px}
@@ -739,6 +944,7 @@ function Style() {
 
       .tg-scroll{overflow-x:auto;padding-bottom:8px}
       .tg-grid{display:grid;position:relative;min-width:1100px}
+      .tg-arrows{position:absolute;inset:0;width:100%;height:100%;pointer-events:none;z-index:6;overflow:visible}
 
       .tg-name-header{position:sticky;left:0;background:var(--bg);z-index:3;display:flex;align-items:flex-end;padding:4px 8px 4px 0;font-size:10px;color:var(--muted);letter-spacing:.08em;text-transform:uppercase}
       .tg-week-cell{font-size:11px;font-weight:600;color:var(--muted);padding:4px 6px;border-bottom:1px solid var(--border);display:flex;align-items:center}
@@ -765,6 +971,7 @@ function Style() {
       .tg-active .tg-bar-label{color:#06091a}
       .tg-active.tg-overdue{outline:2px solid var(--warning);outline-offset:1px}
       .tg-overdue-tag{position:relative;z-index:1;margin-left:8px;font-size:9.5px;background:var(--warning);color:#06091a;border-radius:8px;padding:1px 7px}
+      .tg-dep-warn{position:relative;z-index:1;margin-left:6px;font-size:11px;color:var(--warning)}
       .tg-continuous{border:1px solid var(--border)}
       .tg-continuous .tg-bar-label{color:var(--text)}
       .tg-idle{background:rgba(239,68,68,.08);border:1.5px dashed var(--danger);color:var(--danger)}
@@ -784,6 +991,14 @@ function Style() {
       .tg-e-status button{width:20px;height:20px;border-radius:5px;border:1px solid var(--border);background:var(--card);color:var(--muted);cursor:pointer;font-size:10px;font-weight:700}
       .tg-e-status button.on{background:var(--accent1);color:#06091a;border-color:var(--accent1)}
       .tg-e-del{width:20px;height:20px;border-radius:5px;border:1px solid var(--danger);background:none;color:var(--danger);cursor:pointer;font-size:10px}
+
+      .tg-e-depends{display:flex;align-items:center;gap:6px;font-size:11px;color:var(--muted);width:100%}
+      .tg-e-depends-label{white-space:nowrap}
+      .tg-e-depends-name{font-weight:600;color:var(--text)}
+      .tg-e-depends button{background:none;border:1px solid var(--border);border-radius:6px;color:var(--accent1);font-size:11px;padding:2px 8px;cursor:pointer;font-family:inherit}
+      .tg-e-depends-hint{color:var(--accent1);font-style:italic}
+      .tg-e-snap-warn{display:flex;align-items:center;gap:8px;flex-wrap:wrap;width:100%;font-size:11px;color:var(--warning);background:rgba(245,158,11,.1);border-radius:6px;padding:4px 8px}
+      .tg-e-snap-warn button{background:var(--warning);border:none;border-radius:6px;color:#06091a;font-size:10.5px;font-weight:600;padding:3px 9px;cursor:pointer;font-family:inherit}
 
       @media(max-width:900px){
         .tg-wrap{padding:8px 12px 64px}
