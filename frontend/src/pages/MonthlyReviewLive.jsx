@@ -35,6 +35,7 @@ const T = {
     legendUndefined: "queue undefined / idle — needs backlog assignment",
     footer: (m, y) => `Sources: /api/metrics/dev · /api/ai-usage/weekly · /api/reports/engineer — computed live for ${m} ${y}`,
     score: "Score",
+    failedWeeks: (n) => `${n} week${n === 1 ? "" : "s"} failed to load — totals are incomplete. Reload to retry.`,
   },
   ru: {
     eyebrow: "Месячный обзор — Live",
@@ -59,6 +60,9 @@ const T = {
     legendUndefined: "очередь не определена / простой — нужна задача из бэклога",
     footer: (m, y) => `Источники: /api/metrics/dev · /api/ai-usage/weekly · /api/reports/engineer — расчёт live за ${m} ${y}`,
     score: "Оценка",
+    failedWeeks: (n) => n === 1
+      ? "1 неделя не загрузилась — итоги неполные. Обновите страницу для повтора."
+      : `${n} недель не загрузились — итоги неполные. Обновите страницу для повтора.`,
   },
 };
 
@@ -99,21 +103,56 @@ async function getJSON(url) {
   return r.json();
 }
 
-async function fetchMonthBundle(weeks) {
-  const dev = await Promise.all(
-    weeks.map((w) => getJSON(`${API}/api/metrics/dev?week=${w.week}&year=${w.year}`).catch(() => null))
-  );
-  const ai = await Promise.all(
-    weeks.map((w) => getJSON(`${API}/api/ai-usage/weekly?week=${w.week}&year=${w.year}`).catch(() => null))
-  );
-  return weeks.map((w, i) => ({
+const delay = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/** The Render free-tier backend chokes on high parallel load — retry a couple
+ *  times with backoff before giving up, rather than silently treating a
+ *  timed-out request as empty/zero data. */
+async function getJSONWithRetry(url, retries = 2, backoffMs = 1000) {
+  let lastErr;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      return await getJSON(url);
+    } catch (err) {
+      lastErr = err;
+      if (attempt < retries) await delay(backoffMs);
+    }
+  }
+  throw lastErr;
+}
+
+/** Runs fn over items in small concurrent batches instead of all at once —
+ *  keeps concurrent request count low enough for the free-tier backend. */
+async function mapInBatches(items, batchSize, fn) {
+  const results = [];
+  for (let i = 0; i < items.length; i += batchSize) {
+    const batch = items.slice(i, i + batchSize);
+    results.push(...(await Promise.all(batch.map(fn))));
+  }
+  return results;
+}
+
+async function fetchWeekData(w) {
+  const [devR, aiR] = await Promise.allSettled([
+    getJSONWithRetry(`${API}/api/metrics/dev?week=${w.week}&year=${w.year}`),
+    getJSONWithRetry(`${API}/api/ai-usage/weekly?week=${w.week}&year=${w.year}`),
+  ]);
+  const dev = devR.status === "fulfilled" ? devR.value : null;
+  const ai = aiR.status === "fulfilled" ? aiR.value : null;
+  const failed = devR.status === "rejected" || aiR.status === "rejected";
+  return {
     ...w,
-    prs: dev[i]?.totals?.prs_merged ?? 0,
-    commits: dev[i]?.totals?.commits_count ?? 0,
-    tokensOut: ai[i]?.total_tokens_output ?? 0,
-    sessions: ai[i]?.total_sessions ?? 0,
-    engineers: ai[i]?.engineers ?? [],
-  }));
+    prs: dev?.totals?.prs_merged ?? 0,
+    commits: dev?.totals?.commits_count ?? 0,
+    tokensOut: ai?.total_tokens_output ?? 0,
+    sessions: ai?.total_sessions ?? 0,
+    engineers: ai?.engineers ?? [],
+    failed,
+  };
+}
+
+async function fetchMonthBundle(weeks) {
+  return mapInBatches(weeks, 3, fetchWeekData);
 }
 
 /* ---------------- report → task extraction ---------------- */
@@ -165,14 +204,15 @@ function summarizeEngineer(reports, monthStart, monthEnd) {
 /* ---------------- tiny UI pieces ---------------- */
 
 function Spark({ series, splitIdx }) {
-  const max = Math.max(...series.map((v) => v || 0), 1);
+  const max = Math.max(...series.filter((s) => !s.failed).map((s) => s.value || 0), 1);
   return (
     <div className="mr-spark">
-      {series.map((v, i) => (
+      {series.map((s, i) => (
         <i
           key={i}
-          className={i >= splitIdx ? "cur" : ""}
-          style={{ height: `${Math.max(6, ((v || 0) / max) * 100)}%` }}
+          className={`${i >= splitIdx ? "cur " : ""}${s.failed ? "failed" : ""}`}
+          style={{ height: s.failed ? "20%" : `${Math.max(6, ((s.value || 0) / max) * 100)}%` }}
+          title={s.failed ? "failed to load" : undefined}
         />
       ))}
     </div>
@@ -328,25 +368,27 @@ export default function MonthlyReviewLive() {
     (async () => {
       setState({ loading: true, error: null });
       try {
-        const roster = await getJSON(`${API}/api/team`);
+        const roster = await getJSONWithRetry(`${API}/api/team`);
         const members = Array.isArray(roster) ? roster : roster.members || [];
-        const cw = await fetchMonthBundle(weeksOfMonth(sel.y, sel.m));
-        const pw = await fetchMonthBundle(weeksOfMonth(prev.y, prev.m));
+        // cur/prev month bundles each internally batch their own weeks (3 at a time),
+        // so running the two bundles themselves in parallel keeps peak concurrency low.
+        const [cw, pw] = await Promise.all([
+          fetchMonthBundle(weeksOfMonth(sel.y, sel.m)),
+          fetchMonthBundle(weeksOfMonth(prev.y, prev.m)),
+        ]);
 
         const monthStart = `${sel.y}-${String(sel.m + 1).padStart(2, "0")}-01`;
         const monthEnd = `${sel.y}-${String(sel.m + 1).padStart(2, "0")}-31`;
         const sums = {};
-        await Promise.all(
-          members.map(async (e) => {
-            try {
-              const d = await getJSON(`${API}/api/reports/engineer/${e.id}`);
-              const reps = Array.isArray(d) ? d : d.reports || [];
-              sums[e.id] = summarizeEngineer(reps, monthStart, monthEnd);
-            } catch {
-              sums[e.id] = { groups: [], totalCompleted: 0, reportCount: 0, current: null, next: null, lastDate: null };
-            }
-          })
-        );
+        await mapInBatches(members, 3, async (e) => {
+          try {
+            const d = await getJSONWithRetry(`${API}/api/reports/engineer/${e.id}`);
+            const reps = Array.isArray(d) ? d : d.reports || [];
+            sums[e.id] = summarizeEngineer(reps, monthStart, monthEnd);
+          } catch {
+            sums[e.id] = { groups: [], totalCompleted: 0, reportCount: 0, current: null, next: null, lastDate: null };
+          }
+        });
         if (dead) return;
         setTeam(members);
         setCurWeeks(cw);
@@ -391,7 +433,7 @@ export default function MonthlyReviewLive() {
   };
 
   const totals = useMemo(() => {
-    const sum = (ws, k) => ws.reduce((a, w) => a + (w[k] || 0), 0);
+    const sum = (ws, k) => ws.filter((w) => !w.failed).reduce((a, w) => a + (w[k] || 0), 0);
     return {
       prs: [sum(prevWeeks, "prs"), sum(curWeeks, "prs")],
       commits: [sum(prevWeeks, "commits"), sum(curWeeks, "commits")],
@@ -443,12 +485,14 @@ export default function MonthlyReviewLive() {
       </div>
     );
 
+  const toSeries = (key) => allWeeks.map((w) => ({ value: w[key], failed: w.failed }));
   const metricDefs = [
-    { label: "PRs merged", key: "prs", series: allWeeks.map((w) => w.prs), fmt: (v) => v },
-    { label: "Commits", key: "commits", series: allWeeks.map((w) => w.commits), fmt: (v) => v },
-    { label: "Claude Code output tokens", key: "tokens", series: allWeeks.map((w) => w.tokensOut), fmt: fmtM },
-    { label: "AI sessions", key: "sessions", series: allWeeks.map((w) => w.sessions), fmt: (v) => v },
+    { label: "PRs merged", key: "prs", series: toSeries("prs"), fmt: (v) => v },
+    { label: "Commits", key: "commits", series: toSeries("commits"), fmt: (v) => v },
+    { label: "Claude Code output tokens", key: "tokens", series: toSeries("tokensOut"), fmt: fmtM },
+    { label: "AI sessions", key: "sessions", series: toSeries("sessions"), fmt: (v) => v },
   ];
+  const failedWeekCount = allWeeks.filter((w) => w.failed).length;
 
   return (
     <div className="mr-wrap">
@@ -527,11 +571,14 @@ export default function MonthlyReviewLive() {
           </div>
         ))}
       </div>
+      {failedWeekCount > 0 && <div className="mr-fail-warning">{t.failedWeeks(failedWeekCount)}</div>}
 
       {/* 02 · engineers */}
       <div className="mr-section-title">{t.engineersSection(MONTHS[lang][sel.m])}</div>
       <div className="mr-cards">
-        {sortedTeam.map((e) => (
+        {sortedTeam
+          .filter((e) => !weeklyOverrides[e.id]?.hidden)
+          .map((e) => (
           <EngineerCard
             key={e.id}
             eng={e}
@@ -637,7 +684,9 @@ function Style() {
       .mr-spark{display:flex;align-items:flex-end;gap:3px;height:40px;margin-top:14px}
       .mr-spark i{flex:1;border-radius:2px 2px 0 0;background:var(--border)}
       .mr-spark i.cur{background:var(--success);opacity:.85}
+      .mr-spark i.failed{background:var(--danger);opacity:.9}
       .mr-spark-cap{display:flex;justify-content:space-between;font-size:9.5px;color:var(--muted);margin-top:5px}
+      .mr-fail-warning{margin-top:10px;font-size:12px;color:var(--danger);padding:8px 12px;border:1px solid var(--danger);border-radius:8px;background:rgba(239,68,68,.08)}
 
       .mr-cards{display:grid;grid-template-columns:1fr 1fr;gap:14px}
       .mr-eng-head{display:flex;align-items:center;gap:10px;margin-bottom:10px;flex-wrap:wrap}
