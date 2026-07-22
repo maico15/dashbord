@@ -273,6 +273,21 @@ function EngineerCard({ eng, summary, ai, month, t, scoreProps }) {
   );
 }
 
+/* ---------------- weekly-tasks manual override for section 03 ---------------- */
+
+/** Parses the free-text weekly_tasks.tasks field into a "Current load" override.
+ *  "hidden" -> row is skipped entirely. "Current: X | Next: Y" -> X/Y override the
+ *  report-derived current/next (Y empty renders the red queue-undefined bar).
+ *  Anything else -> null, caller falls back to report-derived values. */
+function parseWeeklyOverride(tasksStr) {
+  const t = (tasksStr || "").trim();
+  if (!t) return null;
+  if (t.toLowerCase() === "hidden") return { hidden: true, current: null, next: null };
+  const m = t.match(/^current:\s*(.+?)\s*\|\s*next:\s*(.*)$/is);
+  if (!m || !m[1].trim()) return null;
+  return { hidden: false, current: m[1].trim(), next: m[2].trim() || null };
+}
+
 /* ---------------- main component ---------------- */
 
 export default function MonthlyReviewLive() {
@@ -288,9 +303,27 @@ export default function MonthlyReviewLive() {
   const [summaries, setSummaries] = useState({}); // id -> summary
   const [scores, setScores] = useState({});
   const [savedId, setSavedId] = useState(null);
+  const [weeklyOverrides, setWeeklyOverrides] = useState({}); // engineer_id -> {hidden,current,next}
 
   const monthInProgress = sel.y === now.getFullYear() && sel.m === now.getMonth();
   const prev = sel.m === 0 ? { y: sel.y - 1, m: 11 } : { y: sel.y, m: sel.m - 1 };
+
+  useEffect(() => {
+    let dead = false;
+    const cw = isoWeek(new Date());
+    getJSON(`${API}/api/weekly-tasks?week=${cw.week}&year=${cw.year}`)
+      .then((d) => {
+        if (dead) return;
+        const map = {};
+        for (const row of d.tasks || []) {
+          const parsed = parseWeeklyOverride(row.tasks);
+          if (parsed) map[row.engineer_id] = parsed;
+        }
+        setWeeklyOverrides(map);
+      })
+      .catch(() => { if (!dead) setWeeklyOverrides({}) });
+    return () => { dead = true };
+  }, []);
 
   useEffect(() => {
     let dead = false;
@@ -525,35 +558,44 @@ export default function MonthlyReviewLive() {
       {/* 03 · gantt */}
       <div className="mr-section-title">{t.ganttSection}</div>
       <div className="card mr-gantt">
-        {sortedTeam.map((e) => {
-          const s = summaries[e.id] || {};
-          const stale = daysAgo(s.lastDate);
-          return (
-            <div key={e.id} className="mr-g-row">
-              <div className="mr-g-name">
-                <span className="mr-dot" style={{ background: e.color || "var(--accent1)" }} />
-                {e.name}
-                {stale != null && stale > 7 && (
-                  <span className="mr-stale">{t.noReportDays(stale)}</span>
-                )}
+        {sortedTeam
+          .filter((e) => !weeklyOverrides[e.id]?.hidden)
+          .map((e) => {
+            const s = summaries[e.id] || {};
+            const stale = daysAgo(s.lastDate);
+            const ov = weeklyOverrides[e.id];
+            const currentLabel = ov
+              ? ov.current
+              : (s.current ? short(projectOf(s.current) || s.current, 60) : null);
+            const nextLabel = ov
+              ? ov.next
+              : (s.next ? short(projectOf(s.next) || s.next, 50) : null);
+            return (
+              <div key={e.id} className="mr-g-row">
+                <div className="mr-g-name">
+                  <span className="mr-dot" style={{ background: e.color || "var(--accent1)" }} />
+                  {e.name}
+                  {stale != null && stale > 7 && (
+                    <span className="mr-stale">{t.noReportDays(stale)}</span>
+                  )}
+                </div>
+                <div className="mr-g-lane">
+                  {currentLabel ? (
+                    <div className="mr-bar cur" style={{ background: e.color || "var(--accent1)" }}>
+                      {currentLabel}
+                    </div>
+                  ) : (
+                    <div className="mr-bar idle">{t.noActiveProject}</div>
+                  )}
+                  {nextLabel ? (
+                    <div className="mr-bar next">→ {nextLabel}</div>
+                  ) : (
+                    <div className="mr-bar queue">{t.queueUndefined}</div>
+                  )}
+                </div>
               </div>
-              <div className="mr-g-lane">
-                {s.current ? (
-                  <div className="mr-bar cur" style={{ background: e.color || "var(--accent1)" }}>
-                    {short(projectOf(s.current) || s.current, 60)}
-                  </div>
-                ) : (
-                  <div className="mr-bar idle">{t.noActiveProject}</div>
-                )}
-                {s.next ? (
-                  <div className="mr-bar next">→ {short(projectOf(s.next) || s.next, 50)}</div>
-                ) : (
-                  <div className="mr-bar queue">{t.queueUndefined}</div>
-                )}
-              </div>
-            </div>
-          );
-        })}
+            );
+          })}
         <div className="mr-legend">
           <span><i className="sw solid" /> {t.legendCurrent}</span>
           <span><i className="sw dash" /> {t.legendNext}</span>
@@ -636,7 +678,7 @@ function Style() {
       .mr-g-name .mr-dot{width:8px;height:8px}
       .mr-stale{font-size:10px;color:var(--warning);border:1px solid var(--warning);border-radius:10px;padding:1px 7px}
       .mr-g-lane{display:flex;gap:8px;flex-wrap:wrap}
-      .mr-bar{height:24px;border-radius:6px;display:inline-flex;align-items:center;padding:0 10px;font-size:11px;font-weight:600;white-space:nowrap;max-width:100%;overflow:hidden;text-overflow:ellipsis}
+      .mr-bar{min-height:24px;border-radius:6px;display:inline-flex;align-items:center;padding:4px 10px;font-size:11px;font-weight:600;white-space:normal;line-height:1.35;max-width:260px;word-break:break-word}
       .mr-bar.cur{color:#06091a}
       .mr-bar.next{border:1.5px dashed var(--muted);color:var(--muted)}
       .mr-bar.queue,.mr-bar.idle{border:1.5px dashed var(--danger);color:var(--danger)}
