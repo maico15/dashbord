@@ -6,6 +6,7 @@ import Reports from './pages/Reports'
 import Releases from './pages/Releases'
 import MonthlyReview from './pages/MonthlyReview'
 import MonthlyReviewLive from './pages/MonthlyReviewLive'
+import TeamGantt from './pages/TeamGantt'
 import TaskBoard from './pages/TaskBoard'
 import Roadmap from './pages/Roadmap'
 import NorthStar from './pages/NorthStar'
@@ -20,6 +21,7 @@ export default function App() {
       <Route path="/releases" element={<Releases />} />
       <Route path="/review/june-2026" element={<MonthlyReview />} />
       <Route path="/monthly-review" element={<MonthlyReviewLive />} />
+      <Route path="/team-gantt" element={<TeamGantt />} />
       <Route path="/tasks" element={<TaskBoard />} />
       <Route path="/roadmap" element={<Roadmap />} />
       <Route path="/north-star" element={<NorthStar />} />

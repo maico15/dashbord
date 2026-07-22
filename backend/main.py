@@ -399,6 +399,19 @@ def init_db():
             updated_at TEXT,
             PRIMARY KEY (week, year)
         );
+
+        CREATE TABLE IF NOT EXISTS gantt_assignments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            engineer_id INTEGER NOT NULL,
+            project TEXT NOT NULL,
+            start_date TEXT NOT NULL,
+            est_days INTEGER NOT NULL DEFAULT 10,
+            percent INTEGER NOT NULL DEFAULT 0,
+            status TEXT NOT NULL DEFAULT 'active',
+            queue_start TEXT,
+            note TEXT DEFAULT '',
+            updated_at TEXT
+        );
     """)
     conn.commit()
     # Seed default departments
@@ -5456,6 +5469,187 @@ def delete_roadmap_task(task_id: int, password: str = ""):
     conn.commit()
     conn.close()
     return {"ok": True}
+
+
+GANTT_FIELDS = {"project", "start_date", "est_days", "percent", "status", "queue_start", "note"}
+GANTT_STATUSES = {"active", "queued", "continuous"}
+
+
+class GanttAssignmentCreate(BaseModel):
+    engineer_id: int
+    project: str
+    start_date: str
+    est_days: int = 10
+    percent: int = 0
+    status: str = "active"
+    queue_start: Optional[str] = None
+    note: str = ""
+
+
+def _gantt_project_name(text: str) -> str:
+    text = (text or "").strip()
+    if not text:
+        return text
+    name = re.split(r"[:—–]|(?:\s-\s)", text, maxsplit=1)[0].strip()
+    name = name or text
+    return name[:60]
+
+
+@app.get("/api/gantt")
+def get_gantt():
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT id, name, avatar_color FROM team_members ORDER BY id")
+    members = [dict(r) for r in c.fetchall()]
+
+    engineers = []
+    for m in members:
+        c.execute(
+            "SELECT * FROM gantt_assignments WHERE engineer_id=? ORDER BY start_date ASC",
+            (m["id"],),
+        )
+        assignments = [dict(r) for r in c.fetchall()]
+
+        c.execute(
+            "SELECT MAX(report_date) AS d FROM daily_reports WHERE engineer_id=?",
+            (m["id"],),
+        )
+        row = c.fetchone()
+        latest_report_date = row["d"] if row else None
+
+        suggested_next = None
+        c.execute(
+            "SELECT next_tasks FROM daily_reports WHERE engineer_id=? ORDER BY report_date DESC LIMIT 1",
+            (m["id"],),
+        )
+        row = c.fetchone()
+        if row:
+            try:
+                nexts = json_lib.loads(row["next_tasks"])
+            except Exception:
+                nexts = []
+            if nexts:
+                suggested_next = str(nexts[0])
+
+        engineers.append({
+            "id": m["id"],
+            "name": m["name"],
+            "color": m["avatar_color"],
+            "assignments": assignments,
+            "latest_report_date": latest_report_date,
+            "suggested_next": suggested_next,
+        })
+    conn.close()
+    return {"engineers": engineers}
+
+
+@app.post("/api/gantt")
+def create_gantt_assignment(data: GanttAssignmentCreate, password: str = ""):
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    if data.status not in GANTT_STATUSES:
+        raise HTTPException(422, "Invalid status")
+    conn = get_db()
+    now = datetime.utcnow().isoformat()
+    cur = conn.execute(
+        "INSERT INTO gantt_assignments "
+        "(engineer_id, project, start_date, est_days, percent, status, queue_start, note, updated_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?)",
+        (data.engineer_id, data.project, data.start_date, data.est_days,
+         max(0, min(100, data.percent)), data.status, data.queue_start, data.note, now),
+    )
+    conn.commit()
+    aid = cur.lastrowid
+    conn.close()
+    return {"ok": True, "id": aid}
+
+
+@app.put("/api/gantt/{assignment_id}")
+def update_gantt_assignment(assignment_id: int, data: dict, password: str = ""):
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    fields = {k: v for k, v in data.items() if k in GANTT_FIELDS}
+    if not fields:
+        raise HTTPException(422, "No valid fields")
+    if "status" in fields and fields["status"] not in GANTT_STATUSES:
+        raise HTTPException(422, "Invalid status")
+    if "percent" in fields:
+        fields["percent"] = max(0, min(100, int(fields["percent"])))
+    conn = get_db()
+    sets = ", ".join(f"{k}=?" for k in fields)
+    vals = list(fields.values()) + [datetime.utcnow().isoformat(), assignment_id]
+    cur = conn.execute(f"UPDATE gantt_assignments SET {sets}, updated_at=? WHERE id=?", vals)
+    conn.commit()
+    updated = cur.rowcount
+    conn.close()
+    if not updated:
+        raise HTTPException(404, "Not found")
+    return {"ok": True}
+
+
+@app.delete("/api/gantt/{assignment_id}")
+def delete_gantt_assignment(assignment_id: int, password: str = ""):
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    conn = get_db()
+    conn.execute("DELETE FROM gantt_assignments WHERE id=?", (assignment_id,))
+    conn.commit()
+    conn.close()
+    return {"ok": True}
+
+
+@app.post("/api/gantt/sync-from-reports")
+def sync_gantt_from_reports(password: str = ""):
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT id FROM team_members ORDER BY id")
+    member_ids = [r["id"] for r in c.fetchall()]
+
+    created = 0
+    now = datetime.utcnow().isoformat()
+    for mid in member_ids:
+        c.execute(
+            "SELECT COUNT(*) AS n FROM gantt_assignments WHERE engineer_id=? AND status='active'",
+            (mid,),
+        )
+        if c.fetchone()["n"] > 0:
+            continue
+
+        c.execute(
+            "SELECT report_date, completed, next_tasks FROM daily_reports "
+            "WHERE engineer_id=? ORDER BY report_date DESC LIMIT 1",
+            (mid,),
+        )
+        row = c.fetchone()
+        if not row:
+            continue  # no reports at all — stays IDLE
+
+        try:
+            next_tasks = json_lib.loads(row["next_tasks"])
+        except Exception:
+            next_tasks = []
+        try:
+            completed = json_lib.loads(row["completed"])
+        except Exception:
+            completed = []
+
+        source_text = next_tasks[0] if next_tasks else (completed[0] if completed else None)
+        if not source_text:
+            continue
+
+        project = _gantt_project_name(str(source_text))
+        conn.execute(
+            "INSERT INTO gantt_assignments "
+            "(engineer_id, project, start_date, est_days, percent, status, updated_at) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (mid, project, row["report_date"], 10, 0, "active", now),
+        )
+        created += 1
+    conn.commit()
+    conn.close()
+    return {"created": created}
 
 
 @app.post("/api/sync/slack-reports")
