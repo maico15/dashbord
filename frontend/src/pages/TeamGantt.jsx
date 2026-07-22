@@ -63,11 +63,6 @@ function workingDaysElapsed(start, today) {
   }
   return count;
 }
-function daysSince(dateStr, today) {
-  const d = parseISODate(dateStr);
-  if (!d) return null;
-  return Math.floor((today - d) / 86400000);
-}
 function isoWeekNum(d) {
   const date = new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()));
   const day = date.getUTCDay() || 7;
@@ -140,8 +135,7 @@ function buildLanes(engineers, rangeStart, today) {
       };
     }
 
-    const staleDays = eng.latest_report_date ? daysSince(eng.latest_report_date, today) : null;
-    return { engineer: eng, primaryRow, queuedRow, primary, secondary, staleDays };
+    return { engineer: eng, primaryRow, queuedRow, primary, secondary };
   });
   return { lanes, totalRows: rowCursor - 1 };
 }
@@ -363,7 +357,7 @@ export default function TeamGantt() {
         <span><i className="sw solid" /> active (fill = % done)</span>
         <span><i className="sw dash" /> queued (next in line)</span>
         <span><i className="sw red" /> IDLE — no active project</span>
-        <span><i className="sw amber" /> overdue / stale reporting</span>
+        <span><i className="sw amber" /> overdue</span>
       </div>
 
       <div className="tg-scroll">
@@ -401,7 +395,7 @@ export default function TeamGantt() {
           ))}
 
           {/* lanes */}
-          {lanes.map(({ engineer: e, primaryRow, queuedRow, primary, secondary, staleDays }) => {
+          {lanes.map(({ engineer: e, primaryRow, queuedRow, primary, secondary }) => {
             const color = e.avatar_color || e.color || "var(--accent1)";
             return (
               <div key={e.id} style={{ display: "contents" }}>
@@ -411,7 +405,6 @@ export default function TeamGantt() {
                 >
                   <span className="tg-dot" style={{ background: color }} />
                   <span className="tg-eng-name">{e.name}</span>
-                  {staleDays != null && staleDays > 7 && <span className="tg-stale">no report {staleDays}d</span>}
                   {editMode && (
                     <button className="tg-add-btn" onClick={() => addAssignment(e.id)}>+ assignment</button>
                   )}
@@ -521,20 +514,19 @@ function Style() {
 
       .tg-name-header{position:sticky;left:0;background:var(--bg);z-index:3;display:flex;align-items:flex-end;padding:4px 8px 4px 0;font-size:10px;color:var(--muted);letter-spacing:.08em;text-transform:uppercase}
       .tg-week-cell{font-size:11px;font-weight:600;color:var(--muted);padding:4px 6px;border-bottom:1px solid var(--border);display:flex;align-items:center}
-      .tg-day-cell{font-size:10px;color:var(--muted);text-align:center;padding:3px 0;border-bottom:1px solid var(--border)}
+      .tg-day-cell{position:relative;z-index:0;font-size:10px;color:var(--muted);text-align:center;padding:3px 0;border-bottom:1px solid var(--border);pointer-events:none}
       .tg-day-cell.weekend{color:var(--text);opacity:.5}
-      .tg-weekend-col{background:rgba(120,120,140,.08)}
-      .tg-today-col{position:relative}
-      .tg-today-line{position:absolute;left:50%;top:0;bottom:0;width:2px;background:var(--success);transform:translateX(-50%);pointer-events:none;z-index:2}
+      .tg-weekend-col{position:relative;background:rgba(120,120,140,.08);pointer-events:none;z-index:0}
+      .tg-today-col{position:relative;pointer-events:none;z-index:1}
+      .tg-today-line{position:absolute;left:50%;top:0;bottom:0;width:2px;background:var(--success);transform:translateX(-50%);pointer-events:none;z-index:1}
 
       .tg-name-row{position:sticky;left:0;background:var(--bg);z-index:3;display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:6px 8px 6px 0;border-bottom:1px solid var(--border)}
       .tg-dot{width:9px;height:9px;border-radius:50%;flex:none}
       .tg-eng-name{font-size:13px;font-weight:600;white-space:nowrap}
-      .tg-stale{font-size:9.5px;color:var(--warning);border:1px solid var(--warning);border-radius:9px;padding:1px 6px}
-      .tg-add-btn{margin-left:auto;font-size:10.5px;font-weight:600;color:var(--accent1);background:none;border:1px solid var(--border);border-radius:7px;padding:2px 8px;cursor:pointer;font-family:inherit}
+      .tg-add-btn{margin-left:auto;font-size:10.5px;font-weight:600;color:var(--accent1);background:none;border:1px solid var(--border);border-radius:7px;padding:2px 8px;cursor:pointer;font-family:inherit;position:relative;z-index:2}
 
-      .tg-bar{position:relative;align-self:center;min-height:26px;border-radius:6px;display:flex;align-items:center;padding:0 8px;font-size:11px;font-weight:600;overflow:hidden;border:1px solid transparent}
-      .tg-bar.tg-editing{flex-direction:column;align-items:flex-start;padding:6px 8px;overflow:visible;min-height:auto}
+      .tg-bar{position:relative;z-index:2;align-self:center;min-height:26px;border-radius:6px;display:flex;align-items:center;padding:0 8px;font-size:11px;font-weight:600;overflow:hidden;border:1px solid transparent}
+      .tg-bar.tg-editing{position:relative;z-index:5;flex-direction:column;align-items:flex-start;padding:6px 8px;overflow:visible;min-height:auto}
       .tg-bar-fillwrap{position:absolute;inset:0;display:flex}
       .tg-bar-fill{height:100%}
       .tg-bar-rest{height:100%;opacity:.25}
@@ -549,7 +541,8 @@ function Style() {
       .tg-queued{background:transparent;border:1.5px dashed var(--muted)}
       .tg-queued .tg-bar-label{color:inherit}
 
-      .tg-editor{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-top:6px}
+      .tg-editor{position:relative;z-index:10;display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-top:6px}
+      .tg-editor input,.tg-editor button{position:relative;z-index:10}
       .tg-editor input{font-family:inherit;font-size:11px;border-radius:6px;border:1px solid var(--border);background:var(--card);color:var(--text);padding:3px 6px}
       .tg-e-project{width:120px}
       .tg-e-est{width:44px}
