@@ -252,7 +252,6 @@ function EngineerCard({ eng, summary, ai, month, t, scoreProps }) {
             <div key={g.project} className="mr-group">
               <div className="mr-group-head">
                 <span className="mr-group-name">{g.project}</span>
-                {g.count > 1 && <span className="mr-count">{g.count}</span>}
               </div>
               <ul>
                 {(open ? g.items : g.items.slice(0, COLLAPSED_ITEMS)).map((it, i) => (
@@ -627,7 +626,6 @@ function Style() {
       .mr-group{margin-top:10px}
       .mr-group-head{display:flex;align-items:center;gap:8px;margin-bottom:2px}
       .mr-group-name{font-size:12.5px;font-weight:700;color:var(--text)}
-      .mr-count{font-size:10px;font-weight:700;color:var(--accent1);border:1px solid var(--accent1);border-radius:9px;padding:0 6px;line-height:15px}
       .mr-more{margin-top:12px;background:none;border:1px solid var(--border);border-radius:8px;color:var(--accent1);font-size:12px;font-weight:600;padding:6px 12px;cursor:pointer;font-family:inherit}
       .mr-more:hover{border-color:var(--accent1)}
 
