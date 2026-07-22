@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useRef } from "react";
 import { Link } from "react-router-dom";
 import { useTheme, toggleTheme } from "../hooks/useTheme";
 import { api } from "../api/client";
@@ -78,6 +78,18 @@ function weekRangeLabel(monday) {
   return `${a}–${b}`;
 }
 
+/** Single source of truth for date <-> day-column conversion. Accepts a Date
+ *  object or an ISO "yyyy-mm-dd" string, always parsed as a LOCAL date (never
+ *  `new Date("yyyy-mm-dd")`, which is UTC and shifts the column by a timezone
+ *  offset) — used for bar placement, the today line, and drag math alike. */
+function dateToCol(dateOrIso, rangeStart) {
+  const d = typeof dateOrIso === "string" ? parseISODate(dateOrIso) : dateOrIso;
+  return Math.round((d - rangeStart) / 86400000);
+}
+function colToDate(col, rangeStart) {
+  return addDays(rangeStart, col);
+}
+
 /* ---------------- lane model ---------------- */
 
 function buildLanes(engineers, rangeStart, today) {
@@ -102,13 +114,15 @@ function buildLanes(engineers, rangeStart, today) {
       const end = nthWorkingDay(start, active.est_days);
       const elapsed = Math.max(1, workingDaysElapsed(start, today));
       const overdue = today > end && active.percent < 100;
-      const rawStart = Math.round((start - rangeStart) / 86400000);
-      const rawEnd = Math.round((end - rangeStart) / 86400000) + 1;
+      const rawStart = dateToCol(start, rangeStart);
+      const rawEnd = dateToCol(end, rangeStart) + 1;
       primary = {
         kind: "active",
         assignment: active,
         colStart: Math.max(0, Math.min(DAY_COLS - 1, rawStart)),
         colEnd: Math.max(1, Math.min(DAY_COLS, rawEnd)),
+        rawStart, rawEnd,
+        startDate: toISODate(start),
         dayX: elapsed > active.est_days ? `${active.est_days}+` : String(elapsed),
         estY: active.est_days,
         overdue,
@@ -124,13 +138,14 @@ function buildLanes(engineers, rangeStart, today) {
       else if (active) qStart = addDays(nthWorkingDay(parseISODate(active.start_date), active.est_days), 1);
       else qStart = today;
       const qEnd = nthWorkingDay(qStart, queued.est_days);
-      const rawStart = Math.round((qStart - rangeStart) / 86400000);
-      const rawEnd = Math.round((qEnd - rangeStart) / 86400000) + 1;
+      const rawStart = dateToCol(qStart, rangeStart);
+      const rawEnd = dateToCol(qEnd, rangeStart) + 1;
       secondary = {
         kind: "queued",
         assignment: queued,
         colStart: Math.max(0, Math.min(DAY_COLS - 1, rawStart)),
         colEnd: Math.max(1, Math.min(DAY_COLS, rawEnd)),
+        rawStart, rawEnd,
         startLabel: toISODate(qStart),
       };
     }
@@ -144,7 +159,7 @@ function buildLanes(engineers, rangeStart, today) {
 
 function AssignmentEditor({ a, hidePercentEst, onChange, onDelete }) {
   return (
-    <div className="tg-editor" onClick={(e) => e.stopPropagation()}>
+    <div className="tg-editor" onClick={(e) => e.stopPropagation()} onMouseDown={(e) => e.stopPropagation()}>
       <input
         className="tg-e-project"
         defaultValue={a.project}
@@ -159,6 +174,7 @@ function AssignmentEditor({ a, hidePercentEst, onChange, onDelete }) {
       )}
       {!hidePercentEst && (
         <input
+          key={a.est_days /* force refresh after a resize-drag PUTs a new est_days */}
           type="number" min="1" className="tg-e-est"
           defaultValue={a.est_days}
           onBlur={(e) => {
@@ -168,12 +184,14 @@ function AssignmentEditor({ a, hidePercentEst, onChange, onDelete }) {
         />
       )}
       <input
+        key={a.start_date /* force refresh after a move-drag PUTs a new start_date */}
         type="date" className="tg-e-date"
         defaultValue={a.start_date}
         onChange={(e) => e.target.value && onChange({ start_date: e.target.value })}
       />
       {a.status === "queued" && (
         <input
+          key={a.queue_start /* force refresh after a move-drag PUTs a new queue_start */}
           type="date" className="tg-e-date"
           defaultValue={a.queue_start || ""}
           onChange={(e) => onChange({ queue_start: e.target.value })}
@@ -200,9 +218,11 @@ export default function TeamGantt() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [editMode, setEditMode] = useState(false);
-  const [pw, setPw] = useState("");
+  const pwRef = useRef(""); // read from stable-closure window listeners (drag) — never stale
   const [pwError, setPwError] = useState("");
   const [syncMsg, setSyncMsg] = useState("");
+  const dragRef = useRef(null);
+  const [dragVisual, setDragVisual] = useState(null); // mirrors dragRef to trigger re-render for the live preview
 
   const today = useMemo(() => {
     const t = new Date();
@@ -212,7 +232,7 @@ export default function TeamGantt() {
   const rangeStart = useMemo(() => addDays(startOfWeekMonday(today), -7), [today]);
   const days = useMemo(() => Array.from({ length: DAY_COLS }, (_, i) => addDays(rangeStart, i)), [rangeStart]);
   const weeks = useMemo(() => Array.from({ length: 6 }, (_, i) => days[i * 7]), [days]);
-  const todayIdx = Math.round((today - rangeStart) / 86400000);
+  const todayIdx = dateToCol(today, rangeStart);
 
   async function load() {
     try {
@@ -235,9 +255,9 @@ export default function TeamGantt() {
   useEffect(() => { load() }, []);
 
   const ensurePassword = () => {
-    if (pw) return pw;
+    if (pwRef.current) return pwRef.current;
     const entered = window.prompt("Admin password:");
-    if (entered) { setPw(entered); setPwError("") }
+    if (entered) { pwRef.current = entered; setPwError("") }
     return entered || "";
   };
 
@@ -296,6 +316,82 @@ export default function TeamGantt() {
     }
     setTimeout(() => setSyncMsg(""), 5000);
   }
+
+  /* ---------------- drag / resize (edit mode only) ---------------- */
+
+  function beginDrag(e, kind, assignment, isQueued, colStart, colEnd, baseStartDate) {
+    if (!editMode) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const barEl = e.currentTarget.closest(".tg-bar");
+    const rect = barEl.getBoundingClientRect();
+    const cols = Math.max(1, colEnd - colStart);
+    const info = {
+      kind, // "move" | "resize"
+      assignmentId: assignment.id,
+      isQueued,
+      baseStartDate, // ISO string — the assignment's true start (or effective queue start)
+      colStart,
+      colEnd,
+      startClientX: e.clientX,
+      pxPerDay: rect.width / cols,
+      deltaCols: 0,
+    };
+    dragRef.current = info;
+    setDragVisual({ ...info });
+    document.body.style.userSelect = "none";
+  }
+
+  async function finalizeDrag(info) {
+    if (info.deltaCols === 0) return;
+    const patch = {};
+    if (info.kind === "move") {
+      const newStart = toISODate(addDays(parseISODate(info.baseStartDate), info.deltaCols));
+      if (info.isQueued) patch.queue_start = newStart;
+      else patch.start_date = newStart;
+    } else {
+      const newEndCol = info.colEnd + info.deltaCols;
+      const newEndDate = colToDate(Math.max(info.colStart, newEndCol) - 1, rangeStart);
+      const startDate = parseISODate(info.baseStartDate);
+      patch.est_days = Math.max(1, workingDaysElapsed(startDate, newEndDate));
+    }
+    await updateAssignment(info.assignmentId, patch);
+  }
+
+  useEffect(() => {
+    function onMouseMove(e) {
+      const d = dragRef.current;
+      if (!d) return;
+      const deltaCols = Math.round((e.clientX - d.startClientX) / d.pxPerDay);
+      if (deltaCols !== d.deltaCols) {
+        d.deltaCols = deltaCols;
+        setDragVisual({ ...d });
+      }
+    }
+    async function onMouseUp() {
+      const d = dragRef.current;
+      if (!d) return;
+      dragRef.current = null;
+      document.body.style.userSelect = "";
+      await finalizeDrag(d);
+      setDragVisual(null);
+    }
+    function onKeyDown(e) {
+      if (e.key === "Escape" && dragRef.current) {
+        dragRef.current = null;
+        setDragVisual(null);
+        document.body.style.userSelect = "";
+      }
+    }
+    window.addEventListener("mousemove", onMouseMove);
+    window.addEventListener("mouseup", onMouseUp);
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.removeEventListener("mousemove", onMouseMove);
+      window.removeEventListener("mouseup", onMouseUp);
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, []);
 
   const sortedEngineers = useMemo(() => {
     return [...(data.engineers || [])].sort((a, b) => {
@@ -397,6 +493,21 @@ export default function TeamGantt() {
           {/* lanes */}
           {lanes.map(({ engineer: e, primaryRow, queuedRow, primary, secondary }) => {
             const color = e.avatar_color || e.color || "var(--accent1)";
+
+            const activeDrag = primary.kind === "active" && dragVisual?.assignmentId === primary.assignment.id ? dragVisual : null;
+            const activeCols = activeDrag
+              ? activeDrag.kind === "move"
+                ? { colStart: primary.colStart + activeDrag.deltaCols, colEnd: primary.colEnd + activeDrag.deltaCols }
+                : { colStart: primary.colStart, colEnd: Math.max(primary.colStart + 1, primary.colEnd + activeDrag.deltaCols) }
+              : primary.kind === "active" ? { colStart: primary.colStart, colEnd: primary.colEnd } : null;
+
+            const queuedDrag = secondary && dragVisual?.assignmentId === secondary.assignment.id ? dragVisual : null;
+            const queuedCols = queuedDrag
+              ? queuedDrag.kind === "move"
+                ? { colStart: secondary.colStart + queuedDrag.deltaCols, colEnd: secondary.colEnd + queuedDrag.deltaCols }
+                : { colStart: secondary.colStart, colEnd: Math.max(secondary.colStart + 1, secondary.colEnd + queuedDrag.deltaCols) }
+              : secondary ? { colStart: secondary.colStart, colEnd: secondary.colEnd } : null;
+
             return (
               <div key={e.id} style={{ display: "contents" }}>
                 <div
@@ -421,7 +532,7 @@ export default function TeamGantt() {
                     className={`tg-bar tg-continuous${editMode ? " tg-editing" : ""}`}
                     style={{ gridColumn: `${primary.colStart + 2} / ${primary.colEnd + 2}`, gridRow: primaryRow, background: `${color}2e` }}
                   >
-                    <span className="tg-bar-label">{primary.assignment.project} · continuous</span>
+                    <span className="tg-bar-label">{primary.assignment.project || "Untitled"} · continuous</span>
                     {editMode && (
                       <AssignmentEditor
                         a={primary.assignment}
@@ -435,17 +546,24 @@ export default function TeamGantt() {
 
                 {primary.kind === "active" && (
                   <div
-                    className={`tg-bar tg-active${primary.overdue ? " tg-overdue" : ""}${editMode ? " tg-editing" : ""}`}
-                    style={{ gridColumn: `${primary.colStart + 2} / ${primary.colEnd + 2}`, gridRow: primaryRow }}
+                    className={`tg-bar tg-active${primary.overdue ? " tg-overdue" : ""}${editMode ? " tg-editing tg-draggable" : ""}${activeDrag ? " tg-dragging" : ""}`}
+                    style={{ gridColumn: `${activeCols.colStart + 2} / ${activeCols.colEnd + 2}`, gridRow: primaryRow }}
+                    onMouseDown={editMode ? (e) => beginDrag(e, "move", primary.assignment, false, primary.colStart, primary.colEnd, primary.startDate) : undefined}
                   >
                     <div className="tg-bar-fillwrap">
                       <div className="tg-bar-fill" style={{ width: `${primary.assignment.percent}%`, background: color }} />
                       <div className="tg-bar-rest" style={{ width: `${100 - primary.assignment.percent}%`, background: color }} />
                     </div>
                     <span className="tg-bar-label">
-                      {primary.assignment.project} · day {primary.dayX} of ~{primary.estY} · {primary.assignment.percent}%
+                      {primary.assignment.project || "Untitled"} · day {primary.dayX} of ~{primary.estY} · {primary.assignment.percent}%
                     </span>
                     {primary.overdue && <span className="tg-overdue-tag">overdue</span>}
+                    {editMode && (
+                      <div
+                        className="tg-bar-resize"
+                        onMouseDown={(e) => beginDrag(e, "resize", primary.assignment, false, primary.colStart, primary.colEnd, primary.startDate)}
+                      />
+                    )}
                     {editMode && (
                       <AssignmentEditor
                         a={primary.assignment}
@@ -458,10 +576,17 @@ export default function TeamGantt() {
 
                 {secondary && (
                   <div
-                    className={`tg-bar tg-queued${editMode ? " tg-editing" : ""}`}
-                    style={{ gridColumn: `${secondary.colStart + 2} / ${secondary.colEnd + 2}`, gridRow: queuedRow, borderColor: color, color }}
+                    className={`tg-bar tg-queued${editMode ? " tg-editing tg-draggable" : ""}${queuedDrag ? " tg-dragging" : ""}`}
+                    style={{ gridColumn: `${queuedCols.colStart + 2} / ${queuedCols.colEnd + 2}`, gridRow: queuedRow, borderColor: color, color }}
+                    onMouseDown={editMode ? (e) => beginDrag(e, "move", secondary.assignment, true, secondary.colStart, secondary.colEnd, secondary.startLabel) : undefined}
                   >
-                    <span className="tg-bar-label">NEXT: {secondary.assignment.project} · starts {secondary.startLabel}</span>
+                    <span className="tg-bar-label">NEXT: {secondary.assignment.project || "Untitled"} · starts {secondary.startLabel}</span>
+                    {editMode && (
+                      <div
+                        className="tg-bar-resize"
+                        onMouseDown={(e) => beginDrag(e, "resize", secondary.assignment, true, secondary.colStart, secondary.colEnd, secondary.startLabel)}
+                      />
+                    )}
                     {editMode && (
                       <AssignmentEditor
                         a={secondary.assignment}
@@ -527,6 +652,9 @@ function Style() {
 
       .tg-bar{position:relative;z-index:2;align-self:center;min-height:26px;border-radius:6px;display:flex;align-items:center;padding:0 8px;font-size:11px;font-weight:600;overflow:hidden;border:1px solid transparent}
       .tg-bar.tg-editing{position:relative;z-index:5;flex-direction:column;align-items:flex-start;padding:6px 8px;overflow:visible;min-height:auto}
+      .tg-bar.tg-draggable{cursor:grab}
+      .tg-bar.tg-draggable.tg-dragging{cursor:grabbing}
+      .tg-bar-resize{position:absolute;top:0;bottom:0;right:0;width:8px;cursor:col-resize;z-index:11}
       .tg-bar-fillwrap{position:absolute;inset:0;display:flex}
       .tg-bar-fill{height:100%}
       .tg-bar-rest{height:100%;opacity:.25}
