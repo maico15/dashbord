@@ -371,6 +371,9 @@ export default function Dashboard() {
           <Link to="/review/june-2026" className="dashboard-footer-link">
             📊 June 2026 Review
           </Link>
+          <Link to="/monthly-review" className="dashboard-footer-link">
+            📈 Monthly Review (Live)
+          </Link>
           <Link to="/tasks" className="dashboard-footer-link">
             📋 Task Board
           </Link>
