@@ -223,6 +223,8 @@ export default function TeamGantt() {
   const [syncMsg, setSyncMsg] = useState("");
   const dragRef = useRef(null);
   const [dragVisual, setDragVisual] = useState(null); // mirrors dragRef to trigger re-render for the live preview
+  const [manageOpen, setManageOpen] = useState(false);
+  const [pendingHideId, setPendingHideId] = useState(null); // engineer awaiting second-click confirm to hide
 
   const today = useMemo(() => {
     const t = new Date();
@@ -317,6 +319,18 @@ export default function TeamGantt() {
     setTimeout(() => setSyncMsg(""), 5000);
   }
 
+  async function setVisibility(engineerId, hidden) {
+    const p = ensurePassword();
+    if (!p) return;
+    try {
+      await api.post("/gantt/visibility", { engineer_id: engineerId, hidden }, p);
+      setPwError("");
+      await load();
+    } catch (err) {
+      setPwError(err.message || "Visibility update failed — check the admin password");
+    }
+  }
+
   /* ---------------- drag / resize (edit mode only) ---------------- */
 
   function beginDrag(e, kind, assignment, isQueued, colStart, colEnd, baseStartDate) {
@@ -400,9 +414,16 @@ export default function TeamGantt() {
     });
   }, [data.engineers, aiMap]);
 
+  // Viewers never see hidden lanes; edit mode shows everything so the admin
+  // keeps full context while managing visibility.
+  const boardEngineers = useMemo(
+    () => (editMode ? sortedEngineers : sortedEngineers.filter((e) => !e.hidden)),
+    [sortedEngineers, editMode]
+  );
+
   const { lanes, totalRows } = useMemo(
-    () => buildLanes(sortedEngineers, rangeStart, today),
-    [sortedEngineers, rangeStart, today]
+    () => buildLanes(boardEngineers, rangeStart, today),
+    [boardEngineers, rangeStart, today]
   );
 
   const lastUpdated = useMemo(() => {
@@ -437,7 +458,16 @@ export default function TeamGantt() {
         </div>
         <div className="tg-controls">
           <button className="tg-btn" onClick={syncFromReports}>⟳ Sync from reports</button>
-          <button className={`tg-btn${editMode ? " on" : ""}`} onClick={() => (editMode ? setEditMode(false) : enableEdit())}>
+          {editMode && (
+            <button className="tg-btn" onClick={() => setManageOpen(true)}>👥 Manage engineers</button>
+          )}
+          <button
+            className={`tg-btn${editMode ? " on" : ""}`}
+            onClick={() => {
+              if (editMode) { setEditMode(false); setManageOpen(false); setPendingHideId(null) }
+              else enableEdit();
+            }}
+          >
             {editMode ? "✓ Editing" : "✎ Edit mode"}
           </button>
           <button className="tg-icon-btn" onClick={toggleTheme} title={theme === "dark" ? "Switch to light" : "Switch to dark"}>
@@ -455,6 +485,64 @@ export default function TeamGantt() {
         <span><i className="sw red" /> IDLE — no active project</span>
         <span><i className="sw amber" /> overdue</span>
       </div>
+
+      {manageOpen && (
+        <div
+          className="tg-modal-backdrop"
+          onClick={() => { setManageOpen(false); setPendingHideId(null) }}
+        >
+          <div className="card tg-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="tg-modal-head">
+              <h2>Manage engineers</h2>
+              <button
+                className="tg-icon-btn"
+                onClick={() => { setManageOpen(false); setPendingHideId(null) }}
+              >✕</button>
+            </div>
+            <div className="tg-modal-list">
+              {(data.engineers || []).map((eng) => {
+                const activeOrQueuedCount = (eng.assignments || [])
+                  .filter((a) => a.status === "active" || a.status === "queued").length;
+                const pending = pendingHideId === eng.id;
+                return (
+                  <div key={eng.id} className={`tg-modal-row${eng.hidden ? " tg-modal-row-hidden" : ""}`}>
+                    <span className="tg-dot" style={{ background: eng.avatar_color || eng.color || "var(--accent1)" }} />
+                    <span className="tg-modal-name">{eng.name}</span>
+                    {eng.hidden ? (
+                      <button className="tg-btn tg-modal-action" onClick={() => setVisibility(eng.id, false)}>
+                        + Add to board
+                      </button>
+                    ) : pending ? (
+                      <div className="tg-modal-confirm">
+                        <span className="tg-modal-warning">
+                          Has {activeOrQueuedCount} assignment{activeOrQueuedCount === 1 ? "" : "s"} — they will be
+                          hidden with the lane, not deleted
+                        </span>
+                        <button
+                          className="tg-btn tg-modal-action warn"
+                          onClick={() => { setVisibility(eng.id, true); setPendingHideId(null) }}
+                        >Confirm remove</button>
+                        <button className="tg-btn tg-modal-action" onClick={() => setPendingHideId(null)}>Cancel</button>
+                      </div>
+                    ) : (
+                      <button
+                        className="tg-btn tg-modal-action"
+                        onClick={() => {
+                          if (activeOrQueuedCount > 0) setPendingHideId(eng.id);
+                          else setVisibility(eng.id, true);
+                        }}
+                      >− Remove from board</button>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+            <div className="tg-modal-hint">
+              New team members are added in the main dashboard's Admin → Team panel and appear here automatically.
+            </div>
+          </div>
+        </div>
+      )}
 
       <div className="tg-scroll">
         <div
@@ -633,6 +721,21 @@ function Style() {
       .tg-legend .sw.dash{border:1.5px dashed var(--muted)}
       .tg-legend .sw.red{border:1.5px dashed var(--danger)}
       .tg-legend .sw.amber{border:1.5px solid var(--warning)}
+
+      .tg-modal-backdrop{position:fixed;inset:0;background:rgba(6,9,26,.55);display:flex;align-items:flex-start;justify-content:center;padding:60px 20px;z-index:50}
+      .tg-modal{width:100%;max-width:480px;max-height:70vh;display:flex;flex-direction:column;padding:0;overflow:hidden}
+      .tg-modal-head{display:flex;align-items:center;justify-content:space-between;padding:16px 20px;border-bottom:1px solid var(--border)}
+      .tg-modal-head h2{font-size:15px;font-weight:700;margin:0}
+      .tg-modal-list{overflow-y:auto;padding:8px 20px}
+      .tg-modal-row{display:flex;align-items:center;gap:10px;padding:10px 0;border-bottom:1px solid var(--border);flex-wrap:wrap}
+      .tg-modal-row:last-child{border-bottom:none}
+      .tg-modal-row-hidden{opacity:.45}
+      .tg-modal-name{font-size:13px;font-weight:600;flex:1}
+      .tg-modal-action{font-size:11.5px;padding:5px 12px;white-space:nowrap}
+      .tg-modal-action.warn{background:var(--danger);color:#fff;border-color:var(--danger)}
+      .tg-modal-confirm{display:flex;align-items:center;gap:8px;flex-wrap:wrap;width:100%;padding-top:6px}
+      .tg-modal-warning{font-size:11px;color:var(--warning);flex:1 1 100%}
+      .tg-modal-hint{font-size:11px;color:var(--muted);padding:14px 20px;border-top:1px solid var(--border)}
 
       .tg-scroll{overflow-x:auto;padding-bottom:8px}
       .tg-grid{display:grid;position:relative;min-width:1100px}
