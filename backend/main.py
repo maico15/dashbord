@@ -13,6 +13,8 @@ import base64
 import urllib.request
 import urllib.error
 import urllib.parse
+import csv
+import io
 from datetime import datetime, timedelta
 from apscheduler.schedulers.background import BackgroundScheduler
 from database import get_db, IS_POSTGRES
@@ -416,6 +418,28 @@ def init_db():
         CREATE TABLE IF NOT EXISTS gantt_visibility (
             engineer_id INTEGER PRIMARY KEY,
             hidden INTEGER NOT NULL DEFAULT 0
+        );
+
+        CREATE TABLE IF NOT EXISTS backlog_items (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            title       TEXT NOT NULL,
+            description TEXT DEFAULT '',
+            owner       TEXT DEFAULT '',
+            priority    TEXT DEFAULT 'P2',
+            est_days    INTEGER DEFAULT 10,
+            roi         TEXT DEFAULT '',
+            cost        TEXT DEFAULT '',
+            ret         TEXT DEFAULT '',
+            status      TEXT DEFAULT '',
+            source      TEXT DEFAULT '',
+            origin      TEXT DEFAULT '',
+            sort_order  INTEGER DEFAULT 0,
+            created_at  TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS backlog_retired (
+            title_key  TEXT PRIMARY KEY,
+            retired_at TEXT
         );
     """)
     conn.commit()
@@ -3404,6 +3428,7 @@ class ConfigUpdate(BaseModel):
     team_name: Optional[str] = None
     current_week: Optional[int] = None
     current_year: Optional[int] = None
+    backlog_sheet_csv_url: Optional[str] = None
 
 
 @app.put("/api/config")
@@ -5713,6 +5738,314 @@ def sync_gantt_from_reports(password: str = ""):
     conn.commit()
     conn.close()
     return {"created": created}
+
+
+class BacklogItem(BaseModel):
+    title: str
+    description: str = ""
+    owner: str = ""
+    priority: str = "P2"
+    est_days: int = 10
+    roi: str = ""
+    cost: str = ""
+    ret: str = ""
+    status: str = ""
+    source: str = ""
+    origin: str = ""
+
+
+class BacklogAssign(BaseModel):
+    engineer_id: int
+    start_date: Optional[str] = None
+    status: Optional[str] = None
+
+
+BACKLOG_PRIORITIES = {"P0", "P1", "P2", "ENABLER", "GATED"}
+BACKLOG_FIELDS = {
+    "title", "description", "owner", "priority", "est_days", "roi",
+    "cost", "ret", "status", "source", "origin", "sort_order",
+}
+
+
+def _title_key(title: str) -> str:
+    return re.sub(r"\s+", " ", (title or "").strip().lower())
+
+
+def _get_config_value(conn, key):
+    row = conn.execute("SELECT value FROM config WHERE key=?", (key,)).fetchone()
+    return row["value"] if row else None
+
+
+@app.get("/api/backlog")
+def get_backlog():
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT * FROM backlog_items ORDER BY sort_order, id")
+    items = [dict(r) for r in c.fetchall()]
+    sheet_url = _get_config_value(conn, "backlog_sheet_csv_url")
+    last_sync = _get_config_value(conn, "last_backlog_sync")
+    conn.close()
+    return {"items": items, "sheet_url": sheet_url or None, "last_sync": last_sync}
+
+
+@app.post("/api/backlog")
+def create_backlog_item(data: BacklogItem, password: str = ""):
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    if data.priority not in BACKLOG_PRIORITIES:
+        raise HTTPException(422, "Invalid priority")
+    conn = get_db()
+    mx = conn.execute("SELECT COALESCE(MAX(sort_order),0)+1 FROM backlog_items").fetchone()[0]
+    now = datetime.utcnow().isoformat()
+    cur = conn.execute(
+        "INSERT INTO backlog_items "
+        "(title, description, owner, priority, est_days, roi, cost, ret, status, source, origin, sort_order, created_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (data.title, data.description, data.owner, data.priority, data.est_days, data.roi,
+         data.cost, data.ret, data.status, data.source, data.origin, mx, now),
+    )
+    conn.commit()
+    bid = cur.lastrowid
+    conn.close()
+    return {"ok": True, "id": bid}
+
+
+@app.post("/api/backlog/reorder")
+def reorder_backlog(data: dict, password: str = ""):
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    ordered_ids = data.get("ordered_ids", [])
+    conn = get_db()
+    for idx, bid in enumerate(ordered_ids):
+        conn.execute("UPDATE backlog_items SET sort_order=? WHERE id=?", (idx, bid))
+    conn.commit()
+    conn.close()
+    return {"ok": True, "count": len(ordered_ids)}
+
+
+@app.post("/api/backlog/{item_id}/assign")
+def assign_backlog_item(item_id: int, data: BacklogAssign, password: str = ""):
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    requested_status = data.status or "active"
+    if requested_status not in GANTT_STATUSES:
+        raise HTTPException(422, "Invalid status")
+
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT * FROM backlog_items WHERE id=?", (item_id,))
+    item = c.fetchone()
+    if not item:
+        conn.close()
+        raise HTTPException(404, "Backlog item not found")
+
+    c.execute("SELECT id FROM team_members WHERE id=?", (data.engineer_id,))
+    if not c.fetchone():
+        conn.close()
+        raise HTTPException(422, "Invalid engineer_id")
+
+    today = datetime.utcnow().date().isoformat()
+    resolved_status = requested_status
+    queue_start = None
+    if resolved_status == "active":
+        c.execute(
+            "SELECT COUNT(*) AS n FROM gantt_assignments WHERE engineer_id=? AND status='active'",
+            (data.engineer_id,),
+        )
+        if c.fetchone()["n"] > 0:
+            resolved_status = "queued"
+            queue_start = today
+
+    start_date = data.start_date or today
+    now = datetime.utcnow().isoformat()
+    cur = conn.execute(
+        "INSERT INTO gantt_assignments "
+        "(engineer_id, project, start_date, est_days, percent, status, queue_start, note, updated_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?)",
+        (data.engineer_id, item["title"], start_date, item["est_days"], 0,
+         resolved_status, queue_start, "", now),
+    )
+    assignment_id = cur.lastrowid
+    conn.execute("DELETE FROM backlog_items WHERE id=?", (item_id,))
+    conn.execute(
+        "INSERT OR IGNORE INTO backlog_retired (title_key, retired_at) VALUES (?,?)",
+        (_title_key(item["title"]), now),
+    )
+    conn.commit()
+    conn.close()
+    return {"ok": True, "assignment_id": assignment_id, "status": resolved_status}
+
+
+@app.put("/api/backlog/{item_id}")
+def update_backlog_item(item_id: int, data: dict, password: str = ""):
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    fields = {k: v for k, v in data.items() if k in BACKLOG_FIELDS}
+    if not fields:
+        raise HTTPException(422, "No valid fields")
+    if "priority" in fields and fields["priority"] not in BACKLOG_PRIORITIES:
+        raise HTTPException(422, "Invalid priority")
+    conn = get_db()
+    sets = ", ".join(f"{k}=?" for k in fields)
+    vals = list(fields.values()) + [item_id]
+    cur = conn.execute(f"UPDATE backlog_items SET {sets} WHERE id=?", vals)
+    conn.commit()
+    updated = cur.rowcount
+    conn.close()
+    if not updated:
+        raise HTTPException(404, "Not found")
+    return {"ok": True}
+
+
+@app.delete("/api/backlog/{item_id}")
+def delete_backlog_item(item_id: int, password: str = ""):
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT title FROM backlog_items WHERE id=?", (item_id,))
+    row = c.fetchone()
+    conn.execute("DELETE FROM backlog_items WHERE id=?", (item_id,))
+    if row:
+        conn.execute(
+            "INSERT OR IGNORE INTO backlog_retired (title_key, retired_at) VALUES (?,?)",
+            (_title_key(row["title"]), datetime.utcnow().isoformat()),
+        )
+    conn.commit()
+    conn.close()
+    return {"ok": True}
+
+
+# ── Backlog sync from Google Sheet (published CSV) ───────────────────────────
+
+_BACKLOG_HEADER_ALIASES = {
+    "title":       ["Project"],
+    "description": ["Результат (что делаем)", "Результат"],
+    "owner":       ["Owner (предл.)", "Owner"],
+    "est_days":    ["Нед"],
+    "cost":        ["Cost, $", "Cost"],
+    "ret":         ["Возврат, $/год", "Возврат"],
+    "roi":         ["ROI"],
+    "priority":    ["Приоритет", "Приор."],
+    "status":      ["Статус / для старта", "Статус"],
+    "source":      ["База оценки / источник", "База"],
+    "origin":      ["Ист."],
+}
+
+
+def _fetch_csv_text(url: str) -> str:
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        raw = resp.read()
+    for enc in ("utf-8-sig", "utf-8", "cp1251"):
+        try:
+            return raw.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    return raw.decode("utf-8", errors="replace")
+
+
+def _parse_backlog_est_days(raw) -> int:
+    try:
+        return max(1, round(float((raw or "").strip().replace(",", "."))))
+    except (ValueError, TypeError, AttributeError):
+        return 10
+
+
+@app.post("/api/backlog/sync")
+def sync_backlog_from_sheet():
+    # Deliberately unauthenticated — see PART 3 of the task spec: running a
+    # sync only reads the admin-configured URL, it can't change what's synced
+    # from, so any viewer may trigger a refresh without the edit-mode password.
+    conn = get_db()
+    c = conn.cursor()
+    sheet_url = _get_config_value(conn, "backlog_sheet_csv_url") or ""
+    if not sheet_url.strip():
+        conn.close()
+        raise HTTPException(400, "источник не настроен — администратор должен указать ссылку на CSV")
+
+    try:
+        text = _fetch_csv_text(sheet_url)
+    except Exception as e:
+        conn.close()
+        raise HTTPException(502, f"не удалось получить CSV: {e}")
+
+    reader = csv.DictReader(io.StringIO(text))
+    fieldnames = reader.fieldnames or []
+
+    def find_header(aliases):
+        for h in fieldnames:
+            if (h or "").strip() in aliases:
+                return h
+        return None
+
+    field_map = {canon: find_header(aliases) for canon, aliases in _BACKLOG_HEADER_ALIASES.items()}
+
+    def cell(row, canon):
+        h = field_map.get(canon)
+        return (row.get(h) or "").strip() if h else ""
+
+    c.execute("SELECT title_key FROM backlog_retired")
+    retired = {r["title_key"] for r in c.fetchall()}
+
+    c.execute("SELECT id, title FROM backlog_items")
+    existing = {_title_key(r["title"]): r["id"] for r in c.fetchall()}
+
+    mx_row = conn.execute("SELECT COALESCE(MAX(sort_order),0) FROM backlog_items").fetchone()
+    next_sort = (mx_row[0] or 0) + 1
+
+    added = updated = skipped_retired = ignored_rows = 0
+    now = datetime.utcnow().isoformat()
+
+    for row in reader:
+        title = cell(row, "title")
+        if not title or title.startswith("ИТОГО") or title.startswith("•"):
+            ignored_rows += 1
+            continue
+
+        key = _title_key(title)
+        if key in retired:
+            skipped_retired += 1
+            continue
+
+        description = cell(row, "description")
+        owner = cell(row, "owner")
+        est_days = _parse_backlog_est_days(row.get(field_map["est_days"])) if field_map.get("est_days") else 10
+        cost = cell(row, "cost")
+        ret = cell(row, "ret")
+        roi = cell(row, "roi")
+        priority = cell(row, "priority").upper()
+        if priority not in BACKLOG_PRIORITIES:
+            priority = "P2"
+        status = cell(row, "status")
+        source = cell(row, "source")
+        origin = cell(row, "origin")
+
+        if key in existing:
+            conn.execute(
+                "UPDATE backlog_items SET description=?, owner=?, priority=?, est_days=?, "
+                "roi=?, cost=?, ret=?, status=?, source=?, origin=? WHERE id=?",
+                (description, owner, priority, est_days, roi, cost, ret, status, source, origin, existing[key]),
+            )
+            updated += 1
+        else:
+            conn.execute(
+                "INSERT INTO backlog_items "
+                "(title, description, owner, priority, est_days, roi, cost, ret, status, source, origin, sort_order, created_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (title, description, owner, priority, est_days, roi, cost, ret, status, source, origin, next_sort, now),
+            )
+            next_sort += 1
+            existing[key] = -1  # guards against a duplicate title later in the same sheet
+            added += 1
+
+    conn.execute("INSERT OR REPLACE INTO config (key,value) VALUES ('last_backlog_sync', ?)", (now,))
+    conn.commit()
+    conn.close()
+    return {
+        "ok": True, "added": added, "updated": updated,
+        "skipped_retired": skipped_retired, "ignored_rows": ignored_rows,
+    }
 
 
 @app.post("/api/sync/slack-reports")
