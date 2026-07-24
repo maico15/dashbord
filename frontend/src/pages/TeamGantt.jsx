@@ -253,6 +253,118 @@ function buildLanes(engineers, rangeStart, today) {
   return { lanes, totalRows: rowCursor - 1 };
 }
 
+/* ---------------- draft layer ----------------
+ * Edit mode never writes to the backend directly. Every action pushes a change
+ * object onto changeQueue instead; computeDraftState replays that queue on top
+ * of the last-fetched base snapshot to produce what's actually rendered. Undo
+ * is just popping the last change and re-deriving — there's no per-action
+ * inverse to maintain, since this is a pure, deterministic replay.
+ *
+ * Change shapes:
+ *   gantt_update   {id, fields}
+ *   gantt_create   {tempId, fields}
+ *   gantt_delete   {id}
+ *   backlog_update {id, fields}
+ *   backlog_create {tempId, fields}
+ *   backlog_delete {id}
+ *   backlog_reorder{orderedIds}
+ *   backlog_assign {tempId, backlogId, engineerId, startDate}
+ * `id`/`backlogId`/`engineerId`/entries in orderedIds may be a real numeric id
+ * or a tempId string minted by an earlier create/assign in the same queue. */
+function computeDraftState(baseEngineers, baseBacklogItems, changeQueue) {
+  const engineersById = new Map();
+  for (const e of baseEngineers || []) {
+    engineersById.set(e.id, { ...e, assignments: (e.assignments || []).map((a) => ({ ...a })) });
+  }
+  let backlogItems = (baseBacklogItems || []).map((b) => ({ ...b }));
+
+  function findAssignment(id) {
+    for (const eng of engineersById.values()) {
+      const a = eng.assignments.find((x) => x.id === id);
+      if (a) return { eng, a };
+    }
+    return null;
+  }
+
+  for (const ch of changeQueue) {
+    switch (ch.type) {
+      case "gantt_update": {
+        const found = findAssignment(ch.id);
+        if (found) Object.assign(found.a, ch.fields, { __pending: true });
+        break;
+      }
+      case "gantt_create": {
+        const eng = engineersById.get(ch.fields.engineer_id);
+        if (eng) {
+          eng.assignments.push({
+            percent: 0, status: "active", note: "", queue_start: null,
+            ...ch.fields,
+            id: ch.tempId, __pending: true,
+          });
+        }
+        break;
+      }
+      case "gantt_delete": {
+        const found = findAssignment(ch.id);
+        if (found) found.eng.assignments = found.eng.assignments.filter((x) => x.id !== ch.id);
+        break;
+      }
+      case "backlog_update": {
+        const idx = backlogItems.findIndex((b) => b.id === ch.id);
+        if (idx !== -1) backlogItems[idx] = { ...backlogItems[idx], ...ch.fields, __pending: true };
+        break;
+      }
+      case "backlog_create": {
+        backlogItems.push({
+          description: "", owner: "", priority: "P2", est_days: 10,
+          status: "", source: "", origin: "",
+          ...ch.fields,
+          id: ch.tempId, sort_order: backlogItems.length, __pending: true,
+        });
+        break;
+      }
+      case "backlog_delete": {
+        backlogItems = backlogItems.filter((b) => b.id !== ch.id);
+        break;
+      }
+      case "backlog_reorder": {
+        const byId = new Map(backlogItems.map((b) => [b.id, b]));
+        const reordered = ch.orderedIds.map((id) => byId.get(id)).filter(Boolean);
+        // defensive: keep any item the reorder snapshot didn't know about, so a
+        // stray future change type never silently drops data from the draft
+        for (const b of backlogItems) if (!ch.orderedIds.includes(b.id)) reordered.push(b);
+        backlogItems = reordered;
+        break;
+      }
+      case "backlog_assign": {
+        const item = backlogItems.find((b) => b.id === ch.backlogId);
+        if (item) backlogItems = backlogItems.filter((b) => b.id !== ch.backlogId);
+        const eng = engineersById.get(ch.engineerId);
+        if (eng && item) {
+          const hasActive = eng.assignments.some((a) => a.status === "active");
+          const status = hasActive ? "queued" : "active";
+          eng.assignments.push({
+            id: ch.tempId,
+            project: item.title,
+            est_days: item.est_days || 10,
+            percent: 0,
+            status,
+            queue_start: status === "queued" ? ch.startDate : null,
+            start_date: ch.startDate,
+            note: "",
+            __pending: true,
+          });
+        }
+        break;
+      }
+      default:
+        break;
+    }
+  }
+
+  return { engineers: Array.from(engineersById.values()), backlogItems };
+}
+
 /* ---------------- dependency arrows ---------------- */
 
 /** Rounded finish-to-start elbow: short stub out of the predecessor, vertical
@@ -413,16 +525,17 @@ function GanttBar({
   if (bar.kind === "continuous") {
     return (
       <div
-        className={`tg-bar tg-continuous${editMode ? " tg-editing" : ""}`}
+        className={`tg-bar tg-continuous${editMode ? " tg-editing" : ""}${bar.assignment.__pending ? " tg-bar-pending" : ""}`}
         style={{ gridColumn: `${bar.colStart + 2} / ${bar.colEnd + 2}`, gridRow, background: `${color}2e` }}
       >
         <span className="tg-bar-label">{bar.assignment.project || "Untitled"} · continuous</span>
+        {bar.assignment.__pending && <span className="tg-pending-badge" title="Unsaved change">unsaved</span>}
         {editMode && (
           <AssignmentEditor
             a={bar.assignment}
             hidePercentEst
             onChange={(patch) => onUpdate(bar.assignment.id, patch)}
-            onDelete={() => onDelete(bar.assignment.id, bar.assignment.project)}
+            onDelete={() => onDelete(bar.assignment.id)}
           />
         )}
       </div>
@@ -435,15 +548,16 @@ function GanttBar({
     return (
       <div
         ref={setBarRef(bar.assignment.id)}
-        className={`tg-bar tg-done${editMode ? " tg-editing" : ""}`}
+        className={`tg-bar tg-done${editMode ? " tg-editing" : ""}${bar.assignment.__pending ? " tg-bar-pending" : ""}`}
         style={{ gridColumn: `${bar.colStart + 2} / ${bar.colEnd + 2}`, gridRow, background: `${color}73` }}
       >
         <span className="tg-bar-label">✓ {bar.assignment.project || "Untitled"} · done</span>
+        {bar.assignment.__pending && <span className="tg-pending-badge" title="Unsaved change">unsaved</span>}
         {editMode && (
           <AssignmentEditor
             a={bar.assignment}
             onChange={(patch) => onUpdate(bar.assignment.id, patch)}
-            onDelete={() => onDelete(bar.assignment.id, bar.assignment.project)}
+            onDelete={() => onDelete(bar.assignment.id)}
           />
         )}
       </div>
@@ -468,9 +582,10 @@ function GanttBar({
     <div
       ref={setBarRef(bar.assignment.id)}
       className={
-        isQueued
+        (isQueued
           ? `tg-bar tg-queued${editMode ? " tg-editing tg-draggable" : ""}${drag ? " tg-dragging" : ""}`
           : `tg-bar tg-active${bar.overdue ? " tg-overdue" : ""}${editMode ? " tg-editing tg-draggable" : ""}${drag ? " tg-dragging" : ""}`
+        ) + (bar.assignment.__pending ? " tg-bar-pending" : "")
       }
       style={{
         gridColumn: `${cols.colStart + 2} / ${cols.colEnd + 2}`,
@@ -500,6 +615,7 @@ function GanttBar({
             : `${bar.assignment.project || "Untitled"} · day ${bar.dayX} of ~${bar.estY} · ${bar.assignment.percent}%`}
       </span>
       {!isQueued && bar.overdue && <span className="tg-overdue-tag">overdue</span>}
+      {bar.assignment.__pending && <span className="tg-pending-badge" title="Unsaved change">unsaved</span>}
       {warn && (
         <span className="tg-dep-warn" title={`Starts before "${warn.predProject}" ends`}>⚠</span>
       )}
@@ -513,7 +629,7 @@ function GanttBar({
         <AssignmentEditor
           a={bar.assignment}
           onChange={(patch) => onUpdate(bar.assignment.id, patch)}
-          onDelete={() => onDelete(bar.assignment.id, bar.assignment.project)}
+          onDelete={() => onDelete(bar.assignment.id)}
           predecessorLabel={predLabel}
           onStartLink={() => setLinkingFor(bar.assignment.id)}
           linking={linkingFor === bar.assignment.id}
@@ -566,6 +682,15 @@ export default function TeamGantt() {
   const [confirmDeleteId, setConfirmDeleteId] = useState(null); // backlog item.id awaiting delete confirm
   const autoScrollRef = useRef(null); // { speed, rafId } while a drag is near a viewport edge
 
+  // Draft layer: nothing in edit mode writes to the backend until Save. Every
+  // action pushes onto changeQueue; computeDraftState (below) replays it on
+  // top of the last-fetched data/backlog to produce what's rendered.
+  const [changeQueue, setChangeQueue] = useState([]);
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState(null);
+  const tempCounterRef = useRef(0);
+  const nextTempId = () => `tmp-${++tempCounterRef.current}`;
+
   const today = useMemo(() => {
     const t = new Date();
     t.setHours(0, 0, 0, 0);
@@ -612,42 +737,31 @@ export default function TeamGantt() {
     if (p) setEditMode(true);
   };
 
-  async function updateAssignment(id, patch) {
-    const p = ensurePassword();
-    if (!p) return;
-    try {
-      await api.put(`/gantt/${id}`, patch, p);
-      setPwError("");
-      await load();
-    } catch (err) {
-      setPwError(err.message || "Update failed — check the admin password");
-    }
+  // Every editing action below stages a change instead of writing to the
+  // backend — nothing is sent until Save (see saveChanges). editMode itself
+  // is already password-gated at entry (enableEdit), so these no longer need
+  // to re-check the password per action.
+  function pushChange(change) {
+    setChangeQueue((q) => [...q, change]);
   }
-  async function deleteAssignment(id, project) {
-    const p = ensurePassword();
-    if (!p) return;
-    if (!confirm(`Delete "${project}"?`)) return;
-    try {
-      await api.del(`/gantt/${id}`, p);
-      setPwError("");
-      await load();
-    } catch (err) {
-      setPwError(err.message || "Delete failed — check the admin password");
-    }
+
+  function updateAssignment(id, patch) {
+    pushChange({ type: "gantt_update", id, fields: patch });
   }
-  async function addAssignment(engineerId) {
-    const p = ensurePassword();
-    if (!p) return;
-    try {
-      await api.post("/gantt", {
+  function deleteAssignment(id) {
+    // No confirm() here — the deletion is only staged; Undo/Discard cover it
+    // until Save actually commits anything.
+    pushChange({ type: "gantt_delete", id });
+  }
+  function addAssignment(engineerId) {
+    pushChange({
+      type: "gantt_create",
+      tempId: nextTempId(),
+      fields: {
         engineer_id: engineerId, project: "New project",
         start_date: toISODate(today), est_days: 10, percent: 0, status: "active",
-      }, p);
-      setPwError("");
-      await load();
-    } catch (err) {
-      setPwError(err.message || "Create failed — check the admin password");
-    }
+      },
+    });
   }
   async function syncFromReports() {
     const p = ensurePassword();
@@ -678,7 +792,13 @@ export default function TeamGantt() {
   /* ---------------- backlog: sheet sync, reorder + drag-to-assign ---------------- */
 
   // No password — a viewer can always refresh from the already-configured URL.
+  // Blocked while there are unsaved changes: a sync can add/update backlog
+  // rows the draft doesn't know about, which would conflict with it.
   async function syncBacklog() {
+    if (changeQueue.length > 0) {
+      setBacklogError("сохраните или отмените изменения");
+      return;
+    }
     setBacklogSyncing(true);
     try {
       const res = await api.post("/backlog/sync");
@@ -709,19 +829,60 @@ export default function TeamGantt() {
     }
   }
 
-  async function createBacklogItem() {
+  function createBacklogItem() {
     const title = newItemTitle.trim();
     if (!title) return;
+    pushChange({ type: "backlog_create", tempId: nextTempId(), fields: { title, priority: newItemPriority } });
+    setNewItemTitle("");
+    setAddingItem(false);
+  }
+
+  /* ---------------- draft queue: undo / discard / save ---------------- */
+
+  function undoChange() {
+    setChangeQueue((q) => q.slice(0, -1));
+  }
+
+  function discardChanges() {
+    if (changeQueue.length === 0) return;
+    if (!confirm("Отменить все несохранённые изменения?")) return;
+    setChangeQueue([]);
+    setSaveError(null);
+  }
+
+  function parseApplyChangesError(rawMessage) {
+    try {
+      const parsed = JSON.parse(rawMessage);
+      const detail = parsed.detail;
+      if (detail && typeof detail === "object" && "failed_index" in detail) {
+        return `Изменение #${detail.failed_index + 1} не применено: ${detail.error}`;
+      }
+      if (typeof detail === "string") return detail;
+    } catch {
+      // rawMessage wasn't JSON — fall through to the raw text below
+    }
+    return rawMessage || "Save failed";
+  }
+
+  async function saveChanges() {
+    if (changeQueue.length === 0) return;
     const p = ensurePassword();
     if (!p) return;
+    setSaving(true);
     try {
-      await api.post("/backlog", { title, priority: newItemPriority }, p);
-      setBacklogError("");
-      setNewItemTitle("");
-      setAddingItem(false);
+      const res = await api.post("/gantt/apply-changes", { changes: changeQueue }, p);
+      setSaveError(null);
+      setPwError("");
+      const count = changeQueue.length;
+      setChangeQueue([]);
+      setBacklogToast(`Сохранено: ${res.applied ?? count} изменений`);
+      setTimeout(() => setBacklogToast(""), 5000);
       await load();
     } catch (err) {
-      setBacklogError(err.message || "Add failed — check the admin password");
+      // Queue stays intact on failure — nothing here was committed.
+      setSaveError(parseApplyChangesError(err.message));
+    } finally {
+      setSaving(false);
     }
   }
 
@@ -771,17 +932,8 @@ export default function TeamGantt() {
     stopAutoScroll();
   }
 
-  async function reorderBacklog(newOrder, previous) {
-    setBacklog(newOrder);
-    const p = ensurePassword();
-    if (!p) { setBacklog(previous); return; }
-    try {
-      await api.post("/backlog/reorder", { ordered_ids: newOrder.map((b) => b.id) }, p);
-      setBacklogError("");
-    } catch (err) {
-      setBacklog(previous);
-      setBacklogError(err.message || "Reorder failed — check the admin password");
-    }
+  function reorderBacklog(newOrder) {
+    pushChange({ type: "backlog_reorder", orderedIds: newOrder.map((b) => b.id) });
   }
 
   function handleBacklogRowDragStart(e, itemId) {
@@ -809,50 +961,32 @@ export default function TeamGantt() {
     const pos = backlogOverRow?.pos || "above";
     clearBacklogDrag();
     if (draggingId == null || draggingId === targetId) return;
-    const previous = backlog;
-    const next = [...backlog];
+    const next = [...draft.backlogItems];
     const fromIdx = next.findIndex((b) => b.id === draggingId);
     if (fromIdx === -1) return;
     const [moved] = next.splice(fromIdx, 1);
     let toIdx = next.findIndex((b) => b.id === targetId);
     if (pos === "below") toIdx += 1;
     next.splice(toIdx, 0, moved);
-    reorderBacklog(next, previous);
+    reorderBacklog(next);
   }
 
-  async function assignBacklogItem(itemId, engineerId, startDateIso) {
-    const p = ensurePassword();
-    if (!p) return;
-    const previous = backlog;
-    setBacklog((cur) => cur.filter((b) => b.id !== itemId));
-    try {
-      const res = await api.post(`/backlog/${itemId}/assign`, { engineer_id: engineerId, start_date: startDateIso }, p);
-      setBacklogError("");
-      const name = (data.engineers || []).find((e) => e.id === engineerId)?.name || "engineer";
-      setBacklogToast(res.status === "queued" ? `В очередь: ${name}` : `Назначено: ${name}`);
-      setTimeout(() => setBacklogToast(""), 5000);
-      await load();
-    } catch (err) {
-      setBacklog(previous);
-      setBacklogError(err.message || "Assign failed — check the admin password");
-    }
+  function assignBacklogItem(itemId, engineerId, startDateIso) {
+    const tempId = nextTempId();
+    // Preview the same active-vs-queued heuristic the backend will apply at
+    // Save time, so the toast matches what the pending bar shows right away.
+    const eng = draft.engineers.find((e) => e.id === engineerId);
+    const hasActive = eng ? eng.assignments.some((a) => a.status === "active") : false;
+    const name = eng?.name || "engineer";
+    pushChange({ type: "backlog_assign", tempId, backlogId: itemId, engineerId, startDate: startDateIso });
+    setBacklogToast(hasActive ? `В очередь: ${name}` : `Назначено: ${name}`);
+    setTimeout(() => setBacklogToast(""), 5000);
   }
-
-  async function deleteBacklogItem(itemId) {
-    const p = ensurePassword();
-    if (!p) return;
-    const previous = backlog;
-    setBacklog((cur) => cur.filter((b) => b.id !== itemId));
+  function deleteBacklogItem(itemId) {
+    pushChange({ type: "backlog_delete", id: itemId });
     setConfirmDeleteId(null);
-    try {
-      await api.del(`/backlog/${itemId}`, p);
-      setBacklogError("");
-      setBacklogToast("Удалено (не вернётся при синке)");
-      setTimeout(() => setBacklogToast(""), 5000);
-    } catch (err) {
-      setBacklog(previous);
-      setBacklogError(err.message || "Delete failed — check the admin password");
-    }
+    setBacklogToast("Удалено (не вернётся при синке)");
+    setTimeout(() => setBacklogToast(""), 5000);
   }
 
   function handleLaneDrop(e, engineerId) {
@@ -926,13 +1060,22 @@ export default function TeamGantt() {
       setDragVisual(null);
     }
     function onKeyDown(e) {
-      if (e.key !== "Escape") return;
-      if (dragRef.current) {
-        dragRef.current = null;
-        setDragVisual(null);
-        document.body.style.userSelect = "";
+      if (e.key === "Escape") {
+        if (dragRef.current) {
+          dragRef.current = null;
+          setDragVisual(null);
+          document.body.style.userSelect = "";
+        }
+        setLinkingFor(null);
+        return;
       }
-      setLinkingFor(null);
+      if (editMode && (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z") {
+        // Don't hijack native undo while the user is editing text somewhere.
+        const tag = document.activeElement?.tagName;
+        if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+        e.preventDefault();
+        undoChange();
+      }
     }
     window.addEventListener("mousemove", onMouseMove);
     window.addEventListener("mouseup", onMouseUp);
@@ -943,14 +1086,33 @@ export default function TeamGantt() {
       window.removeEventListener("keydown", onKeyDown);
       stopAutoScroll();
     };
-  }, []);
+  }, [editMode]);
+
+  // Warn before leaving the page with unsaved draft changes.
+  useEffect(() => {
+    function handler(e) {
+      if (changeQueue.length > 0) {
+        e.preventDefault();
+        e.returnValue = "";
+      }
+    }
+    window.addEventListener("beforeunload", handler);
+    return () => window.removeEventListener("beforeunload", handler);
+  }, [changeQueue.length]);
+
+  // The rendered view = last-fetched base data with changeQueue replayed on
+  // top. In view mode changeQueue is always empty, so draft === base exactly.
+  const draft = useMemo(
+    () => computeDraftState(data.engineers, backlog, changeQueue),
+    [data.engineers, backlog, changeQueue]
+  );
 
   const sortedEngineers = useMemo(() => {
-    return [...(data.engineers || [])].sort((a, b) => {
+    return [...(draft.engineers || [])].sort((a, b) => {
       const diff = (aiMap[b.id] || 0) - (aiMap[a.id] || 0);
       return diff !== 0 ? diff : a.name.localeCompare(b.name);
     });
-  }, [data.engineers, aiMap]);
+  }, [draft.engineers, aiMap]);
 
   // Viewers never see hidden lanes; edit mode shows everything so the admin
   // keeps full context while managing visibility.
@@ -964,6 +1126,8 @@ export default function TeamGantt() {
     [boardEngineers, rangeStart, today]
   );
 
+  // Reflects the last SAVED state, not the draft — a purely-local pending
+  // change has no updated_at from the server yet.
   const lastUpdated = useMemo(() => {
     let max = null;
     for (const e of data.engineers || [])
@@ -974,10 +1138,10 @@ export default function TeamGantt() {
 
   const assignmentsById = useMemo(() => {
     const m = {};
-    for (const e of data.engineers || [])
+    for (const e of draft.engineers || [])
       for (const a of e.assignments || []) m[a.id] = a;
     return m;
-  }, [data.engineers]);
+  }, [draft.engineers]);
 
   // Undirected adjacency over depends_on links, used to find the full connected
   // chain to highlight when hovering any bar in it.
@@ -1062,11 +1226,37 @@ export default function TeamGantt() {
           {editMode && (
             <button className="tg-btn" onClick={() => setManageOpen(true)}>👥 Manage engineers</button>
           )}
+          {editMode && (
+            <>
+              <button
+                className="tg-btn"
+                onClick={undoChange}
+                disabled={changeQueue.length === 0}
+                title="Undo last change (Ctrl+Z)"
+              >↶ Undo</button>
+              <button
+                className="tg-btn tg-btn-discard"
+                onClick={discardChanges}
+                disabled={changeQueue.length === 0}
+              >Отменить всё</button>
+              <button
+                className={`tg-btn tg-btn-save${changeQueue.length > 0 ? " on" : ""}`}
+                onClick={saveChanges}
+                disabled={changeQueue.length === 0 || saving}
+              >
+                {saving ? "Saving…" : `Save (${changeQueue.length})`}
+              </button>
+            </>
+          )}
           <button
             className={`tg-btn${editMode ? " on" : ""}`}
             onClick={() => {
-              if (editMode) { setEditMode(false); setManageOpen(false); setPendingHideId(null); setLinkingFor(null) }
-              else enableEdit();
+              if (editMode) {
+                if (changeQueue.length > 0 && !confirm("Есть несохранённые изменения. Выйти без сохранения?")) return;
+                setChangeQueue([]);
+                setSaveError(null);
+                setEditMode(false); setManageOpen(false); setPendingHideId(null); setLinkingFor(null);
+              } else enableEdit();
             }}
           >
             {editMode ? "✓ Editing" : "✎ Edit mode"}
@@ -1079,6 +1269,7 @@ export default function TeamGantt() {
 
       {syncMsg && <div className="tg-toast">{syncMsg}</div>}
       {(error || pwError) && <div className="card tg-error">{error || pwError}</div>}
+      {saveError && <div className="card tg-error">{saveError}</div>}
 
       <div className="tg-legend">
         <span><i className="sw solid" /> active (fill = % done)</span>
@@ -1108,7 +1299,7 @@ export default function TeamGantt() {
               >✕</button>
             </div>
             <div className="tg-modal-list">
-              {(data.engineers || []).map((eng) => {
+              {(draft.engineers || []).map((eng) => {
                 const activeOrQueuedCount = (eng.assignments || [])
                   .filter((a) => a.status === "active" || a.status === "queued").length;
                 const pending = pendingHideId === eng.id;
@@ -1264,11 +1455,16 @@ export default function TeamGantt() {
       <div className="bl-section">
         <div className="bl-head-row">
           <h2 className="bl-title">Backlog</h2>
-          <span className="bl-count">{backlog.length} item{backlog.length === 1 ? "" : "s"}</span>
+          <span className="bl-count">{draft.backlogItems.length} item{draft.backlogItems.length === 1 ? "" : "s"}</span>
           {editMode && (
             <button className="tg-btn" onClick={() => setAddingItem((v) => !v)}>+ item</button>
           )}
-          <button className="tg-btn" onClick={syncBacklog} disabled={backlogSyncing}>
+          <button
+            className="tg-btn"
+            onClick={syncBacklog}
+            disabled={backlogSyncing || changeQueue.length > 0}
+            title={changeQueue.length > 0 ? "сохраните или отмените изменения" : undefined}
+          >
             {backlogSyncing ? "⟳ Syncing…" : "⟳ Sync from Sheet"}
           </button>
         </div>
@@ -1359,16 +1555,16 @@ export default function TeamGantt() {
                   </td>
                 </tr>
               )}
-              {backlog.length === 0 && !addingItem && (
+              {draft.backlogItems.length === 0 && !addingItem && (
                 <tr><td className="bl-empty" colSpan={editMode ? 11 : 9}>Backlog is empty</td></tr>
               )}
-              {backlog.map((item, idx) => (
+              {draft.backlogItems.map((item, idx) => (
                 <tr
                   key={item.id}
                   draggable={editMode}
                   className={`bl-row${backlogDragId === item.id ? " bl-row-dragging" : ""}${
                     backlogOverRow?.id === item.id ? ` bl-row-drop-${backlogOverRow.pos}` : ""
-                  }`}
+                  }${item.__pending ? " bl-row-pending" : ""}`}
                   onDragStart={(e) => handleBacklogRowDragStart(e, item.id)}
                   onDragOver={(e) => handleBacklogRowDragOver(e, item.id)}
                   onDrop={(e) => handleBacklogRowDrop(e, item.id)}
@@ -1376,7 +1572,10 @@ export default function TeamGantt() {
                 >
                   <td className="bl-td-grip">{editMode && <span className="bl-grip">⠿</span>}</td>
                   <td className="bl-td-num">{idx + 1}</td>
-                  <td className="bl-td-title">{item.title}</td>
+                  <td className="bl-td-title">
+                    {item.title}
+                    {item.__pending && <span className="tg-pending-badge bl-pending-badge" title="Unsaved change">unsaved</span>}
+                  </td>
                   <td className="bl-td-result">
                     <span className="bl-clamp" title={item.description}>{item.description}</span>
                   </td>
@@ -1447,6 +1646,9 @@ function Style() {
       .tg-controls{display:flex;align-items:center;gap:8px}
       .tg-btn{padding:7px 14px;border-radius:8px;border:1px solid var(--border);background:var(--card);color:var(--text);font-size:12.5px;font-weight:600;cursor:pointer;font-family:inherit}
       .tg-btn.on{background:var(--accent1);color:#06091a;border-color:var(--accent1)}
+      .tg-btn:disabled{opacity:.4;cursor:not-allowed}
+      .tg-btn-save.on{background:var(--success);border-color:var(--success);color:#06091a}
+      .tg-btn-discard:not(:disabled){color:var(--danger);border-color:var(--danger)}
       .tg-icon-btn{width:32px;height:32px;border-radius:8px;border:1px solid var(--border);background:var(--card);color:var(--muted);cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:15px}
       .tg-toast{margin-top:12px;padding:8px 14px;border-radius:8px;background:rgba(34,197,94,.12);color:var(--success);font-size:12.5px;font-weight:600}
       .tg-toast-link{background:rgba(0,207,255,.12);color:var(--accent1)}
@@ -1515,6 +1717,8 @@ function Style() {
       .tg-queued .tg-bar-label{color:inherit}
       .tg-bar-error{background:rgba(245,158,11,.12);border:1.5px solid var(--warning);color:var(--warning);cursor:help;max-width:220px}
       .tg-bar-error .tg-bar-label{color:var(--warning)}
+      .tg-bar-pending{outline:2px dashed var(--accent1);outline-offset:1px}
+      .tg-pending-badge{position:relative;z-index:1;margin-left:8px;font-size:9px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;background:var(--accent1);color:#06091a;border-radius:8px;padding:1px 6px;white-space:nowrap}
 
       .tg-editor{position:relative;z-index:10;display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-top:6px}
       .tg-editor input,.tg-editor button{position:relative;z-index:10}
@@ -1570,6 +1774,8 @@ function Style() {
       .bl-row[draggable="true"]{cursor:grab}
       .bl-row[draggable="true"]:active{cursor:grabbing}
       .bl-row-dragging{opacity:.4}
+      .bl-row-pending{box-shadow:inset 3px 0 0 var(--accent1)}
+      .bl-pending-badge{margin-left:8px}
       .bl-row-drop-above{box-shadow:inset 0 2px 0 var(--accent1)}
       .bl-row-drop-below{box-shadow:inset 0 -2px 0 var(--accent1)}
       .bl-row-add td{background:rgba(0,207,255,.05)}
