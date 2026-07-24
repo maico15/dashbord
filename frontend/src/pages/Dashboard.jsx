@@ -335,14 +335,9 @@ export default function Dashboard() {
             </button>
           ))}
           {activeDept === IT_DEPT_ID && (
-            <>
-              <Link to="/tasks" className="tab-btn" style={{ textDecoration: 'none', display: 'inline-flex', alignItems: 'center' }}>
-                🗂️ Task Board
-              </Link>
-              <Link to="/roadmap" className="tab-btn" style={{ textDecoration: 'none', display: 'inline-flex', alignItems: 'center' }}>
-                🗺️ Roadmap
-              </Link>
-            </>
+            <Link to="/team-gantt" className="tab-btn" style={{ textDecoration: 'none', display: 'inline-flex', alignItems: 'center' }}>
+              📅 Gantt
+            </Link>
           )}
         </div>
 
@@ -373,9 +368,6 @@ export default function Dashboard() {
           </Link>
           <Link to="/monthly-review" className="dashboard-footer-link">
             📈 Monthly Review (Live)
-          </Link>
-          <Link to="/team-gantt" className="dashboard-footer-link">
-            📅 Team Gantt
           </Link>
           <Link to="/tasks" className="dashboard-footer-link">
             📋 Task Board
