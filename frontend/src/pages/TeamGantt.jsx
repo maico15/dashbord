@@ -113,13 +113,35 @@ function buildEngineerBars(assignments, rangeStart, today) {
   const continuousAssignments = assignments.filter((a) => a.status === "continuous");
   const activeAssignments = assignments.filter((a) => a.status === "active");
   const queuedAssignments = assignments.filter((a) => a.status === "queued");
+  const doneAssignments = assignments.filter((a) => a.status === "done");
   const otherAssignments = assignments.filter(
-    (a) => !["continuous", "active", "queued"].includes(a.status)
+    (a) => !["continuous", "active", "queued", "done"].includes(a.status)
   );
+  // "done" never counts as an engineer's active load — only a real 'active' row
+  // blocks a new assignment from landing as active (see assign_backlog_item).
   const fallbackQueueAnchor = latestActiveEnd(activeAssignments);
 
   for (const a of continuousAssignments) {
     bars.push({ kind: "continuous", assignment: a, colStart: 0, colEnd: DAY_COLS });
+  }
+
+  for (const a of doneAssignments) {
+    const start = parseISODate(a.start_date);
+    if (!start) {
+      bars.push({ kind: "error", assignment: a, reason: "Missing or invalid start date" });
+      continue;
+    }
+    const end = nthWorkingDay(start, a.est_days);
+    const rawStart = dateToCol(start, rangeStart);
+    const rawEnd = dateToCol(end, rangeStart) + 1;
+    bars.push({
+      kind: "done",
+      assignment: a,
+      colStart: Math.max(0, Math.min(DAY_COLS - 1, rawStart)),
+      colEnd: Math.max(1, Math.min(DAY_COLS, rawEnd)),
+      rawStart, rawEnd,
+      startDate: toISODate(start),
+    });
   }
 
   for (const a of activeAssignments) {
@@ -330,7 +352,7 @@ function AssignmentEditor({ a, hidePercentEst, onChange, onDelete, predecessorLa
         />
       )}
       <div className="tg-e-status">
-        {["active", "queued", "continuous"].map((s) => (
+        {["active", "queued", "continuous", "done"].map((s) => (
           <button key={s} className={s === a.status ? "on" : ""} onClick={() => onChange({ status: s })} title={s}>
             {s[0].toUpperCase()}
           </button>
@@ -399,6 +421,27 @@ function GanttBar({
           <AssignmentEditor
             a={bar.assignment}
             hidePercentEst
+            onChange={(patch) => onUpdate(bar.assignment.id, patch)}
+            onDelete={() => onDelete(bar.assignment.id, bar.assignment.project)}
+          />
+        )}
+      </div>
+    );
+  }
+
+  if (bar.kind === "done") {
+    // Same position/width a finished active task would have — never hidden,
+    // just visually de-emphasized (translucent fill + a leading checkmark).
+    return (
+      <div
+        ref={setBarRef(bar.assignment.id)}
+        className={`tg-bar tg-done${editMode ? " tg-editing" : ""}`}
+        style={{ gridColumn: `${bar.colStart + 2} / ${bar.colEnd + 2}`, gridRow, background: `${color}73` }}
+      >
+        <span className="tg-bar-label">✓ {bar.assignment.project || "Untitled"} · done</span>
+        {editMode && (
+          <AssignmentEditor
+            a={bar.assignment}
             onChange={(patch) => onUpdate(bar.assignment.id, patch)}
             onDelete={() => onDelete(bar.assignment.id, bar.assignment.project)}
           />
@@ -520,6 +563,8 @@ export default function TeamGantt() {
   const [addingItem, setAddingItem] = useState(false);
   const [newItemTitle, setNewItemTitle] = useState("");
   const [newItemPriority, setNewItemPriority] = useState("P2");
+  const [confirmDeleteId, setConfirmDeleteId] = useState(null); // backlog item.id awaiting delete confirm
+  const autoScrollRef = useRef(null); // { speed, rafId } while a drag is near a viewport edge
 
   const today = useMemo(() => {
     const t = new Date();
@@ -680,10 +725,50 @@ export default function TeamGantt() {
     }
   }
 
+  // Edge auto-scroll while dragging a backlog row — reorder targets further
+  // down the table, or a lane drop target scrolled out of view above, are
+  // otherwise unreachable since the page itself never scrolls on dragover.
+  const AUTOSCROLL_EDGE = 80;
+  const AUTOSCROLL_MAX_SPEED = 20;
+
+  function updateAutoScroll(clientY) {
+    const vh = window.innerHeight;
+    let speed = 0;
+    if (clientY < AUTOSCROLL_EDGE) {
+      speed = -Math.ceil(((AUTOSCROLL_EDGE - clientY) / AUTOSCROLL_EDGE) * AUTOSCROLL_MAX_SPEED);
+    } else if (clientY > vh - AUTOSCROLL_EDGE) {
+      speed = Math.ceil(((clientY - (vh - AUTOSCROLL_EDGE)) / AUTOSCROLL_EDGE) * AUTOSCROLL_MAX_SPEED);
+    }
+    if (speed === 0) {
+      stopAutoScroll();
+      return;
+    }
+    if (autoScrollRef.current) {
+      autoScrollRef.current.speed = speed;
+      return;
+    }
+    const state = { speed, rafId: null };
+    const tick = () => {
+      if (autoScrollRef.current !== state) return;
+      window.scrollBy(0, state.speed);
+      state.rafId = requestAnimationFrame(tick);
+    };
+    autoScrollRef.current = state;
+    state.rafId = requestAnimationFrame(tick);
+  }
+
+  function stopAutoScroll() {
+    if (autoScrollRef.current) {
+      cancelAnimationFrame(autoScrollRef.current.rafId);
+      autoScrollRef.current = null;
+    }
+  }
+
   function clearBacklogDrag() {
     setBacklogDragId(null);
     setBacklogOverRow(null);
     setBacklogOverEngineer(null);
+    stopAutoScroll();
   }
 
   async function reorderBacklog(newOrder, previous) {
@@ -710,6 +795,7 @@ export default function TeamGantt() {
     if (!editMode || backlogDragId == null) return;
     e.preventDefault();
     e.dataTransfer.dropEffect = "move";
+    updateAutoScroll(e.clientY);
     const rect = e.currentTarget.getBoundingClientRect();
     const pos = e.clientY - rect.top < rect.height / 2 ? "above" : "below";
     setBacklogOverRow((prev) => (prev && prev.id === itemId && prev.pos === pos ? prev : { id: itemId, pos }));
@@ -742,15 +828,30 @@ export default function TeamGantt() {
     try {
       const res = await api.post(`/backlog/${itemId}/assign`, { engineer_id: engineerId, start_date: startDateIso }, p);
       setBacklogError("");
-      if (res.status === "queued") {
-        const name = (data.engineers || []).find((e) => e.id === engineerId)?.name || "engineer";
-        setBacklogToast(`В очередь: ${name}`);
-        setTimeout(() => setBacklogToast(""), 5000);
-      }
+      const name = (data.engineers || []).find((e) => e.id === engineerId)?.name || "engineer";
+      setBacklogToast(res.status === "queued" ? `В очередь: ${name}` : `Назначено: ${name}`);
+      setTimeout(() => setBacklogToast(""), 5000);
       await load();
     } catch (err) {
       setBacklog(previous);
       setBacklogError(err.message || "Assign failed — check the admin password");
+    }
+  }
+
+  async function deleteBacklogItem(itemId) {
+    const p = ensurePassword();
+    if (!p) return;
+    const previous = backlog;
+    setBacklog((cur) => cur.filter((b) => b.id !== itemId));
+    setConfirmDeleteId(null);
+    try {
+      await api.del(`/backlog/${itemId}`, p);
+      setBacklogError("");
+      setBacklogToast("Удалено (не вернётся при синке)");
+      setTimeout(() => setBacklogToast(""), 5000);
+    } catch (err) {
+      setBacklog(previous);
+      setBacklogError(err.message || "Delete failed — check the admin password");
     }
   }
 
@@ -840,6 +941,7 @@ export default function TeamGantt() {
       window.removeEventListener("mousemove", onMouseMove);
       window.removeEventListener("mouseup", onMouseUp);
       window.removeEventListener("keydown", onKeyDown);
+      stopAutoScroll();
     };
   }, []);
 
@@ -983,6 +1085,7 @@ export default function TeamGantt() {
         <span><i className="sw dash" /> queued (next in line)</span>
         <span><i className="sw red" /> IDLE — no active project</span>
         <span><i className="sw amber" /> overdue</span>
+        <span><i className="sw done" /> ✓ done</span>
       </div>
 
       {linkingFor != null && (
@@ -1128,7 +1231,7 @@ export default function TeamGantt() {
                     className={`tg-lane-drop${backlogOverEngineer === e.id ? " tg-lane-drop-over" : ""}`}
                     style={{ gridColumn: `2 / ${DAY_COLS + 2}`, gridRow: laneRowSpan }}
                     onDragEnter={(ev) => { ev.preventDefault(); setBacklogOverEngineer(e.id) }}
-                    onDragOver={(ev) => { ev.preventDefault(); ev.dataTransfer.dropEffect = "move" }}
+                    onDragOver={(ev) => { ev.preventDefault(); ev.dataTransfer.dropEffect = "move"; updateAutoScroll(ev.clientY) }}
                     onDragLeave={() => setBacklogOverEngineer((cur) => (cur === e.id ? null : cur))}
                     onDrop={(ev) => handleLaneDrop(ev, e.id)}
                   />
@@ -1219,6 +1322,8 @@ export default function TeamGantt() {
                 <th>Статус / старт</th>
                 <th>База / источник</th>
                 <th>Ист.</th>
+                {editMode && <th className="bl-th-assign">Assign</th>}
+                {editMode && <th className="bl-th-del" />}
               </tr>
             </thead>
             <tbody>
@@ -1248,14 +1353,14 @@ export default function TeamGantt() {
                       ))}
                     </select>
                   </td>
-                  <td colSpan={3}>
+                  <td colSpan={5}>
                     <button className="bl-add-btn" onClick={createBacklogItem}>Add</button>
                     <button className="bl-add-btn" onClick={() => { setAddingItem(false); setNewItemTitle("") }}>Cancel</button>
                   </td>
                 </tr>
               )}
               {backlog.length === 0 && !addingItem && (
-                <tr><td className="bl-empty" colSpan={9}>Backlog is empty</td></tr>
+                <tr><td className="bl-empty" colSpan={editMode ? 11 : 9}>Backlog is empty</td></tr>
               )}
               {backlog.map((item, idx) => (
                 <tr
@@ -1280,6 +1385,40 @@ export default function TeamGantt() {
                   <td className="bl-td-status">{item.status}</td>
                   <td className="bl-td-source">{item.source}</td>
                   <td className="bl-ist">{item.origin}</td>
+                  {editMode && (
+                    <td className="bl-td-assign">
+                      <select
+                        className="bl-assign-select"
+                        value=""
+                        onChange={(e) => {
+                          const engId = e.target.value;
+                          if (engId) assignBacklogItem(item.id, Number(engId), toISODate(today));
+                        }}
+                      >
+                        <option value="">—</option>
+                        {(data.engineers || []).map((eng) => (
+                          <option key={eng.id} value={eng.id}>{eng.name}</option>
+                        ))}
+                      </select>
+                    </td>
+                  )}
+                  {editMode && (
+                    <td className="bl-td-del">
+                      {confirmDeleteId === item.id ? (
+                        <span className="bl-confirm-del">
+                          <span className="bl-confirm-text">точно удалить?</span>
+                          <button className="bl-del-btn warn" onClick={() => deleteBacklogItem(item.id)}>Да</button>
+                          <button className="bl-del-btn" onClick={() => setConfirmDeleteId(null)}>Нет</button>
+                        </span>
+                      ) : (
+                        <button
+                          className="bl-del-btn"
+                          title="Delete from backlog"
+                          onClick={() => setConfirmDeleteId(item.id)}
+                        >×</button>
+                      )}
+                    </td>
+                  )}
                 </tr>
               ))}
             </tbody>
@@ -1319,6 +1458,7 @@ function Style() {
       .tg-legend .sw.dash{border:1.5px dashed var(--muted)}
       .tg-legend .sw.red{border:1.5px dashed var(--danger)}
       .tg-legend .sw.amber{border:1.5px solid var(--warning)}
+      .tg-legend .sw.done{background:var(--success);opacity:.45}
 
       .tg-modal-backdrop{position:fixed;inset:0;background:rgba(6,9,26,.55);display:flex;align-items:flex-start;justify-content:center;padding:60px 20px;z-index:50}
       .tg-modal{width:100%;max-width:480px;max-height:70vh;display:flex;flex-direction:column;padding:0;overflow:hidden}
@@ -1367,6 +1507,8 @@ function Style() {
       .tg-dep-warn{position:relative;z-index:1;margin-left:6px;font-size:11px;color:var(--warning)}
       .tg-continuous{border:1px solid var(--border)}
       .tg-continuous .tg-bar-label{color:var(--text)}
+      .tg-done{border:1px solid var(--border)}
+      .tg-done .tg-bar-label{color:var(--text)}
       .tg-idle{background:rgba(239,68,68,.08);border:1.5px dashed var(--danger);color:var(--danger)}
       .tg-idle .tg-bar-label{color:var(--danger)}
       .tg-queued{background:transparent;border:1.5px dashed var(--muted)}
@@ -1441,6 +1583,14 @@ function Style() {
       .bl-chip-p2{background:rgba(120,120,140,.16);color:var(--muted)}
       .bl-chip-enabler{background:rgba(0,207,255,.14);color:var(--accent1)}
       .bl-chip-gated{background:rgba(120,120,140,.3);color:var(--text)}
+
+      .bl-th-assign,.bl-td-assign{width:130px}
+      .bl-assign-select{font-family:inherit;font-size:11.5px;border-radius:6px;border:1px solid var(--border);background:var(--card);color:var(--text);padding:3px 6px;width:100%}
+      .bl-th-del,.bl-td-del{width:24px}
+      .bl-del-btn{background:none;border:1px solid var(--border);border-radius:6px;color:var(--danger);font-size:12px;padding:2px 8px;cursor:pointer;font-family:inherit;line-height:1}
+      .bl-del-btn.warn{background:var(--danger);color:#fff;border-color:var(--danger)}
+      .bl-confirm-del{display:flex;align-items:center;gap:6px;white-space:nowrap}
+      .bl-confirm-text{font-size:10.5px;color:var(--warning)}
 
       @media(max-width:900px){
         .tg-wrap{padding:8px 12px 64px}

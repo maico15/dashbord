@@ -5507,7 +5507,7 @@ def delete_roadmap_task(task_id: int, password: str = ""):
 
 
 GANTT_FIELDS = {"project", "start_date", "est_days", "percent", "status", "queue_start", "note", "depends_on"}
-GANTT_STATUSES = {"active", "queued", "continuous"}
+GANTT_STATUSES = {"active", "queued", "continuous", "done"}
 
 
 class GanttAssignmentCreate(BaseModel):
@@ -5634,6 +5634,8 @@ def update_gantt_assignment(assignment_id: int, data: dict, password: str = ""):
         raise HTTPException(422, "Invalid status")
     if "percent" in fields:
         fields["percent"] = max(0, min(100, int(fields["percent"])))
+    if fields.get("status") == "done" and fields.get("percent", 0) < 100:
+        fields["percent"] = 100
 
     conn = get_db()
     c = conn.cursor()
