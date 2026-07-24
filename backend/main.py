@@ -5521,6 +5521,89 @@ class GanttAssignmentCreate(BaseModel):
     note: str = ""
 
 
+class ChangeError(Exception):
+    """Raised by _apply_* helpers; carries an HTTP status + message so both the
+    single-action endpoints and /api/gantt/apply-changes can translate it the
+    same way (HTTPException for the former, {failed_index, error} for the latter)."""
+
+    def __init__(self, status_code: int, message: str):
+        self.status_code = status_code
+        self.message = message
+        super().__init__(message)
+
+
+def _apply_gantt_create(conn, fields: dict) -> int:
+    engineer_id = fields.get("engineer_id")
+    project = fields.get("project")
+    start_date = fields.get("start_date")
+    if not engineer_id or not project or not start_date:
+        raise ChangeError(422, "gantt_create requires engineer_id, project, start_date")
+    status = fields.get("status") or "active"
+    if status not in GANTT_STATUSES:
+        raise ChangeError(422, "Invalid status")
+    percent = max(0, min(100, int(fields.get("percent") or 0)))
+    now = datetime.utcnow().isoformat()
+    cur = conn.execute(
+        "INSERT INTO gantt_assignments "
+        "(engineer_id, project, start_date, est_days, percent, status, queue_start, note, updated_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?)",
+        (engineer_id, project, start_date, fields.get("est_days") or 10,
+         percent, status, fields.get("queue_start"), fields.get("note") or "", now),
+    )
+    return cur.lastrowid
+
+
+def _apply_gantt_update(conn, assignment_id, fields: dict):
+    if assignment_id is None:
+        raise ChangeError(422, "Missing id")
+    fields = {k: v for k, v in (fields or {}).items() if k in GANTT_FIELDS}
+    if not fields:
+        raise ChangeError(422, "No valid fields")
+    if "status" in fields and fields["status"] not in GANTT_STATUSES:
+        raise ChangeError(422, "Invalid status")
+    if "percent" in fields:
+        fields["percent"] = max(0, min(100, int(fields["percent"])))
+    if fields.get("status") == "done" and fields.get("percent", 0) < 100:
+        fields["percent"] = 100
+
+    c = conn.cursor()
+
+    if "depends_on" in fields and fields["depends_on"] is not None:
+        predecessor_id = fields["depends_on"]
+        if predecessor_id == assignment_id:
+            raise ChangeError(422, "An assignment cannot depend on itself")
+        c.execute("SELECT id FROM gantt_assignments WHERE id=?", (predecessor_id,))
+        if not c.fetchone():
+            raise ChangeError(422, "Predecessor assignment not found")
+        # walk the chain from the proposed predecessor; if we ever reach assignment_id,
+        # linking it would create a cycle
+        seen = set()
+        cur_id = predecessor_id
+        depth = 0
+        while cur_id is not None and depth < 50:
+            if cur_id == assignment_id:
+                raise ChangeError(422, "That would create a circular dependency")
+            if cur_id in seen:
+                break
+            seen.add(cur_id)
+            c.execute("SELECT depends_on FROM gantt_assignments WHERE id=?", (cur_id,))
+            row = c.fetchone()
+            cur_id = row["depends_on"] if row else None
+            depth += 1
+
+    sets = ", ".join(f"{k}=?" for k in fields)
+    vals = list(fields.values()) + [datetime.utcnow().isoformat(), assignment_id]
+    cur = conn.execute(f"UPDATE gantt_assignments SET {sets}, updated_at=? WHERE id=?", vals)
+    if not cur.rowcount:
+        raise ChangeError(404, "Not found")
+
+
+def _apply_gantt_delete(conn, assignment_id):
+    if assignment_id is None:
+        raise ChangeError(422, "Missing id")
+    conn.execute("DELETE FROM gantt_assignments WHERE id=?", (assignment_id,))
+
+
 def _gantt_project_name(text: str) -> str:
     text = (text or "").strip()
     if not text:
@@ -5606,19 +5689,13 @@ def set_gantt_visibility(data: GanttVisibility, password: str = ""):
 def create_gantt_assignment(data: GanttAssignmentCreate, password: str = ""):
     if password != ADMIN_PASSWORD:
         raise HTTPException(403, "Unauthorized")
-    if data.status not in GANTT_STATUSES:
-        raise HTTPException(422, "Invalid status")
     conn = get_db()
-    now = datetime.utcnow().isoformat()
-    cur = conn.execute(
-        "INSERT INTO gantt_assignments "
-        "(engineer_id, project, start_date, est_days, percent, status, queue_start, note, updated_at) "
-        "VALUES (?,?,?,?,?,?,?,?,?)",
-        (data.engineer_id, data.project, data.start_date, data.est_days,
-         max(0, min(100, data.percent)), data.status, data.queue_start, data.note, now),
-    )
+    try:
+        aid = _apply_gantt_create(conn, data.dict())
+    except ChangeError as e:
+        conn.close()
+        raise HTTPException(e.status_code, e.message)
     conn.commit()
-    aid = cur.lastrowid
     conn.close()
     return {"ok": True, "id": aid}
 
@@ -5627,53 +5704,14 @@ def create_gantt_assignment(data: GanttAssignmentCreate, password: str = ""):
 def update_gantt_assignment(assignment_id: int, data: dict, password: str = ""):
     if password != ADMIN_PASSWORD:
         raise HTTPException(403, "Unauthorized")
-    fields = {k: v for k, v in data.items() if k in GANTT_FIELDS}
-    if not fields:
-        raise HTTPException(422, "No valid fields")
-    if "status" in fields and fields["status"] not in GANTT_STATUSES:
-        raise HTTPException(422, "Invalid status")
-    if "percent" in fields:
-        fields["percent"] = max(0, min(100, int(fields["percent"])))
-    if fields.get("status") == "done" and fields.get("percent", 0) < 100:
-        fields["percent"] = 100
-
     conn = get_db()
-    c = conn.cursor()
-
-    if "depends_on" in fields and fields["depends_on"] is not None:
-        predecessor_id = fields["depends_on"]
-        if predecessor_id == assignment_id:
-            conn.close()
-            raise HTTPException(422, "An assignment cannot depend on itself")
-        c.execute("SELECT id FROM gantt_assignments WHERE id=?", (predecessor_id,))
-        if not c.fetchone():
-            conn.close()
-            raise HTTPException(422, "Predecessor assignment not found")
-        # walk the chain from the proposed predecessor; if we ever reach assignment_id,
-        # linking it would create a cycle
-        seen = set()
-        cur_id = predecessor_id
-        depth = 0
-        while cur_id is not None and depth < 50:
-            if cur_id == assignment_id:
-                conn.close()
-                raise HTTPException(422, "That would create a circular dependency")
-            if cur_id in seen:
-                break
-            seen.add(cur_id)
-            c.execute("SELECT depends_on FROM gantt_assignments WHERE id=?", (cur_id,))
-            row = c.fetchone()
-            cur_id = row["depends_on"] if row else None
-            depth += 1
-
-    sets = ", ".join(f"{k}=?" for k in fields)
-    vals = list(fields.values()) + [datetime.utcnow().isoformat(), assignment_id]
-    cur = conn.execute(f"UPDATE gantt_assignments SET {sets}, updated_at=? WHERE id=?", vals)
+    try:
+        _apply_gantt_update(conn, assignment_id, data)
+    except ChangeError as e:
+        conn.close()
+        raise HTTPException(e.status_code, e.message)
     conn.commit()
-    updated = cur.rowcount
     conn.close()
-    if not updated:
-        raise HTTPException(404, "Not found")
     return {"ok": True}
 
 
@@ -5682,10 +5720,100 @@ def delete_gantt_assignment(assignment_id: int, password: str = ""):
     if password != ADMIN_PASSWORD:
         raise HTTPException(403, "Unauthorized")
     conn = get_db()
-    conn.execute("DELETE FROM gantt_assignments WHERE id=?", (assignment_id,))
+    try:
+        _apply_gantt_delete(conn, assignment_id)
+    except ChangeError as e:
+        conn.close()
+        raise HTTPException(e.status_code, e.message)
     conn.commit()
     conn.close()
     return {"ok": True}
+
+
+VALID_CHANGE_TYPES = {
+    "gantt_update", "gantt_create", "gantt_delete",
+    "backlog_update", "backlog_create", "backlog_delete",
+    "backlog_reorder", "backlog_assign",
+}
+
+
+def _resolve_id(value, id_map: dict):
+    """A change's id/orderedIds/backlogId/engineerId can reference a tempId
+    minted by an earlier gantt_create/backlog_create/backlog_assign change in
+    the SAME batch (e.g. create an item then immediately reorder it, all
+    before Save). Temp ids are always strings; real DB ids are always ints —
+    that's the only discrimination needed."""
+    if isinstance(value, str):
+        if value not in id_map:
+            raise ChangeError(422, f"Unresolved temporary id: {value}")
+        return id_map[value]
+    return value
+
+
+@app.post("/api/gantt/apply-changes")
+def apply_gantt_changes(data: dict, password: str = ""):
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    changes = data.get("changes")
+    if not isinstance(changes, list):
+        raise HTTPException(422, "changes must be a list")
+    # Validate every change's type up front — before touching the DB at all —
+    # so a single bad entry never leaves a partially-applied batch to roll back.
+    for i, ch in enumerate(changes):
+        if not isinstance(ch, dict) or ch.get("type") not in VALID_CHANGE_TYPES:
+            raise HTTPException(400, f"Unknown or missing change type at index {i}")
+
+    conn = get_db()
+    id_map: dict = {}
+    idx = -1
+    try:
+        for idx, ch in enumerate(changes):
+            t = ch["type"]
+            try:
+                if t == "gantt_update":
+                    fields = dict(ch.get("fields") or {})
+                    if fields.get("depends_on") is not None:
+                        fields["depends_on"] = _resolve_id(fields["depends_on"], id_map)
+                    _apply_gantt_update(conn, _resolve_id(ch.get("id"), id_map), fields)
+                elif t == "gantt_create":
+                    real_id = _apply_gantt_create(conn, ch.get("fields") or {})
+                    if ch.get("tempId") is not None:
+                        id_map[ch["tempId"]] = real_id
+                elif t == "gantt_delete":
+                    _apply_gantt_delete(conn, _resolve_id(ch.get("id"), id_map))
+                elif t == "backlog_update":
+                    _apply_backlog_update(conn, _resolve_id(ch.get("id"), id_map), ch.get("fields") or {})
+                elif t == "backlog_create":
+                    real_id = _apply_backlog_create(conn, ch.get("fields") or {})
+                    if ch.get("tempId") is not None:
+                        id_map[ch["tempId"]] = real_id
+                elif t == "backlog_delete":
+                    _apply_backlog_delete(conn, _resolve_id(ch.get("id"), id_map))
+                elif t == "backlog_reorder":
+                    ordered = [_resolve_id(x, id_map) for x in ch.get("orderedIds") or []]
+                    _apply_backlog_reorder(conn, ordered)
+                elif t == "backlog_assign":
+                    real_id, resolved_status = _apply_backlog_assign(
+                        conn,
+                        _resolve_id(ch.get("backlogId"), id_map),
+                        _resolve_id(ch.get("engineerId"), id_map),
+                        ch.get("startDate"),
+                        ch.get("status"),
+                    )
+                    if ch.get("tempId") is not None:
+                        id_map[ch["tempId"]] = real_id
+            except ChangeError:
+                raise
+            except (KeyError, TypeError, ValueError) as e:
+                raise ChangeError(422, f"Malformed change: {e}")
+    except ChangeError as e:
+        conn.rollback()
+        conn.close()
+        raise HTTPException(400, {"failed_index": idx, "error": e.message})
+
+    conn.commit()
+    conn.close()
+    return {"ok": True, "applied": len(changes), "idMap": id_map}
 
 
 @app.post("/api/gantt/sync-from-reports")
@@ -5773,6 +5901,107 @@ def _title_key(title: str) -> str:
     return re.sub(r"\s+", " ", (title or "").strip().lower())
 
 
+def _apply_backlog_create(conn, fields: dict) -> int:
+    title = (fields.get("title") or "").strip()
+    if not title:
+        raise ChangeError(422, "backlog_create requires a title")
+    priority = fields.get("priority") or "P2"
+    if priority not in BACKLOG_PRIORITIES:
+        raise ChangeError(422, "Invalid priority")
+    mx = conn.execute("SELECT COALESCE(MAX(sort_order),0)+1 FROM backlog_items").fetchone()[0]
+    now = datetime.utcnow().isoformat()
+    cur = conn.execute(
+        "INSERT INTO backlog_items "
+        "(title, description, owner, priority, est_days, roi, cost, ret, status, source, origin, sort_order, created_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (title, fields.get("description") or "", fields.get("owner") or "", priority,
+         fields.get("est_days") or 10, fields.get("roi") or "", fields.get("cost") or "",
+         fields.get("ret") or "", fields.get("status") or "", fields.get("source") or "",
+         fields.get("origin") or "", mx, now),
+    )
+    return cur.lastrowid
+
+
+def _apply_backlog_update(conn, item_id, fields: dict):
+    if item_id is None:
+        raise ChangeError(422, "Missing id")
+    fields = {k: v for k, v in (fields or {}).items() if k in BACKLOG_FIELDS}
+    if not fields:
+        raise ChangeError(422, "No valid fields")
+    if "priority" in fields and fields["priority"] not in BACKLOG_PRIORITIES:
+        raise ChangeError(422, "Invalid priority")
+    sets = ", ".join(f"{k}=?" for k in fields)
+    vals = list(fields.values()) + [item_id]
+    cur = conn.execute(f"UPDATE backlog_items SET {sets} WHERE id=?", vals)
+    if not cur.rowcount:
+        raise ChangeError(404, "Not found")
+
+
+def _apply_backlog_delete(conn, item_id):
+    if item_id is None:
+        raise ChangeError(422, "Missing id")
+    c = conn.cursor()
+    c.execute("SELECT title FROM backlog_items WHERE id=?", (item_id,))
+    row = c.fetchone()
+    conn.execute("DELETE FROM backlog_items WHERE id=?", (item_id,))
+    if row:
+        conn.execute(
+            "INSERT OR IGNORE INTO backlog_retired (title_key, retired_at) VALUES (?,?)",
+            (_title_key(row["title"]), datetime.utcnow().isoformat()),
+        )
+
+
+def _apply_backlog_reorder(conn, ordered_ids):
+    for idx, bid in enumerate(ordered_ids or []):
+        conn.execute("UPDATE backlog_items SET sort_order=? WHERE id=?", (idx, bid))
+
+
+def _apply_backlog_assign(conn, item_id, engineer_id, start_date=None, status=None):
+    if item_id is None or engineer_id is None:
+        raise ChangeError(422, "Missing backlogId or engineerId")
+    requested_status = status or "active"
+    if requested_status not in GANTT_STATUSES:
+        raise ChangeError(422, "Invalid status")
+
+    c = conn.cursor()
+    c.execute("SELECT * FROM backlog_items WHERE id=?", (item_id,))
+    item = c.fetchone()
+    if not item:
+        raise ChangeError(404, "Backlog item not found")
+
+    c.execute("SELECT id FROM team_members WHERE id=?", (engineer_id,))
+    if not c.fetchone():
+        raise ChangeError(422, "Invalid engineer_id")
+
+    today = datetime.utcnow().date().isoformat()
+    resolved_status = requested_status
+    queue_start = None
+    if resolved_status == "active":
+        c.execute(
+            "SELECT COUNT(*) AS n FROM gantt_assignments WHERE engineer_id=? AND status='active'",
+            (engineer_id,),
+        )
+        if c.fetchone()["n"] > 0:
+            resolved_status = "queued"
+            queue_start = today
+
+    sd = start_date or today
+    now = datetime.utcnow().isoformat()
+    cur = conn.execute(
+        "INSERT INTO gantt_assignments "
+        "(engineer_id, project, start_date, est_days, percent, status, queue_start, note, updated_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?)",
+        (engineer_id, item["title"], sd, item["est_days"], 0, resolved_status, queue_start, "", now),
+    )
+    assignment_id = cur.lastrowid
+    conn.execute("DELETE FROM backlog_items WHERE id=?", (item_id,))
+    conn.execute(
+        "INSERT OR IGNORE INTO backlog_retired (title_key, retired_at) VALUES (?,?)",
+        (_title_key(item["title"]), now),
+    )
+    return assignment_id, resolved_status
+
+
 def _get_config_value(conn, key):
     row = conn.execute("SELECT value FROM config WHERE key=?", (key,)).fetchone()
     return row["value"] if row else None
@@ -5794,20 +6023,13 @@ def get_backlog():
 def create_backlog_item(data: BacklogItem, password: str = ""):
     if password != ADMIN_PASSWORD:
         raise HTTPException(403, "Unauthorized")
-    if data.priority not in BACKLOG_PRIORITIES:
-        raise HTTPException(422, "Invalid priority")
     conn = get_db()
-    mx = conn.execute("SELECT COALESCE(MAX(sort_order),0)+1 FROM backlog_items").fetchone()[0]
-    now = datetime.utcnow().isoformat()
-    cur = conn.execute(
-        "INSERT INTO backlog_items "
-        "(title, description, owner, priority, est_days, roi, cost, ret, status, source, origin, sort_order, created_at) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        (data.title, data.description, data.owner, data.priority, data.est_days, data.roi,
-         data.cost, data.ret, data.status, data.source, data.origin, mx, now),
-    )
+    try:
+        bid = _apply_backlog_create(conn, data.dict())
+    except ChangeError as e:
+        conn.close()
+        raise HTTPException(e.status_code, e.message)
     conn.commit()
-    bid = cur.lastrowid
     conn.close()
     return {"ok": True, "id": bid}
 
@@ -5818,8 +6040,7 @@ def reorder_backlog(data: dict, password: str = ""):
         raise HTTPException(403, "Unauthorized")
     ordered_ids = data.get("ordered_ids", [])
     conn = get_db()
-    for idx, bid in enumerate(ordered_ids):
-        conn.execute("UPDATE backlog_items SET sort_order=? WHERE id=?", (idx, bid))
+    _apply_backlog_reorder(conn, ordered_ids)
     conn.commit()
     conn.close()
     return {"ok": True, "count": len(ordered_ids)}
@@ -5829,50 +6050,14 @@ def reorder_backlog(data: dict, password: str = ""):
 def assign_backlog_item(item_id: int, data: BacklogAssign, password: str = ""):
     if password != ADMIN_PASSWORD:
         raise HTTPException(403, "Unauthorized")
-    requested_status = data.status or "active"
-    if requested_status not in GANTT_STATUSES:
-        raise HTTPException(422, "Invalid status")
-
     conn = get_db()
-    c = conn.cursor()
-    c.execute("SELECT * FROM backlog_items WHERE id=?", (item_id,))
-    item = c.fetchone()
-    if not item:
-        conn.close()
-        raise HTTPException(404, "Backlog item not found")
-
-    c.execute("SELECT id FROM team_members WHERE id=?", (data.engineer_id,))
-    if not c.fetchone():
-        conn.close()
-        raise HTTPException(422, "Invalid engineer_id")
-
-    today = datetime.utcnow().date().isoformat()
-    resolved_status = requested_status
-    queue_start = None
-    if resolved_status == "active":
-        c.execute(
-            "SELECT COUNT(*) AS n FROM gantt_assignments WHERE engineer_id=? AND status='active'",
-            (data.engineer_id,),
+    try:
+        assignment_id, resolved_status = _apply_backlog_assign(
+            conn, item_id, data.engineer_id, data.start_date, data.status
         )
-        if c.fetchone()["n"] > 0:
-            resolved_status = "queued"
-            queue_start = today
-
-    start_date = data.start_date or today
-    now = datetime.utcnow().isoformat()
-    cur = conn.execute(
-        "INSERT INTO gantt_assignments "
-        "(engineer_id, project, start_date, est_days, percent, status, queue_start, note, updated_at) "
-        "VALUES (?,?,?,?,?,?,?,?,?)",
-        (data.engineer_id, item["title"], start_date, item["est_days"], 0,
-         resolved_status, queue_start, "", now),
-    )
-    assignment_id = cur.lastrowid
-    conn.execute("DELETE FROM backlog_items WHERE id=?", (item_id,))
-    conn.execute(
-        "INSERT OR IGNORE INTO backlog_retired (title_key, retired_at) VALUES (?,?)",
-        (_title_key(item["title"]), now),
-    )
+    except ChangeError as e:
+        conn.close()
+        raise HTTPException(e.status_code, e.message)
     conn.commit()
     conn.close()
     return {"ok": True, "assignment_id": assignment_id, "status": resolved_status}
@@ -5882,20 +6067,14 @@ def assign_backlog_item(item_id: int, data: BacklogAssign, password: str = ""):
 def update_backlog_item(item_id: int, data: dict, password: str = ""):
     if password != ADMIN_PASSWORD:
         raise HTTPException(403, "Unauthorized")
-    fields = {k: v for k, v in data.items() if k in BACKLOG_FIELDS}
-    if not fields:
-        raise HTTPException(422, "No valid fields")
-    if "priority" in fields and fields["priority"] not in BACKLOG_PRIORITIES:
-        raise HTTPException(422, "Invalid priority")
     conn = get_db()
-    sets = ", ".join(f"{k}=?" for k in fields)
-    vals = list(fields.values()) + [item_id]
-    cur = conn.execute(f"UPDATE backlog_items SET {sets} WHERE id=?", vals)
+    try:
+        _apply_backlog_update(conn, item_id, data)
+    except ChangeError as e:
+        conn.close()
+        raise HTTPException(e.status_code, e.message)
     conn.commit()
-    updated = cur.rowcount
     conn.close()
-    if not updated:
-        raise HTTPException(404, "Not found")
     return {"ok": True}
 
 
@@ -5904,15 +6083,11 @@ def delete_backlog_item(item_id: int, password: str = ""):
     if password != ADMIN_PASSWORD:
         raise HTTPException(403, "Unauthorized")
     conn = get_db()
-    c = conn.cursor()
-    c.execute("SELECT title FROM backlog_items WHERE id=?", (item_id,))
-    row = c.fetchone()
-    conn.execute("DELETE FROM backlog_items WHERE id=?", (item_id,))
-    if row:
-        conn.execute(
-            "INSERT OR IGNORE INTO backlog_retired (title_key, retired_at) VALUES (?,?)",
-            (_title_key(row["title"]), datetime.utcnow().isoformat()),
-        )
+    try:
+        _apply_backlog_delete(conn, item_id)
+    except ChangeError as e:
+        conn.close()
+        raise HTTPException(e.status_code, e.message)
     conn.commit()
     conn.close()
     return {"ok": True}
