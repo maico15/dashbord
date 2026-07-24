@@ -270,6 +270,23 @@ function dependencyWarning(assignment, assignmentsById, effectiveStartDate) {
   return null;
 }
 
+/* ---------------- backlog ---------------- */
+
+function priorityChipClass(priority) {
+  switch (priority) {
+    case "P0": return "bl-chip-p0";
+    case "P1": return "bl-chip-p1";
+    case "ENABLER": return "bl-chip-enabler";
+    case "GATED": return "bl-chip-gated";
+    default: return "bl-chip-p2";
+  }
+}
+
+function truncateUrl(url, max = 46) {
+  if (!url) return "";
+  return url.length > max ? `${url.slice(0, max - 1)}…` : url;
+}
+
 /* ---------------- inline edit controls ---------------- */
 
 function AssignmentEditor({ a, hidePercentEst, onChange, onDelete, predecessorLabel, onStartLink, linking, snapWarning, onSnap }) {
@@ -489,6 +506,21 @@ export default function TeamGantt() {
   const [hoveredId, setHoveredId] = useState(null);
   const [linkingFor, setLinkingFor] = useState(null); // assignmentId currently picking a predecessor
 
+  const [backlog, setBacklog] = useState([]);
+  const [backlogSheetUrl, setBacklogSheetUrl] = useState(null);
+  const [backlogLastSync, setBacklogLastSync] = useState(null);
+  const [backlogDragId, setBacklogDragId] = useState(null); // backlog item.id currently being dragged
+  const [backlogOverRow, setBacklogOverRow] = useState(null); // { id, pos: 'above'|'below' } — reorder insertion line
+  const [backlogOverEngineer, setBacklogOverEngineer] = useState(null); // engineer id under drag, for lane highlight
+  const [backlogToast, setBacklogToast] = useState("");
+  const [backlogError, setBacklogError] = useState("");
+  const [backlogSyncing, setBacklogSyncing] = useState(false);
+  const [editingSheetUrl, setEditingSheetUrl] = useState(false);
+  const [sheetUrlInput, setSheetUrlInput] = useState("");
+  const [addingItem, setAddingItem] = useState(false);
+  const [newItemTitle, setNewItemTitle] = useState("");
+  const [newItemPriority, setNewItemPriority] = useState("P2");
+
   const today = useMemo(() => {
     const t = new Date();
     t.setHours(0, 0, 0, 0);
@@ -501,14 +533,18 @@ export default function TeamGantt() {
 
   async function load() {
     try {
-      const [gantt, ai] = await Promise.all([
+      const [gantt, ai, bl] = await Promise.all([
         api.get("/gantt"),
         api.get("/ai-usage/weekly").catch(() => null),
+        api.get("/backlog").catch(() => null),
       ]);
       setData(gantt);
       const m = {};
       for (const e of ai?.engineers || []) m[e.id] = e.tokens_output || 0;
       setAiMap(m);
+      setBacklog(bl?.items || []);
+      setBacklogSheetUrl(bl?.sheet_url || null);
+      setBacklogLastSync(bl?.last_sync || null);
       setError(null);
     } catch (err) {
       setError(err.message || "Failed to load");
@@ -592,6 +628,141 @@ export default function TeamGantt() {
     } catch (err) {
       setPwError(err.message || "Visibility update failed — check the admin password");
     }
+  }
+
+  /* ---------------- backlog: sheet sync, reorder + drag-to-assign ---------------- */
+
+  // No password — a viewer can always refresh from the already-configured URL.
+  async function syncBacklog() {
+    setBacklogSyncing(true);
+    try {
+      const res = await api.post("/backlog/sync");
+      setBacklogError("");
+      setBacklogToast(
+        `Синк: +${res.added} новых, ${res.updated} обновлено, ${res.skipped_retired} уже в работе`
+      );
+      setTimeout(() => setBacklogToast(""), 6000);
+      await load();
+    } catch (err) {
+      setBacklogError(err.message || "Sync failed");
+    } finally {
+      setBacklogSyncing(false);
+    }
+  }
+
+  // Password-protected — changing the source is an admin action.
+  async function saveSheetUrl(url) {
+    const p = ensurePassword();
+    if (!p) return;
+    try {
+      await api.put("/config", { backlog_sheet_csv_url: url }, p);
+      setPwError("");
+      setEditingSheetUrl(false);
+      await load();
+    } catch (err) {
+      setPwError(err.message || "Failed to save CSV URL — check the admin password");
+    }
+  }
+
+  async function createBacklogItem() {
+    const title = newItemTitle.trim();
+    if (!title) return;
+    const p = ensurePassword();
+    if (!p) return;
+    try {
+      await api.post("/backlog", { title, priority: newItemPriority }, p);
+      setBacklogError("");
+      setNewItemTitle("");
+      setAddingItem(false);
+      await load();
+    } catch (err) {
+      setBacklogError(err.message || "Add failed — check the admin password");
+    }
+  }
+
+  function clearBacklogDrag() {
+    setBacklogDragId(null);
+    setBacklogOverRow(null);
+    setBacklogOverEngineer(null);
+  }
+
+  async function reorderBacklog(newOrder, previous) {
+    setBacklog(newOrder);
+    const p = ensurePassword();
+    if (!p) { setBacklog(previous); return; }
+    try {
+      await api.post("/backlog/reorder", { ordered_ids: newOrder.map((b) => b.id) }, p);
+      setBacklogError("");
+    } catch (err) {
+      setBacklog(previous);
+      setBacklogError(err.message || "Reorder failed — check the admin password");
+    }
+  }
+
+  function handleBacklogRowDragStart(e, itemId) {
+    if (!editMode) return;
+    e.dataTransfer.effectAllowed = "move";
+    e.dataTransfer.setData("text/plain", String(itemId));
+    setBacklogDragId(itemId);
+  }
+
+  function handleBacklogRowDragOver(e, itemId) {
+    if (!editMode || backlogDragId == null) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+    const rect = e.currentTarget.getBoundingClientRect();
+    const pos = e.clientY - rect.top < rect.height / 2 ? "above" : "below";
+    setBacklogOverRow((prev) => (prev && prev.id === itemId && prev.pos === pos ? prev : { id: itemId, pos }));
+  }
+
+  function handleBacklogRowDrop(e, targetId) {
+    if (!editMode) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const draggingId = backlogDragId;
+    const pos = backlogOverRow?.pos || "above";
+    clearBacklogDrag();
+    if (draggingId == null || draggingId === targetId) return;
+    const previous = backlog;
+    const next = [...backlog];
+    const fromIdx = next.findIndex((b) => b.id === draggingId);
+    if (fromIdx === -1) return;
+    const [moved] = next.splice(fromIdx, 1);
+    let toIdx = next.findIndex((b) => b.id === targetId);
+    if (pos === "below") toIdx += 1;
+    next.splice(toIdx, 0, moved);
+    reorderBacklog(next, previous);
+  }
+
+  async function assignBacklogItem(itemId, engineerId, startDateIso) {
+    const p = ensurePassword();
+    if (!p) return;
+    const previous = backlog;
+    setBacklog((cur) => cur.filter((b) => b.id !== itemId));
+    try {
+      const res = await api.post(`/backlog/${itemId}/assign`, { engineer_id: engineerId, start_date: startDateIso }, p);
+      setBacklogError("");
+      if (res.status === "queued") {
+        const name = (data.engineers || []).find((e) => e.id === engineerId)?.name || "engineer";
+        setBacklogToast(`В очередь: ${name}`);
+        setTimeout(() => setBacklogToast(""), 5000);
+      }
+      await load();
+    } catch (err) {
+      setBacklog(previous);
+      setBacklogError(err.message || "Assign failed — check the admin password");
+    }
+  }
+
+  function handleLaneDrop(e, engineerId) {
+    e.preventDefault();
+    const draggingId = backlogDragId;
+    clearBacklogDrag();
+    if (draggingId == null) return;
+    const rect = e.currentTarget.getBoundingClientRect();
+    const col = Math.max(0, Math.min(DAY_COLS - 1, Math.floor(((e.clientX - rect.left) / rect.width) * DAY_COLS)));
+    const dropDate = toISODate(colToDate(col, rangeStart));
+    assignBacklogItem(draggingId, engineerId, dropDate || toISODate(today));
   }
 
   /* ---------------- drag / resize (edit mode only) ---------------- */
@@ -952,6 +1123,17 @@ export default function TeamGantt() {
                   )}
                 </div>
 
+                {editMode && backlogDragId != null && (
+                  <div
+                    className={`tg-lane-drop${backlogOverEngineer === e.id ? " tg-lane-drop-over" : ""}`}
+                    style={{ gridColumn: `2 / ${DAY_COLS + 2}`, gridRow: laneRowSpan }}
+                    onDragEnter={(ev) => { ev.preventDefault(); setBacklogOverEngineer(e.id) }}
+                    onDragOver={(ev) => { ev.preventDefault(); ev.dataTransfer.dropEffect = "move" }}
+                    onDragLeave={() => setBacklogOverEngineer((cur) => (cur === e.id ? null : cur))}
+                    onDrop={(ev) => handleLaneDrop(ev, e.id)}
+                  />
+                )}
+
                 {bars.map((bar) => (
                   <GanttBar
                     key={bar.assignment ? bar.assignment.id : "idle"}
@@ -973,6 +1155,135 @@ export default function TeamGantt() {
               </div>
             );
           })}
+        </div>
+      </div>
+
+      <div className="bl-section">
+        <div className="bl-head-row">
+          <h2 className="bl-title">Backlog</h2>
+          <span className="bl-count">{backlog.length} item{backlog.length === 1 ? "" : "s"}</span>
+          {editMode && (
+            <button className="tg-btn" onClick={() => setAddingItem((v) => !v)}>+ item</button>
+          )}
+          <button className="tg-btn" onClick={syncBacklog} disabled={backlogSyncing}>
+            {backlogSyncing ? "⟳ Syncing…" : "⟳ Sync from Sheet"}
+          </button>
+        </div>
+
+        <div className="bl-source-row">
+          <span>источник: Google Sheet</span>
+          {editMode && (
+            editingSheetUrl ? (
+              <>
+                <input
+                  className="bl-url-input"
+                  value={sheetUrlInput}
+                  onChange={(e) => setSheetUrlInput(e.target.value)}
+                  placeholder="https://docs.google.com/…/pub?output=csv"
+                  autoFocus
+                />
+                <button className="bl-url-btn" onClick={() => saveSheetUrl(sheetUrlInput.trim())}>Save</button>
+                <button className="bl-url-btn" onClick={() => setEditingSheetUrl(false)}>Cancel</button>
+              </>
+            ) : (
+              <>
+                <span className="bl-url-display" title={backlogSheetUrl || ""}>
+                  {backlogSheetUrl ? truncateUrl(backlogSheetUrl) : "не настроен"}
+                </span>
+                <button
+                  className="bl-url-edit-btn"
+                  title="Edit CSV URL"
+                  onClick={() => { setSheetUrlInput(backlogSheetUrl || ""); setEditingSheetUrl(true) }}
+                >✎</button>
+              </>
+            )
+          )}
+          {backlogLastSync && (
+            <span className="bl-last-sync">· последний синк {backlogLastSync.slice(0, 16).replace("T", " ")} UTC</span>
+          )}
+        </div>
+
+        {backlogToast && <div className="tg-toast">{backlogToast}</div>}
+        {backlogError && <div className="card tg-error">{backlogError}</div>}
+
+        <div className="bl-table-scroll">
+          <table className="bl-table">
+            <thead>
+              <tr>
+                <th className="bl-th-grip" />
+                <th className="bl-th-num">#</th>
+                <th>Project</th>
+                <th>Результат</th>
+                <th>Owner</th>
+                <th>Приор.</th>
+                <th>Статус / старт</th>
+                <th>База / источник</th>
+                <th>Ист.</th>
+              </tr>
+            </thead>
+            <tbody>
+              {editMode && addingItem && (
+                <tr className="bl-row bl-row-add">
+                  <td className="bl-td-grip" />
+                  <td className="bl-td-num" />
+                  <td colSpan={2}>
+                    <input
+                      className="bl-add-input"
+                      placeholder="Project title"
+                      value={newItemTitle}
+                      onChange={(e) => setNewItemTitle(e.target.value)}
+                      onKeyDown={(e) => e.key === "Enter" && createBacklogItem()}
+                      autoFocus
+                    />
+                  </td>
+                  <td />
+                  <td>
+                    <select
+                      className="bl-add-select"
+                      value={newItemPriority}
+                      onChange={(e) => setNewItemPriority(e.target.value)}
+                    >
+                      {["P0", "P1", "P2", "ENABLER", "GATED"].map((p) => (
+                        <option key={p} value={p}>{p}</option>
+                      ))}
+                    </select>
+                  </td>
+                  <td colSpan={3}>
+                    <button className="bl-add-btn" onClick={createBacklogItem}>Add</button>
+                    <button className="bl-add-btn" onClick={() => { setAddingItem(false); setNewItemTitle("") }}>Cancel</button>
+                  </td>
+                </tr>
+              )}
+              {backlog.length === 0 && !addingItem && (
+                <tr><td className="bl-empty" colSpan={9}>Backlog is empty</td></tr>
+              )}
+              {backlog.map((item, idx) => (
+                <tr
+                  key={item.id}
+                  draggable={editMode}
+                  className={`bl-row${backlogDragId === item.id ? " bl-row-dragging" : ""}${
+                    backlogOverRow?.id === item.id ? ` bl-row-drop-${backlogOverRow.pos}` : ""
+                  }`}
+                  onDragStart={(e) => handleBacklogRowDragStart(e, item.id)}
+                  onDragOver={(e) => handleBacklogRowDragOver(e, item.id)}
+                  onDrop={(e) => handleBacklogRowDrop(e, item.id)}
+                  onDragEnd={clearBacklogDrag}
+                >
+                  <td className="bl-td-grip">{editMode && <span className="bl-grip">⠿</span>}</td>
+                  <td className="bl-td-num">{idx + 1}</td>
+                  <td className="bl-td-title">{item.title}</td>
+                  <td className="bl-td-result">
+                    <span className="bl-clamp" title={item.description}>{item.description}</span>
+                  </td>
+                  <td className="bl-td-owner">{item.owner}</td>
+                  <td><span className={`bl-chip ${priorityChipClass(item.priority)}`}>{item.priority}</span></td>
+                  <td className="bl-td-status">{item.status}</td>
+                  <td className="bl-td-source">{item.source}</td>
+                  <td className="bl-ist">{item.origin}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
         </div>
       </div>
     </div>
@@ -1083,6 +1394,53 @@ function Style() {
       .tg-e-depends-hint{color:var(--accent1);font-style:italic}
       .tg-e-snap-warn{display:flex;align-items:center;gap:8px;flex-wrap:wrap;width:100%;font-size:11px;color:var(--warning);background:rgba(245,158,11,.1);border-radius:6px;padding:4px 8px}
       .tg-e-snap-warn button{background:var(--warning);border:none;border-radius:6px;color:#06091a;font-size:10.5px;font-weight:600;padding:3px 9px;cursor:pointer;font-family:inherit}
+
+      .tg-lane-drop{position:relative;z-index:8;border-radius:6px}
+      .tg-lane-drop-over{background:rgba(0,207,255,.14);outline:2px dashed var(--accent1);outline-offset:-2px}
+
+      .bl-section{margin-top:36px}
+      .bl-head-row{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:8px}
+      .bl-title{font-size:16px;font-weight:800;margin:0;letter-spacing:-.01em}
+      .bl-count{font-size:11.5px;color:var(--muted)}
+      .bl-source-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:11px;color:var(--muted);margin-bottom:12px}
+      .bl-url-display{color:var(--text);font-family:monospace;font-size:10.5px}
+      .bl-url-edit-btn{background:none;border:1px solid var(--border);border-radius:6px;color:var(--accent1);font-size:11px;padding:1px 6px;cursor:pointer;font-family:inherit}
+      .bl-url-input{font-family:inherit;font-size:11px;border-radius:6px;border:1px solid var(--border);background:var(--card);color:var(--text);padding:3px 8px;width:min(360px,60vw)}
+      .bl-url-btn{background:none;border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:11px;padding:2px 8px;cursor:pointer;font-family:inherit}
+      .bl-last-sync{white-space:nowrap}
+
+      .bl-table-scroll{overflow-x:auto;max-height:520px;border:1px solid var(--border);border-radius:10px}
+      .bl-table{width:100%;border-collapse:collapse;font-size:12.5px;min-width:820px}
+      .bl-table thead th{position:sticky;top:0;background:var(--card);z-index:2;text-align:left;font-size:10px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);padding:8px 10px;border-bottom:1px solid var(--border);white-space:nowrap}
+      .bl-table td{padding:8px 10px;border-bottom:1px solid var(--border);vertical-align:top}
+      .bl-table tbody tr:last-child td{border-bottom:none}
+      .bl-th-grip,.bl-td-grip{width:20px;padding-right:0}
+      .bl-th-num,.bl-td-num{width:28px;color:var(--muted);font-weight:600}
+      .bl-td-title{font-weight:600;white-space:nowrap;max-width:200px;overflow:hidden;text-overflow:ellipsis}
+      .bl-td-result{max-width:280px}
+      .bl-clamp{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;color:var(--muted)}
+      .bl-td-owner{max-width:120px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--text)}
+      .bl-td-status{max-width:160px;color:var(--muted);font-size:11.5px}
+      .bl-td-source{max-width:180px;color:var(--muted);font-size:11.5px}
+      .bl-ist{font-size:10.5px;color:var(--accent1)}
+      .bl-empty{text-align:center;color:var(--muted);padding:24px 0}
+      .bl-grip{color:var(--muted);font-size:13px;line-height:1}
+      .bl-row[draggable="true"]{cursor:grab}
+      .bl-row[draggable="true"]:active{cursor:grabbing}
+      .bl-row-dragging{opacity:.4}
+      .bl-row-drop-above{box-shadow:inset 0 2px 0 var(--accent1)}
+      .bl-row-drop-below{box-shadow:inset 0 -2px 0 var(--accent1)}
+      .bl-row-add td{background:rgba(0,207,255,.05)}
+      .bl-add-input{font-family:inherit;font-size:12px;border-radius:6px;border:1px solid var(--border);background:var(--card);color:var(--text);padding:4px 8px;width:100%}
+      .bl-add-select{font-family:inherit;font-size:11.5px;border-radius:6px;border:1px solid var(--border);background:var(--card);color:var(--text);padding:3px 6px}
+      .bl-add-btn{background:none;border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:11px;padding:3px 9px;cursor:pointer;font-family:inherit;margin-right:6px}
+
+      .bl-chip{display:inline-block;font-size:10.5px;font-weight:700;padding:2px 8px;border-radius:10px;white-space:nowrap;letter-spacing:.02em}
+      .bl-chip-p0{background:rgba(239,68,68,.14);color:var(--danger)}
+      .bl-chip-p1{background:rgba(245,158,11,.14);color:var(--warning)}
+      .bl-chip-p2{background:rgba(120,120,140,.16);color:var(--muted)}
+      .bl-chip-enabler{background:rgba(0,207,255,.14);color:var(--accent1)}
+      .bl-chip-gated{background:rgba(120,120,140,.3);color:var(--text)}
 
       @media(max-width:900px){
         .tg-wrap{padding:8px 12px 64px}
