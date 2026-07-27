@@ -15,6 +15,7 @@ import urllib.error
 import urllib.parse
 import csv
 import io
+import math
 from datetime import datetime, timedelta
 from apscheduler.schedulers.background import BackgroundScheduler
 from database import get_db, IS_POSTGRES
@@ -483,6 +484,11 @@ def init_db():
         pass
     try:
         conn.execute("ALTER TABLE gantt_assignments ADD COLUMN depends_on INTEGER DEFAULT NULL")
+        conn.commit()
+    except Exception:
+        pass
+    try:
+        conn.execute("ALTER TABLE backlog_items ADD COLUMN est_hours REAL DEFAULT NULL")
         conn.commit()
     except Exception:
         pass
@@ -5604,6 +5610,19 @@ def _apply_gantt_delete(conn, assignment_id):
     conn.execute("DELETE FROM gantt_assignments WHERE id=?", (assignment_id,))
 
 
+def _apply_engineer_visibility(conn, engineer_id, hidden):
+    if engineer_id is None:
+        raise ChangeError(422, "Missing engineerId")
+    c = conn.execute("SELECT id FROM team_members WHERE id=?", (engineer_id,))
+    if not c.fetchone():
+        raise ChangeError(422, "Invalid engineer_id")
+    conn.execute(
+        "INSERT INTO gantt_visibility (engineer_id, hidden) VALUES (?, ?) "
+        "ON CONFLICT(engineer_id) DO UPDATE SET hidden = excluded.hidden",
+        (engineer_id, 1 if hidden else 0),
+    )
+
+
 def _gantt_project_name(text: str) -> str:
     text = (text or "").strip()
     if not text:
@@ -5675,11 +5694,11 @@ def set_gantt_visibility(data: GanttVisibility, password: str = ""):
     if password != ADMIN_PASSWORD:
         raise HTTPException(403, "Unauthorized")
     conn = get_db()
-    conn.execute(
-        "INSERT INTO gantt_visibility (engineer_id, hidden) VALUES (?, ?) "
-        "ON CONFLICT(engineer_id) DO UPDATE SET hidden = excluded.hidden",
-        (data.engineer_id, 1 if data.hidden else 0),
-    )
+    try:
+        _apply_engineer_visibility(conn, data.engineer_id, data.hidden)
+    except ChangeError as e:
+        conn.close()
+        raise HTTPException(e.status_code, e.message)
     conn.commit()
     conn.close()
     return {"ok": True}
@@ -5733,7 +5752,7 @@ def delete_gantt_assignment(assignment_id: int, password: str = ""):
 VALID_CHANGE_TYPES = {
     "gantt_update", "gantt_create", "gantt_delete",
     "backlog_update", "backlog_create", "backlog_delete",
-    "backlog_reorder", "backlog_assign",
+    "backlog_reorder", "backlog_assign", "engineer_visibility",
 }
 
 
@@ -5802,6 +5821,12 @@ def apply_gantt_changes(data: dict, password: str = ""):
                     )
                     if ch.get("tempId") is not None:
                         id_map[ch["tempId"]] = real_id
+                elif t == "engineer_visibility":
+                    _apply_engineer_visibility(
+                        conn,
+                        _resolve_id(ch.get("engineerId"), id_map),
+                        bool(ch.get("hidden")),
+                    )
             except ChangeError:
                 raise
             except (KeyError, TypeError, ValueError) as e:
@@ -5876,6 +5901,7 @@ class BacklogItem(BaseModel):
     owner: str = ""
     priority: str = "P2"
     est_days: int = 10
+    est_hours: Optional[float] = None
     roi: str = ""
     cost: str = ""
     ret: str = ""
@@ -5892,13 +5918,29 @@ class BacklogAssign(BaseModel):
 
 BACKLOG_PRIORITIES = {"P0", "P1", "P2", "ENABLER", "GATED"}
 BACKLOG_FIELDS = {
-    "title", "description", "owner", "priority", "est_days", "roi",
+    "title", "description", "owner", "priority", "est_days", "est_hours", "roi",
     "cost", "ret", "status", "source", "origin", "sort_order",
 }
 
 
 def _title_key(title: str) -> str:
     return re.sub(r"\s+", " ", (title or "").strip().lower())
+
+
+def _validate_est_hours(value):
+    """Raises ChangeError if value can't be a valid hours estimate (0 < h <= 999);
+    returns the coerced float otherwise."""
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        raise ChangeError(422, "est_hours must be a number")
+    if not (0 < v <= 999):
+        raise ChangeError(422, "est_hours must be > 0 and <= 999")
+    return v
+
+
+def _days_from_hours(hours) -> int:
+    return max(1, math.ceil(hours / 8))
 
 
 def _apply_backlog_create(conn, fields: dict) -> int:
@@ -5908,14 +5950,21 @@ def _apply_backlog_create(conn, fields: dict) -> int:
     priority = fields.get("priority") or "P2"
     if priority not in BACKLOG_PRIORITIES:
         raise ChangeError(422, "Invalid priority")
+
+    est_hours = fields.get("est_hours")
+    est_days = fields.get("est_days") or 10
+    if est_hours is not None:
+        est_hours = _validate_est_hours(est_hours)
+        est_days = _days_from_hours(est_hours)
+
     mx = conn.execute("SELECT COALESCE(MAX(sort_order),0)+1 FROM backlog_items").fetchone()[0]
     now = datetime.utcnow().isoformat()
     cur = conn.execute(
         "INSERT INTO backlog_items "
-        "(title, description, owner, priority, est_days, roi, cost, ret, status, source, origin, sort_order, created_at) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "(title, description, owner, priority, est_days, est_hours, roi, cost, ret, status, source, origin, sort_order, created_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (title, fields.get("description") or "", fields.get("owner") or "", priority,
-         fields.get("est_days") or 10, fields.get("roi") or "", fields.get("cost") or "",
+         est_days, est_hours, fields.get("roi") or "", fields.get("cost") or "",
          fields.get("ret") or "", fields.get("status") or "", fields.get("source") or "",
          fields.get("origin") or "", mx, now),
     )
@@ -5930,6 +5979,28 @@ def _apply_backlog_update(conn, item_id, fields: dict):
         raise ChangeError(422, "No valid fields")
     if "priority" in fields and fields["priority"] not in BACKLOG_PRIORITIES:
         raise ChangeError(422, "Invalid priority")
+
+    row = conn.execute("SELECT est_hours FROM backlog_items WHERE id=?", (item_id,)).fetchone()
+    if row is None:
+        raise ChangeError(404, "Not found")
+
+    if "est_hours" in fields:
+        # Setting est_hours (or explicitly clearing it back to NULL / legacy
+        # mode) always recomputes est_days here — a direct est_days in the
+        # same payload is superseded, never the other way around.
+        if fields["est_hours"] is not None:
+            fields["est_hours"] = _validate_est_hours(fields["est_hours"])
+            fields["est_days"] = _days_from_hours(fields["est_hours"])
+        else:
+            fields.pop("est_days", None)
+    elif row["est_hours"] is not None:
+        # est_hours already set for this row from a prior write — est_days is
+        # derived and read-only everywhere until est_hours is cleared.
+        fields.pop("est_days", None)
+
+    if not fields:
+        raise ChangeError(422, "No valid fields")
+
     sets = ", ".join(f"{k}=?" for k in fields)
     vals = list(fields.values()) + [item_id]
     cur = conn.execute(f"UPDATE backlog_items SET {sets} WHERE id=?", vals)
@@ -6100,6 +6171,7 @@ _BACKLOG_HEADER_ALIASES = {
     "description": ["Результат (что делаем)", "Результат"],
     "owner":       ["Owner (предл.)", "Owner"],
     "est_days":    ["Нед"],
+    "est_hours":   ["Часы", "Hours", "Est, h"],
     "cost":        ["Cost, $", "Cost"],
     "ret":         ["Возврат, $/год", "Возврат"],
     "roi":         ["ROI"],
@@ -6127,6 +6199,20 @@ def _parse_backlog_est_days(raw) -> int:
         return max(1, round(float((raw or "").strip().replace(",", "."))))
     except (ValueError, TypeError, AttributeError):
         return 10
+
+
+def _parse_backlog_est_hours(raw):
+    """Returns a valid hours float from a sheet cell, or None if the cell is
+    blank/unparseable/out of range — never raises, since a sync must not fail
+    the whole batch over one bad cell."""
+    raw = (raw or "").strip()
+    if not raw:
+        return None
+    try:
+        v = float(raw.replace(",", "."))
+    except ValueError:
+        return None
+    return v if 0 < v <= 999 else None
 
 
 @app.post("/api/backlog/sync")
@@ -6165,8 +6251,11 @@ def sync_backlog_from_sheet():
     c.execute("SELECT title_key FROM backlog_retired")
     retired = {r["title_key"] for r in c.fetchall()}
 
-    c.execute("SELECT id, title FROM backlog_items")
-    existing = {_title_key(r["title"]): r["id"] for r in c.fetchall()}
+    c.execute("SELECT id, title, est_hours FROM backlog_items")
+    existing = {
+        _title_key(r["title"]): {"id": r["id"], "est_hours": r["est_hours"]}
+        for r in c.fetchall()
+    }
 
     mx_row = conn.execute("SELECT COALESCE(MAX(sort_order),0) FROM backlog_items").fetchone()
     next_sort = (mx_row[0] or 0) + 1
@@ -6187,7 +6276,8 @@ def sync_backlog_from_sheet():
 
         description = cell(row, "description")
         owner = cell(row, "owner")
-        est_days = _parse_backlog_est_days(row.get(field_map["est_days"])) if field_map.get("est_days") else 10
+        sheet_est_days = _parse_backlog_est_days(row.get(field_map["est_days"])) if field_map.get("est_days") else 10
+        sheet_est_hours = _parse_backlog_est_hours(row.get(field_map["est_hours"])) if field_map.get("est_hours") else None
         cost = cell(row, "cost")
         ret = cell(row, "ret")
         roi = cell(row, "roi")
@@ -6199,21 +6289,35 @@ def sync_backlog_from_sheet():
         origin = cell(row, "origin")
 
         if key in existing:
+            current_hours = existing[key]["est_hours"]
+            if sheet_est_hours is not None:
+                est_hours, est_days = sheet_est_hours, _days_from_hours(sheet_est_hours)
+            elif current_hours is not None:
+                # A manually/previously set est_hours is never wiped by a sheet
+                # that has no "Часы" column (or a blank cell) — est_days stays
+                # derived from it rather than the "Нед" column.
+                est_hours, est_days = current_hours, _days_from_hours(current_hours)
+            else:
+                est_hours, est_days = None, sheet_est_days
             conn.execute(
-                "UPDATE backlog_items SET description=?, owner=?, priority=?, est_days=?, "
+                "UPDATE backlog_items SET description=?, owner=?, priority=?, est_days=?, est_hours=?, "
                 "roi=?, cost=?, ret=?, status=?, source=?, origin=? WHERE id=?",
-                (description, owner, priority, est_days, roi, cost, ret, status, source, origin, existing[key]),
+                (description, owner, priority, est_days, est_hours, roi, cost, ret, status, source, origin, existing[key]["id"]),
             )
             updated += 1
         else:
+            if sheet_est_hours is not None:
+                est_hours, est_days = sheet_est_hours, _days_from_hours(sheet_est_hours)
+            else:
+                est_hours, est_days = None, sheet_est_days
             conn.execute(
                 "INSERT INTO backlog_items "
-                "(title, description, owner, priority, est_days, roi, cost, ret, status, source, origin, sort_order, created_at) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (title, description, owner, priority, est_days, roi, cost, ret, status, source, origin, next_sort, now),
+                "(title, description, owner, priority, est_days, est_hours, roi, cost, ret, status, source, origin, sort_order, created_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (title, description, owner, priority, est_days, est_hours, roi, cost, ret, status, source, origin, next_sort, now),
             )
             next_sort += 1
-            existing[key] = -1  # guards against a duplicate title later in the same sheet
+            existing[key] = {"id": -1, "est_hours": est_hours}  # guards against a duplicate title later in the same sheet
             added += 1
 
     conn.execute("INSERT OR REPLACE INTO config (key,value) VALUES ('last_backlog_sync', ?)", (now,))

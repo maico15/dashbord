@@ -269,8 +269,12 @@ function buildLanes(engineers, rangeStart, today) {
  *   backlog_delete {id}
  *   backlog_reorder{orderedIds}
  *   backlog_assign {tempId, backlogId, engineerId, startDate}
+ *   engineer_visibility {engineerId, hidden}
  * `id`/`backlogId`/`engineerId`/entries in orderedIds may be a real numeric id
- * or a tempId string minted by an earlier create/assign in the same queue. */
+ * or a tempId string minted by an earlier create/assign in the same queue.
+ * A change may also carry a `groupId` — undoChange pops every trailing entry
+ * that shares the last change's groupId together, so a compound action (e.g.
+ * assigning to a hidden engineer, which also un-hides them) undoes atomically. */
 function computeDraftState(baseEngineers, baseBacklogItems, changeQueue) {
   const engineersById = new Map();
   for (const e of baseEngineers || []) {
@@ -311,7 +315,13 @@ function computeDraftState(baseEngineers, baseBacklogItems, changeQueue) {
       }
       case "backlog_update": {
         const idx = backlogItems.findIndex((b) => b.id === ch.id);
-        if (idx !== -1) backlogItems[idx] = { ...backlogItems[idx], ...ch.fields, __pending: true };
+        if (idx !== -1) {
+          const patch = { ...ch.fields };
+          // Mirror the backend's derivation so an assign staged right after
+          // an hours edit (both still unsaved) previews the correct bar length.
+          if (patch.est_hours != null) patch.est_days = Math.max(1, Math.ceil(patch.est_hours / 8));
+          backlogItems[idx] = { ...backlogItems[idx], ...patch, __pending: true };
+        }
         break;
       }
       case "backlog_create": {
@@ -355,6 +365,11 @@ function computeDraftState(baseEngineers, baseBacklogItems, changeQueue) {
             __pending: true,
           });
         }
+        break;
+      }
+      case "engineer_visibility": {
+        const eng = engineersById.get(ch.engineerId);
+        if (eng) eng.hidden = ch.hidden;
         break;
       }
       default:
@@ -419,6 +434,65 @@ function priorityChipClass(priority) {
 function truncateUrl(url, max = 46) {
   if (!url) return "";
   return url.length > max ? `${url.slice(0, max - 1)}…` : url;
+}
+
+function formatEstHours(h) {
+  if (h == null) return "—";
+  const n = Number(h);
+  return `${Number.isInteger(n) ? n : n.toFixed(1)}h`;
+}
+
+/** Click-to-edit "Est, h" cell. Read-only render in viewer mode / when not
+ *  clicked; a number input with blur/Enter-to-save, Esc-to-cancel otherwise. */
+function EstHoursCell({ item, editable, onChange }) {
+  const [editing, setEditing] = useState(false);
+  const [val, setVal] = useState("");
+  const [err, setErr] = useState("");
+
+  if (!editable) {
+    return <span className="bl-esth-static">{formatEstHours(item.est_hours)}</span>;
+  }
+
+  if (!editing) {
+    return (
+      <button
+        type="button"
+        className="bl-esth-display"
+        onClick={() => { setVal(item.est_hours != null ? String(item.est_hours) : ""); setErr(""); setEditing(true) }}
+      >
+        {formatEstHours(item.est_hours)}
+      </button>
+    );
+  }
+
+  function commit() {
+    const raw = val.trim();
+    if (raw === "") { setEditing(false); return } // left blank — no change
+    const n = Number(raw);
+    if (!Number.isFinite(n) || n <= 0 || n > 999) {
+      setErr("0 < часы ≤ 999");
+      return;
+    }
+    if (n !== item.est_hours) onChange(n);
+    setEditing(false);
+  }
+
+  return (
+    <span className="bl-esth-edit" onClick={(e) => e.stopPropagation()}>
+      <input
+        type="number" min="0.5" max="999" step="0.5" autoFocus
+        className="bl-esth-input"
+        value={val}
+        onChange={(e) => { setVal(e.target.value); setErr("") }}
+        onBlur={commit}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") { e.preventDefault(); commit() }
+          if (e.key === "Escape") { e.preventDefault(); setEditing(false) }
+        }}
+      />
+      {err && <span className="bl-esth-err">{err}</span>}
+    </span>
+  );
 }
 
 /* ---------------- inline edit controls ---------------- */
@@ -679,6 +753,7 @@ export default function TeamGantt() {
   const [addingItem, setAddingItem] = useState(false);
   const [newItemTitle, setNewItemTitle] = useState("");
   const [newItemPriority, setNewItemPriority] = useState("P2");
+  const [newItemHours, setNewItemHours] = useState("");
   const [confirmDeleteId, setConfirmDeleteId] = useState(null); // backlog item.id awaiting delete confirm
   const autoScrollRef = useRef(null); // { speed, rafId } while a drag is near a viewport edge
 
@@ -777,16 +852,10 @@ export default function TeamGantt() {
     setTimeout(() => setSyncMsg(""), 5000);
   }
 
-  async function setVisibility(engineerId, hidden) {
-    const p = ensurePassword();
-    if (!p) return;
-    try {
-      await api.post("/gantt/visibility", { engineer_id: engineerId, hidden }, p);
-      setPwError("");
-      await load();
-    } catch (err) {
-      setPwError(err.message || "Visibility update failed — check the admin password");
-    }
+  // Same draft-queue path as every other edit-mode action below — never a
+  // direct write. editMode is already password-gated at entry (enableEdit).
+  function setVisibility(engineerId, hidden) {
+    pushChange({ type: "engineer_visibility", engineerId, hidden });
   }
 
   /* ---------------- backlog: sheet sync, reorder + drag-to-assign ---------------- */
@@ -832,15 +901,34 @@ export default function TeamGantt() {
   function createBacklogItem() {
     const title = newItemTitle.trim();
     if (!title) return;
-    pushChange({ type: "backlog_create", tempId: nextTempId(), fields: { title, priority: newItemPriority } });
+    const fields = { title, priority: newItemPriority };
+    const hours = Number(newItemHours);
+    if (newItemHours.trim() !== "" && Number.isFinite(hours) && hours > 0 && hours <= 999) {
+      fields.est_hours = hours;
+    }
+    pushChange({ type: "backlog_create", tempId: nextTempId(), fields });
     setNewItemTitle("");
+    setNewItemHours("");
     setAddingItem(false);
+  }
+
+  function updateBacklogItem(id, patch) {
+    pushChange({ type: "backlog_update", id, fields: patch });
   }
 
   /* ---------------- draft queue: undo / discard / save ---------------- */
 
   function undoChange() {
-    setChangeQueue((q) => q.slice(0, -1));
+    setChangeQueue((q) => {
+      if (q.length === 0) return q;
+      const last = q[q.length - 1];
+      if (last.groupId == null) return q.slice(0, -1);
+      // Compound action (e.g. assign-to-hidden-engineer) — pop the whole
+      // trailing run sharing this groupId so Undo reverts it atomically.
+      let i = q.length;
+      while (i > 0 && q[i - 1].groupId === last.groupId) i--;
+      return q.slice(0, i);
+    });
   }
 
   function discardChanges() {
@@ -978,8 +1066,13 @@ export default function TeamGantt() {
     const eng = draft.engineers.find((e) => e.id === engineerId);
     const hasActive = eng ? eng.assignments.some((a) => a.status === "active") : false;
     const name = eng?.name || "engineer";
-    pushChange({ type: "backlog_assign", tempId, backlogId: itemId, engineerId, startDate: startDateIso });
-    setBacklogToast(hasActive ? `В очередь: ${name}` : `Назначено: ${name}`);
+    const wasHidden = !!eng?.hidden;
+    // Assigning to a hidden engineer un-hides them — staged as a second
+    // change sharing a groupId, so Undo reverts both together (see undoChange).
+    const groupId = wasHidden ? nextTempId() : undefined;
+    pushChange({ type: "backlog_assign", tempId, backlogId: itemId, engineerId, startDate: startDateIso, groupId });
+    if (wasHidden) pushChange({ type: "engineer_visibility", engineerId, hidden: false, groupId });
+    setBacklogToast(wasHidden ? `${name}: показан на доске` : (hasActive ? `В очередь: ${name}` : `Назначено: ${name}`));
     setTimeout(() => setBacklogToast(""), 5000);
   }
   function deleteBacklogItem(itemId) {
@@ -1514,6 +1607,7 @@ export default function TeamGantt() {
                 <th>Project</th>
                 <th>Результат</th>
                 <th>Owner</th>
+                <th className="bl-th-esth">Est, h</th>
                 <th>Приор.</th>
                 <th>Статус / старт</th>
                 <th>База / источник</th>
@@ -1539,6 +1633,16 @@ export default function TeamGantt() {
                   </td>
                   <td />
                   <td>
+                    <input
+                      type="number" min="0.5" max="999" step="0.5"
+                      className="bl-add-hours"
+                      placeholder="hours"
+                      value={newItemHours}
+                      onChange={(e) => setNewItemHours(e.target.value)}
+                      onKeyDown={(e) => e.key === "Enter" && createBacklogItem()}
+                    />
+                  </td>
+                  <td>
                     <select
                       className="bl-add-select"
                       value={newItemPriority}
@@ -1551,12 +1655,12 @@ export default function TeamGantt() {
                   </td>
                   <td colSpan={5}>
                     <button className="bl-add-btn" onClick={createBacklogItem}>Add</button>
-                    <button className="bl-add-btn" onClick={() => { setAddingItem(false); setNewItemTitle("") }}>Cancel</button>
+                    <button className="bl-add-btn" onClick={() => { setAddingItem(false); setNewItemTitle(""); setNewItemHours("") }}>Cancel</button>
                   </td>
                 </tr>
               )}
               {draft.backlogItems.length === 0 && !addingItem && (
-                <tr><td className="bl-empty" colSpan={editMode ? 11 : 9}>Backlog is empty</td></tr>
+                <tr><td className="bl-empty" colSpan={editMode ? 12 : 10}>Backlog is empty</td></tr>
               )}
               {draft.backlogItems.map((item, idx) => (
                 <tr
@@ -1580,6 +1684,13 @@ export default function TeamGantt() {
                     <span className="bl-clamp" title={item.description}>{item.description}</span>
                   </td>
                   <td className="bl-td-owner">{item.owner}</td>
+                  <td className="bl-td-esth">
+                    <EstHoursCell
+                      item={item}
+                      editable={editMode}
+                      onChange={(h) => updateBacklogItem(item.id, { est_hours: h })}
+                    />
+                  </td>
                   <td><span className={`bl-chip ${priorityChipClass(item.priority)}`}>{item.priority}</span></td>
                   <td className="bl-td-status">{item.status}</td>
                   <td className="bl-td-source">{item.source}</td>
@@ -1595,8 +1706,8 @@ export default function TeamGantt() {
                         }}
                       >
                         <option value="">—</option>
-                        {(data.engineers || []).map((eng) => (
-                          <option key={eng.id} value={eng.id}>{eng.name}</option>
+                        {sortedEngineers.map((eng) => (
+                          <option key={eng.id} value={eng.id}>{eng.name}{eng.hidden ? " (hidden)" : ""}</option>
                         ))}
                       </select>
                     </td>
@@ -1782,6 +1893,15 @@ function Style() {
       .bl-add-input{font-family:inherit;font-size:12px;border-radius:6px;border:1px solid var(--border);background:var(--card);color:var(--text);padding:4px 8px;width:100%}
       .bl-add-select{font-family:inherit;font-size:11.5px;border-radius:6px;border:1px solid var(--border);background:var(--card);color:var(--text);padding:3px 6px}
       .bl-add-btn{background:none;border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:11px;padding:3px 9px;cursor:pointer;font-family:inherit;margin-right:6px}
+      .bl-add-hours{font-family:inherit;font-size:11.5px;font-variant-numeric:tabular-nums;border-radius:6px;border:1px solid var(--border);background:var(--card);color:var(--text);padding:3px 6px;width:64px}
+
+      .bl-th-esth,.bl-td-esth{width:60px;font-variant-numeric:tabular-nums}
+      .bl-esth-static{color:var(--text)}
+      .bl-esth-display{background:none;border:1px solid transparent;border-radius:6px;color:var(--text);font-family:inherit;font-size:12px;font-variant-numeric:tabular-nums;padding:2px 6px;cursor:pointer}
+      .bl-esth-display:hover{border-color:var(--border)}
+      .bl-esth-edit{position:relative;display:inline-block}
+      .bl-esth-input{font-family:inherit;font-size:12px;font-variant-numeric:tabular-nums;border-radius:6px;border:1px solid var(--accent1);background:var(--card);color:var(--text);padding:2px 6px;width:56px}
+      .bl-esth-err{position:absolute;top:100%;left:0;white-space:nowrap;background:var(--danger);color:#fff;font-size:10px;padding:2px 6px;border-radius:4px;margin-top:2px;z-index:5}
 
       .bl-chip{display:inline-block;font-size:10.5px;font-weight:700;padding:2px 8px;border-radius:10px;white-space:nowrap;letter-spacing:.02em}
       .bl-chip-p0{background:rgba(239,68,68,.14);color:var(--danger)}
