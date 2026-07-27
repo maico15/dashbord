@@ -421,6 +421,8 @@ function dependencyWarning(assignment, assignmentsById, effectiveStartDate) {
 
 /* ---------------- backlog ---------------- */
 
+const BACKLOG_PRIORITIES = ["P0", "P1", "P2", "ENABLER", "GATED"];
+
 function priorityChipClass(priority) {
   switch (priority) {
     case "P0": return "bl-chip-p0";
@@ -429,6 +431,45 @@ function priorityChipClass(priority) {
     case "GATED": return "bl-chip-gated";
     default: return "bl-chip-p2";
   }
+}
+
+/** Priority chip that becomes a <select> on click in edit mode. Esc or a
+ *  blur (clicking elsewhere) closes it without saving; changing the value
+ *  saves immediately and closes. Viewer mode never shows the affordance. */
+function PriorityCell({ priority, editable, onChange }) {
+  const [editing, setEditing] = useState(false);
+
+  if (!editable) {
+    return <span className={`bl-chip ${priorityChipClass(priority)}`}>{priority}</span>;
+  }
+
+  if (!editing) {
+    return (
+      <button
+        type="button"
+        className={`bl-chip bl-chip-btn ${priorityChipClass(priority)}`}
+        onClick={() => setEditing(true)}
+        title="Click to change priority"
+      >
+        {priority}
+      </button>
+    );
+  }
+
+  return (
+    <select
+      className={`bl-priority-select ${priorityChipClass(priority)}`}
+      defaultValue={priority}
+      autoFocus
+      onChange={(e) => { onChange(e.target.value); setEditing(false) }}
+      onBlur={() => setEditing(false)}
+      onKeyDown={(e) => { if (e.key === "Escape") { e.preventDefault(); setEditing(false) } }}
+    >
+      {BACKLOG_PRIORITIES.map((p) => (
+        <option key={p} value={p}>{p}</option>
+      ))}
+    </select>
+  );
 }
 
 function truncateUrl(url, max = 46) {
@@ -1648,7 +1689,7 @@ export default function TeamGantt() {
                       value={newItemPriority}
                       onChange={(e) => setNewItemPriority(e.target.value)}
                     >
-                      {["P0", "P1", "P2", "ENABLER", "GATED"].map((p) => (
+                      {BACKLOG_PRIORITIES.map((p) => (
                         <option key={p} value={p}>{p}</option>
                       ))}
                     </select>
@@ -1691,7 +1732,13 @@ export default function TeamGantt() {
                       onChange={(h) => updateBacklogItem(item.id, { est_hours: h })}
                     />
                   </td>
-                  <td><span className={`bl-chip ${priorityChipClass(item.priority)}`}>{item.priority}</span></td>
+                  <td>
+                    <PriorityCell
+                      priority={item.priority}
+                      editable={editMode}
+                      onChange={(p) => updateBacklogItem(item.id, { priority: p })}
+                    />
+                  </td>
                   <td className="bl-td-status">{item.status}</td>
                   <td className="bl-td-source">{item.source}</td>
                   <td className="bl-ist">{item.origin}</td>
@@ -1909,6 +1956,9 @@ function Style() {
       .bl-chip-p2{background:rgba(120,120,140,.16);color:var(--muted)}
       .bl-chip-enabler{background:rgba(0,207,255,.14);color:var(--accent1)}
       .bl-chip-gated{background:rgba(120,120,140,.3);color:var(--text)}
+      .bl-chip-btn{border:1px solid transparent;font-family:inherit;cursor:pointer}
+      .bl-chip-btn:hover{border-color:currentColor}
+      .bl-priority-select{font-family:inherit;font-size:10.5px;font-weight:700;letter-spacing:.02em;border-radius:10px;border:1px solid currentColor;padding:2px 6px;cursor:pointer}
 
       .bl-th-assign,.bl-td-assign{width:130px}
       .bl-assign-select{font-family:inherit;font-size:11.5px;border-radius:6px;border:1px solid var(--border);background:var(--card);color:var(--text);padding:3px 6px;width:100%}
