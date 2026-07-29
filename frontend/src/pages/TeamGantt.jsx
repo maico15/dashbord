@@ -423,6 +423,21 @@ function dependencyWarning(assignment, assignmentsById, effectiveStartDate) {
 
 const BACKLOG_PRIORITIES = ["P0", "P1", "P2", "ENABLER", "GATED"];
 
+const PRIORITY_BLOCK_LABELS = {
+  P0: "P0 — берём немедленно",
+  P1: "P1 — ближайшая очередь",
+  P2: "P2 — при простое",
+  ENABLER: "ENABLER — инфраструктура",
+  GATED: "GATED — ждёт триггера",
+};
+
+/** Index into BACKLOG_PRIORITIES; unknown/blank priority values sort as P2 —
+ *  mirrors the backend's ORDER BY CASE expression exactly. */
+function priorityRank(priority) {
+  const i = BACKLOG_PRIORITIES.indexOf(priority);
+  return i === -1 ? BACKLOG_PRIORITIES.indexOf("P2") : i;
+}
+
 function priorityChipClass(priority) {
   switch (priority) {
     case "P0": return "bl-chip-p0";
@@ -1061,8 +1076,48 @@ export default function TeamGantt() {
     stopAutoScroll();
   }
 
-  function reorderBacklog(newOrder) {
-    pushChange({ type: "backlog_reorder", orderedIds: newOrder.map((b) => b.id) });
+  // Core of every backlog move (drag within/across blocks, priority dropdown):
+  // draggingId is repositioned within groupedBacklog at buildIndex(filtered)
+  // (filtered = groupedBacklog without the dragged item). Crossing into a
+  // different rank changes priority too — staged as one groupId so Undo
+  // reverts the move and the priority together (same mechanism as
+  // assignBacklogItem's hidden-engineer compound change below).
+  function moveBacklogItem(draggingId, targetRank, buildIndex, { toast = true } = {}) {
+    const dragItem = groupedBacklog.find((b) => b.id === draggingId);
+    if (!dragItem) return;
+    const filtered = groupedBacklog.filter((b) => b.id !== draggingId);
+    const toIdx = buildIndex(filtered);
+    const dragRank = priorityRank(dragItem.priority);
+    const crossedBlock = targetRank !== dragRank;
+    const newPriority = BACKLOG_PRIORITIES[targetRank];
+    const movedItem = crossedBlock ? { ...dragItem, priority: newPriority } : dragItem;
+    filtered.splice(toIdx, 0, movedItem);
+    const orderedIds = filtered.map((b) => b.id);
+    if (crossedBlock) {
+      const groupId = nextTempId();
+      pushChange({ type: "backlog_update", id: draggingId, fields: { priority: newPriority }, groupId });
+      pushChange({ type: "backlog_reorder", orderedIds, groupId });
+      if (toast) {
+        setBacklogToast(`Приоритет: ${dragItem.priority} → ${newPriority}`);
+        setTimeout(() => setBacklogToast(""), 4000);
+      }
+    } else {
+      pushChange({ type: "backlog_reorder", orderedIds });
+    }
+  }
+
+  function changeBacklogPriority(item, newPriority) {
+    if (newPriority === item.priority) return;
+    const targetRank = priorityRank(newPriority);
+    moveBacklogItem(
+      item.id,
+      targetRank,
+      (filtered) => {
+        const idx = filtered.findIndex((b) => priorityRank(b.priority) > targetRank);
+        return idx === -1 ? filtered.length : idx;
+      },
+      { toast: false }
+    );
   }
 
   function handleBacklogRowDragStart(e, itemId) {
@@ -1090,14 +1145,34 @@ export default function TeamGantt() {
     const pos = backlogOverRow?.pos || "above";
     clearBacklogDrag();
     if (draggingId == null || draggingId === targetId) return;
-    const next = [...draft.backlogItems];
-    const fromIdx = next.findIndex((b) => b.id === draggingId);
-    if (fromIdx === -1) return;
-    const [moved] = next.splice(fromIdx, 1);
-    let toIdx = next.findIndex((b) => b.id === targetId);
-    if (pos === "below") toIdx += 1;
-    next.splice(toIdx, 0, moved);
-    reorderBacklog(next);
+    const targetItem = groupedBacklog.find((b) => b.id === targetId);
+    if (!targetItem) return;
+    moveBacklogItem(draggingId, priorityRank(targetItem.priority), (filtered) => {
+      let idx = filtered.findIndex((b) => b.id === targetId);
+      if (idx === -1) idx = filtered.length;
+      return pos === "below" ? idx + 1 : idx;
+    });
+  }
+
+  // Dropping onto a group header counts as dropping at the top of that block.
+  function handleBacklogHeaderDragOver(e) {
+    if (!editMode || backlogDragId == null) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+    updateAutoScroll(e.clientY);
+  }
+
+  function handleBacklogHeaderDrop(e, rank) {
+    if (!editMode) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const draggingId = backlogDragId;
+    clearBacklogDrag();
+    if (draggingId == null) return;
+    moveBacklogItem(draggingId, rank, (filtered) => {
+      const idx = filtered.findIndex((b) => priorityRank(b.priority) >= rank);
+      return idx === -1 ? filtered.length : idx;
+    });
   }
 
   function assignBacklogItem(itemId, engineerId, startDateIso) {
@@ -1240,6 +1315,34 @@ export default function TeamGantt() {
     () => computeDraftState(data.engineers, backlog, changeQueue),
     [data.engineers, backlog, changeQueue]
   );
+
+  // Display order for the backlog table: always grouped into priority blocks
+  // (P0→P1→P2→ENABLER→GATED), manual order preserved within a block. A stable
+  // sort (JS Array.sort) makes this the single source of truth for both
+  // rendering and drag math, independent of whatever order draft.backlogItems
+  // happens to be in (e.g. right after a backlog_create appends to the end).
+  const groupedBacklog = useMemo(() => {
+    return [...(draft.backlogItems || [])].sort((a, b) => priorityRank(a.priority) - priorityRank(b.priority));
+  }, [draft.backlogItems]);
+
+  // Flattened render list: a non-draggable group-header entry before the
+  // first item of each priority rank actually present, then items with a
+  // continuous `num` (headers aren't counted in the # column).
+  const backlogRows = useMemo(() => {
+    const rows = [];
+    let lastRank = null;
+    let num = 0;
+    for (const item of groupedBacklog) {
+      const rank = priorityRank(item.priority);
+      if (rank !== lastRank) {
+        rows.push({ kind: "header", rank, label: PRIORITY_BLOCK_LABELS[BACKLOG_PRIORITIES[rank]] });
+        lastRank = rank;
+      }
+      num += 1;
+      rows.push({ kind: "item", item, num });
+    }
+    return rows;
+  }, [groupedBacklog]);
 
   const sortedEngineers = useMemo(() => {
     return [...(draft.engineers || [])].sort((a, b) => {
@@ -1703,45 +1806,54 @@ export default function TeamGantt() {
               {draft.backlogItems.length === 0 && !addingItem && (
                 <tr><td className="bl-empty" colSpan={editMode ? 12 : 10}>Backlog is empty</td></tr>
               )}
-              {draft.backlogItems.map((item, idx) => (
+              {backlogRows.map((row) => row.kind === "header" ? (
                 <tr
-                  key={item.id}
+                  key={`bl-hdr-${row.rank}`}
+                  className="bl-group-header"
+                  onDragOver={handleBacklogHeaderDragOver}
+                  onDrop={(e) => handleBacklogHeaderDrop(e, row.rank)}
+                >
+                  <td className="bl-group-header-cell" colSpan={editMode ? 12 : 10}>{row.label}</td>
+                </tr>
+              ) : (
+                <tr
+                  key={row.item.id}
                   draggable={editMode}
-                  className={`bl-row${backlogDragId === item.id ? " bl-row-dragging" : ""}${
-                    backlogOverRow?.id === item.id ? ` bl-row-drop-${backlogOverRow.pos}` : ""
-                  }${item.__pending ? " bl-row-pending" : ""}`}
-                  onDragStart={(e) => handleBacklogRowDragStart(e, item.id)}
-                  onDragOver={(e) => handleBacklogRowDragOver(e, item.id)}
-                  onDrop={(e) => handleBacklogRowDrop(e, item.id)}
+                  className={`bl-row${backlogDragId === row.item.id ? " bl-row-dragging" : ""}${
+                    backlogOverRow?.id === row.item.id ? ` bl-row-drop-${backlogOverRow.pos}` : ""
+                  }${row.item.__pending ? " bl-row-pending" : ""}`}
+                  onDragStart={(e) => handleBacklogRowDragStart(e, row.item.id)}
+                  onDragOver={(e) => handleBacklogRowDragOver(e, row.item.id)}
+                  onDrop={(e) => handleBacklogRowDrop(e, row.item.id)}
                   onDragEnd={clearBacklogDrag}
                 >
                   <td className="bl-td-grip">{editMode && <span className="bl-grip">⠿</span>}</td>
-                  <td className="bl-td-num">{idx + 1}</td>
+                  <td className="bl-td-num">{row.num}</td>
                   <td className="bl-td-title">
-                    {item.title}
-                    {item.__pending && <span className="tg-pending-badge bl-pending-badge" title="Unsaved change">unsaved</span>}
+                    {row.item.title}
+                    {row.item.__pending && <span className="tg-pending-badge bl-pending-badge" title="Unsaved change">unsaved</span>}
                   </td>
                   <td className="bl-td-result">
-                    <span className="bl-clamp" title={item.description}>{item.description}</span>
+                    <span className="bl-clamp" title={row.item.description}>{row.item.description}</span>
                   </td>
-                  <td className="bl-td-owner">{item.owner}</td>
+                  <td className="bl-td-owner">{row.item.owner}</td>
                   <td className="bl-td-esth">
                     <EstHoursCell
-                      item={item}
+                      item={row.item}
                       editable={editMode}
-                      onChange={(h) => updateBacklogItem(item.id, { est_hours: h })}
+                      onChange={(h) => updateBacklogItem(row.item.id, { est_hours: h })}
                     />
                   </td>
                   <td>
                     <PriorityCell
-                      priority={item.priority}
+                      priority={row.item.priority}
                       editable={editMode}
-                      onChange={(p) => updateBacklogItem(item.id, { priority: p })}
+                      onChange={(p) => changeBacklogPriority(row.item, p)}
                     />
                   </td>
-                  <td className="bl-td-status">{item.status}</td>
-                  <td className="bl-td-source">{item.source}</td>
-                  <td className="bl-ist">{item.origin}</td>
+                  <td className="bl-td-status">{row.item.status}</td>
+                  <td className="bl-td-source">{row.item.source}</td>
+                  <td className="bl-ist">{row.item.origin}</td>
                   {editMode && (
                     <td className="bl-td-assign">
                       <select
@@ -1749,7 +1861,7 @@ export default function TeamGantt() {
                         value=""
                         onChange={(e) => {
                           const engId = e.target.value;
-                          if (engId) assignBacklogItem(item.id, Number(engId), toISODate(today));
+                          if (engId) assignBacklogItem(row.item.id, Number(engId), toISODate(today));
                         }}
                       >
                         <option value="">—</option>
@@ -1761,17 +1873,17 @@ export default function TeamGantt() {
                   )}
                   {editMode && (
                     <td className="bl-td-del">
-                      {confirmDeleteId === item.id ? (
+                      {confirmDeleteId === row.item.id ? (
                         <span className="bl-confirm-del">
                           <span className="bl-confirm-text">точно удалить?</span>
-                          <button className="bl-del-btn warn" onClick={() => deleteBacklogItem(item.id)}>Да</button>
+                          <button className="bl-del-btn warn" onClick={() => deleteBacklogItem(row.item.id)}>Да</button>
                           <button className="bl-del-btn" onClick={() => setConfirmDeleteId(null)}>Нет</button>
                         </span>
                       ) : (
                         <button
                           className="bl-del-btn"
                           title="Delete from backlog"
-                          onClick={() => setConfirmDeleteId(item.id)}
+                          onClick={() => setConfirmDeleteId(row.item.id)}
                         >×</button>
                       )}
                     </td>
@@ -1928,6 +2040,7 @@ function Style() {
       .bl-td-source{max-width:180px;color:var(--muted);font-size:11.5px}
       .bl-ist{font-size:10.5px;color:var(--accent1)}
       .bl-empty{text-align:center;color:var(--muted);padding:24px 0}
+      .bl-group-header td{padding:4px 10px;background:var(--panel2, rgba(127,127,127,.08));color:var(--muted);font-size:10.5px;font-weight:700;letter-spacing:.04em;text-transform:uppercase}
       .bl-grip{color:var(--muted);font-size:13px;line-height:1}
       .bl-row[draggable="true"]{cursor:grab}
       .bl-row[draggable="true"]:active{cursor:grabbing}

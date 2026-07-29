@@ -101,6 +101,10 @@ async def lifespan(app):
         seed_data()
     _load_password()
     _ensure_github_username_map()
+    conn = get_db()
+    _normalize_backlog_priority_blocks(conn)
+    conn.commit()
+    conn.close()
     scheduler.add_job(_run_jira_sync,        'cron',     hour=2,  minute=0,  id='jira_daily_sync',    replace_existing=True)
     scheduler.add_job(_run_slack_reports_sync,'cron',     hour=20, minute=0,  id='slack_reports_sync', replace_existing=True)
     scheduler.add_job(_run_ai_usage_sync,    'cron',     hour=2,  minute=30, id='ai_usage_daily_sync', replace_existing=True)
@@ -5922,6 +5926,36 @@ BACKLOG_FIELDS = {
     "cost", "ret", "status", "source", "origin", "sort_order",
 }
 
+# Priority-block ordering: the backlog table is always grouped P0→P1→P2→
+# ENABLER→GATED, manual sort_order only breaking ties within a block. Unknown
+# or empty priority values fall into the P2 block.
+BACKLOG_PRIORITY_ORDER = ["P0", "P1", "P2", "ENABLER", "GATED"]
+_BACKLOG_PRIORITY_RANK_SQL = (
+    "CASE priority "
+    "WHEN 'P0' THEN 0 WHEN 'P1' THEN 1 WHEN 'P2' THEN 2 "
+    "WHEN 'ENABLER' THEN 3 WHEN 'GATED' THEN 4 ELSE 2 END"
+)
+
+
+def _backlog_priority_rank(priority: str) -> int:
+    try:
+        return BACKLOG_PRIORITY_ORDER.index(priority)
+    except ValueError:
+        return BACKLOG_PRIORITY_ORDER.index("P2")
+
+
+def _normalize_backlog_priority_blocks(conn):
+    """One-off (but idempotent) normalization: recompute sort_order so rows
+    group by priority block, preserving each row's existing relative order
+    within its block. Run on every startup — a no-op once already normalized."""
+    rows = conn.execute(
+        "SELECT id, priority, sort_order FROM backlog_items ORDER BY sort_order, id"
+    ).fetchall()
+    ordered = sorted(rows, key=lambda r: (_backlog_priority_rank(r["priority"]), r["sort_order"], r["id"]))
+    for idx, r in enumerate(ordered):
+        if r["sort_order"] != idx:
+            conn.execute("UPDATE backlog_items SET sort_order=? WHERE id=?", (idx, r["id"]))
+
 
 def _title_key(title: str) -> str:
     return re.sub(r"\s+", " ", (title or "").strip().lower())
@@ -6082,7 +6116,7 @@ def _get_config_value(conn, key):
 def get_backlog():
     conn = get_db()
     c = conn.cursor()
-    c.execute("SELECT * FROM backlog_items ORDER BY sort_order, id")
+    c.execute(f"SELECT * FROM backlog_items ORDER BY {_BACKLOG_PRIORITY_RANK_SQL}, sort_order, id")
     items = [dict(r) for r in c.fetchall()]
     sheet_url = _get_config_value(conn, "backlog_sheet_csv_url")
     last_sync = _get_config_value(conn, "last_backlog_sync")
@@ -6257,8 +6291,14 @@ def sync_backlog_from_sheet():
         for r in c.fetchall()
     }
 
-    mx_row = conn.execute("SELECT COALESCE(MAX(sort_order),0) FROM backlog_items").fetchone()
-    next_sort = (mx_row[0] or 0) + 1
+    # New rows land at the end of their own priority block, not the global
+    # bottom — one running counter per priority value.
+    priority_max = {
+        r["priority"]: (r["mx"] or 0)
+        for r in conn.execute(
+            "SELECT priority, MAX(sort_order) AS mx FROM backlog_items GROUP BY priority"
+        ).fetchall()
+    }
 
     added = updated = skipped_retired = ignored_rows = 0
     now = datetime.utcnow().isoformat()
@@ -6310,13 +6350,14 @@ def sync_backlog_from_sheet():
                 est_hours, est_days = sheet_est_hours, _days_from_hours(sheet_est_hours)
             else:
                 est_hours, est_days = None, sheet_est_days
+            next_sort = priority_max.get(priority, 0) + 1
+            priority_max[priority] = next_sort
             conn.execute(
                 "INSERT INTO backlog_items "
                 "(title, description, owner, priority, est_days, est_hours, roi, cost, ret, status, source, origin, sort_order, created_at) "
                 "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (title, description, owner, priority, est_days, est_hours, roi, cost, ret, status, source, origin, next_sort, now),
             )
-            next_sort += 1
             existing[key] = {"id": -1, "est_hours": est_hours}  # guards against a duplicate title later in the same sheet
             added += 1
 
