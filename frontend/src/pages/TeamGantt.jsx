@@ -419,6 +419,40 @@ function dependencyWarning(assignment, assignmentsById, effectiveStartDate) {
   return null;
 }
 
+/** Meta grid for the shared task-detail modal, built from the same bar
+ *  object the visible Gantt bar already computed (dayX/estY/startDate/
+ *  startLabel) — see barInfoByAssignmentId. */
+function ganttDetailMeta(bar, assignment, engineerName) {
+  const meta = [{ label: "Engineer", value: engineerName }];
+  if (bar.kind === "queued") {
+    meta.push({ label: "Queue start", value: bar.startLabel || "—" });
+    meta.push({ label: "Est days", value: assignment.est_days });
+  } else if (bar.kind === "active") {
+    meta.push({ label: "Start date", value: bar.startDate || "—" });
+    meta.push({ label: "Est days", value: assignment.est_days });
+    meta.push({ label: "Progress", value: `day ${bar.dayX} of ~${bar.estY}` });
+  } else if (bar.kind === "done") {
+    meta.push({ label: "Start date", value: bar.startDate || "—" });
+    meta.push({ label: "Est days", value: assignment.est_days });
+  } else {
+    meta.push({ label: "Est days", value: assignment.est_days });
+  }
+  return meta;
+}
+
+/** Status + percent badge shown next to the title in the shared task-detail
+ *  modal when it's showing a Gantt assignment (percent is only meaningful
+ *  for active/done work, not queued/continuous). */
+function GanttDetailBadge({ assignment }) {
+  const showPercent = assignment.status === "active" || assignment.status === "done";
+  return (
+    <span className="tg-modal-badge-wrap">
+      <span className={`tg-status-chip tg-status-${assignment.status}`}>{assignment.status}</span>
+      {showPercent && <span className="tg-modal-percent">{assignment.percent}%</span>}
+    </span>
+  );
+}
+
 /* ---------------- backlog ---------------- */
 
 const BACKLOG_PRIORITIES = ["P0", "P1", "P2", "ENABLER", "GATED"];
@@ -553,28 +587,33 @@ function EstHoursCell({ item, editable, onChange }) {
 
 /* ---------------- backlog: task detail modal ---------------- */
 
-const BACKLOG_DESC_PREFIX_RE = /^(ЦЕЛЬ:|ЧТО СДЕЛАТЬ:|ПРОФИТ:)/;
+const TASK_DESC_PREFIX_RE = /^(ЦЕЛЬ:|ЧТО СДЕЛАТЬ:|ПРОФИТ:)/;
 
 function formatEstMeta(item) {
   if (item.est_hours != null) return formatEstHours(item.est_hours);
   return `${item.est_days} дн.`;
 }
 
-/** Full task detail, opened by clicking a backlog row (see
- *  handleBacklogRowClick). Edit mode swaps title/description for an input +
- *  textarea with a Save button (persisted via the same updateBacklogItem /
- *  draft-queue path as every other backlog edit); viewer mode renders the
- *  description read-only with \n preserved and the ЦЕЛЬ:/ЧТО СДЕЛАТЬ:/ПРОФИТ:
- *  prefixes bolded. Esc, a backdrop click, or × all close it without saving. */
-function BacklogDetailModal({ item, editable, onClose, onSave }) {
-  const [title, setTitle] = useState(item.title);
-  const [description, setDescription] = useState(item.description || "");
+/** Shared task-detail modal — opened by clicking a backlog row OR a Gantt
+ *  bar (see handleBacklogRowClick / GanttBar's onOpenDetail). Fully generic:
+ *  callers supply the title, an optional header badge, the free-text body
+ *  (backlog "description" or assignment "note"), and a meta grid of
+ *  {label,value} pairs, so this component has no knowledge of which kind of
+ *  task it's showing. Edit mode swaps the body for a textarea (and the title
+ *  too, if titleEditable) with a Save button; onSave receives a generic
+ *  {title?, body?} patch and the caller maps that to its own field names.
+ *  Viewer mode renders the body read-only with \n preserved and the
+ *  ЦЕЛЬ:/ЧТО СДЕЛАТЬ:/ПРОФИТ: prefixes bolded. Esc, a backdrop click, or ×
+ *  all close it without saving. */
+function TaskDetailModal({ taskKey, title, titleEditable, badge, body, meta, editable, onClose, onSave }) {
+  const [titleVal, setTitleVal] = useState(title);
+  const [bodyVal, setBodyVal] = useState(body || "");
   const containerRef = useRef(null);
 
   useEffect(() => {
-    setTitle(item.title);
-    setDescription(item.description || "");
-  }, [item.id]); // eslint-disable-line react-hooks/exhaustive-deps
+    setTitleVal(title);
+    setBodyVal(body || "");
+  }, [taskKey]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     containerRef.current?.focus();
@@ -597,12 +636,12 @@ function BacklogDetailModal({ item, editable, onClose, onSave }) {
     else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus() }
   }
 
-  const dirty = editable && (title !== item.title || description !== (item.description || ""));
+  const dirty = editable && ((titleEditable && titleVal !== title) || bodyVal !== (body || ""));
 
   function handleSave() {
     const patch = {};
-    if (title.trim() && title !== item.title) patch.title = title.trim();
-    if (description !== (item.description || "")) patch.description = description;
+    if (titleEditable && titleVal.trim() && titleVal !== title) patch.title = titleVal.trim();
+    if (bodyVal !== (body || "")) patch.body = bodyVal;
     if (Object.keys(patch).length) onSave(patch);
     onClose();
   }
@@ -613,7 +652,7 @@ function BacklogDetailModal({ item, editable, onClose, onSave }) {
         className="card bl-modal"
         role="dialog"
         aria-modal="true"
-        aria-label={item.title || "Backlog item"}
+        aria-label={title || "Task"}
         tabIndex={-1}
         ref={containerRef}
         onKeyDown={trapTab}
@@ -621,26 +660,26 @@ function BacklogDetailModal({ item, editable, onClose, onSave }) {
         <button className="bl-modal-close" onClick={onClose} title="Закрыть (Esc)">×</button>
 
         <div className="bl-modal-head">
-          {editable ? (
-            <input className="bl-modal-title-input" value={title} onChange={(e) => setTitle(e.target.value)} />
+          {editable && titleEditable ? (
+            <input className="bl-modal-title-input" value={titleVal} onChange={(e) => setTitleVal(e.target.value)} />
           ) : (
-            <h3 className="bl-modal-title">{item.title}</h3>
+            <h3 className="bl-modal-title">{title}</h3>
           )}
-          <span className={`bl-chip ${priorityChipClass(item.priority)}`}>{item.priority}</span>
+          {badge}
         </div>
 
         <div className="bl-modal-body">
           {editable ? (
             <textarea
               className="bl-modal-desc-input"
-              value={description}
-              onChange={(e) => setDescription(e.target.value)}
+              value={bodyVal}
+              onChange={(e) => setBodyVal(e.target.value)}
               rows={8}
             />
           ) : (
             <div className="bl-modal-desc">
-              {(item.description || "").split("\n").map((line, i) => {
-                const m = line.match(BACKLOG_DESC_PREFIX_RE);
+              {(body || "").split("\n").map((line, i) => {
+                const m = line.match(TASK_DESC_PREFIX_RE);
                 return (
                   <div key={i} className="bl-modal-desc-line">
                     {m ? <><strong>{m[1]}</strong>{line.slice(m[1].length)}</> : (line || " ")}
@@ -651,11 +690,9 @@ function BacklogDetailModal({ item, editable, onClose, onSave }) {
           )}
 
           <div className="bl-modal-meta">
-            <div><span className="bl-modal-meta-label">Owner</span><span>{item.owner || "—"}</span></div>
-            <div><span className="bl-modal-meta-label">Est</span><span>{formatEstMeta(item)}</span></div>
-            <div><span className="bl-modal-meta-label">Статус / для старта</span><span>{item.status || "—"}</span></div>
-            <div><span className="bl-modal-meta-label">База оценки / источник</span><span>{item.source || "—"}</span></div>
-            <div><span className="bl-modal-meta-label">Ист.</span><span>{item.origin || "—"}</span></div>
+            {meta.map(({ label, value }) => (
+              <div key={label}><span className="bl-modal-meta-label">{label}</span><span>{value}</span></div>
+            ))}
           </div>
         </div>
 
@@ -672,9 +709,10 @@ function BacklogDetailModal({ item, editable, onClose, onSave }) {
 
 /* ---------------- inline edit controls ---------------- */
 
-function AssignmentEditor({ a, hidePercentEst, onChange, onDelete, predecessorLabel, onStartLink, linking, snapWarning, onSnap }) {
+function AssignmentEditor({ a, hidePercentEst, onChange, onDelete, predecessorLabel, onStartLink, linking, snapWarning, onSnap, onOpenDetail }) {
   return (
     <div className="tg-editor" onClick={(e) => e.stopPropagation()} onMouseDown={(e) => e.stopPropagation()}>
+      <button className="tg-e-detail" onClick={onOpenDetail} title="Открыть карточку">ⓘ</button>
       <input
         className="tg-e-project"
         defaultValue={a.project}
@@ -750,7 +788,19 @@ function AssignmentEditor({ a, hidePercentEst, onChange, onDelete, predecessorLa
 function GanttBar({
   bar, color, gridRow, editMode, dragVisual, linkingFor, assignmentsById,
   onBeginDrag, onUpdate, onDelete, setLinkingFor, setHoveredId, setBarRef,
+  onOpenDetail, beginClickTracking, wasRealClick,
 }) {
+  // Viewer mode: a plain click opens the shared task-detail modal (bars
+  // aren't draggable in viewer mode, so no other click behavior to protect).
+  // Edit mode: the inline AssignmentEditor is always visible already, so
+  // there's no click-vs-edit-card ambiguity — its own ⓘ button opens the
+  // modal instead (see AssignmentEditor's onOpenDetail).
+  const viewerClickHandlers = !editMode
+    ? {
+        onMouseDown: beginClickTracking,
+        onClick: (e) => { if (wasRealClick(e)) onOpenDetail(bar.assignment.id) },
+      }
+    : {};
   if (bar.kind === "idle") {
     return (
       <div className="tg-bar tg-idle" style={{ gridColumn: `2 / ${DAY_COLS + 2}`, gridRow }}>
@@ -776,6 +826,7 @@ function GanttBar({
       <div
         className={`tg-bar tg-continuous${editMode ? " tg-editing" : ""}${bar.assignment.__pending ? " tg-bar-pending" : ""}`}
         style={{ gridColumn: `${bar.colStart + 2} / ${bar.colEnd + 2}`, gridRow, background: `${color}2e` }}
+        {...viewerClickHandlers}
       >
         <span className="tg-bar-label">{bar.assignment.project || "Untitled"} · continuous</span>
         {bar.assignment.__pending && <span className="tg-pending-badge" title="Unsaved change">unsaved</span>}
@@ -785,6 +836,7 @@ function GanttBar({
             hidePercentEst
             onChange={(patch) => onUpdate(bar.assignment.id, patch)}
             onDelete={() => onDelete(bar.assignment.id)}
+            onOpenDetail={() => onOpenDetail(bar.assignment.id)}
           />
         )}
       </div>
@@ -799,6 +851,7 @@ function GanttBar({
         ref={setBarRef(bar.assignment.id)}
         className={`tg-bar tg-done${editMode ? " tg-editing" : ""}${bar.assignment.__pending ? " tg-bar-pending" : ""}`}
         style={{ gridColumn: `${bar.colStart + 2} / ${bar.colEnd + 2}`, gridRow, background: `${color}73` }}
+        {...viewerClickHandlers}
       >
         <span className="tg-bar-label">✓ {bar.assignment.project || "Untitled"} · done</span>
         {bar.assignment.__pending && <span className="tg-pending-badge" title="Unsaved change">unsaved</span>}
@@ -807,6 +860,7 @@ function GanttBar({
             a={bar.assignment}
             onChange={(patch) => onUpdate(bar.assignment.id, patch)}
             onDelete={() => onDelete(bar.assignment.id)}
+            onOpenDetail={() => onOpenDetail(bar.assignment.id)}
           />
         )}
       </div>
@@ -841,12 +895,20 @@ function GanttBar({
         gridRow,
         ...(isQueued ? { borderColor: color, color } : {}),
       }}
-      onMouseDown={editMode && linkingFor == null ? (e) => onBeginDrag(e, "move", bar.assignment, isQueued, bar.colStart, bar.colEnd, baseStartDate) : undefined}
-      onClick={editMode && linkingFor != null ? (e) => {
-        e.stopPropagation();
-        if (linkingFor !== bar.assignment.id) onUpdate(linkingFor, { depends_on: bar.assignment.id });
-        setLinkingFor(null);
-      } : undefined}
+      onMouseDown={
+        !editMode
+          ? beginClickTracking
+          : (linkingFor == null ? (e) => onBeginDrag(e, "move", bar.assignment, isQueued, bar.colStart, bar.colEnd, baseStartDate) : undefined)
+      }
+      onClick={
+        !editMode
+          ? (e) => { if (wasRealClick(e)) onOpenDetail(bar.assignment.id) }
+          : (linkingFor != null ? (e) => {
+              e.stopPropagation();
+              if (linkingFor !== bar.assignment.id) onUpdate(linkingFor, { depends_on: bar.assignment.id });
+              setLinkingFor(null);
+            } : undefined)
+      }
       onMouseEnter={() => setHoveredId(bar.assignment.id)}
       onMouseLeave={() => setHoveredId((h) => (h === bar.assignment.id ? null : h))}
     >
@@ -886,6 +948,7 @@ function GanttBar({
           onSnap={() => warn && onUpdate(bar.assignment.id, isQueued
             ? { queue_start: toISODate(addDays(warn.predEnd, 1)) }
             : { start_date: toISODate(addDays(warn.predEnd, 1)) })}
+          onOpenDetail={() => onOpenDetail(bar.assignment.id)}
         />
       )}
     </div>
@@ -931,9 +994,9 @@ export default function TeamGantt() {
   const [newItemHours, setNewItemHours] = useState("");
   const [confirmDeleteId, setConfirmDeleteId] = useState(null); // backlog item.id awaiting delete confirm
   const autoScrollRef = useRef(null); // { speed, rafId } while a drag is near a viewport edge
-  const rowPointerDownRef = useRef(null); // {x,y} on row mousedown, to tell a click from a completed drag
+  const clickPointerDownRef = useRef(null); // {x,y} on mousedown, to tell a click from a completed drag (backlog rows + gantt bars)
 
-  const [detailItemId, setDetailItemId] = useState(null); // backlog item.id shown in the task-detail modal
+  const [detailTarget, setDetailTarget] = useState(null); // {type:"backlog"|"gantt", id} shown in the shared task-detail modal, or null
   const [blSearch, setBlSearch] = useState("");
   const [blSearchDebounced, setBlSearchDebounced] = useState("");
   const [blPriorityFilter, setBlPriorityFilter] = useState([]); // selected priority chip values; [] = all
@@ -1332,29 +1395,38 @@ export default function TeamGantt() {
     setTimeout(() => setBacklogToast(""), 5000);
   }
 
-  /* ---------------- backlog: row click → task detail modal ---------------- */
-  // A row click opens the modal, UNLESS the click landed on an interactive
-  // control (priority chip/select, assign select, delete button, drag grip)
-  // or the pointer moved more than 5px between mousedown and click (i.e. it
-  // was a completed drag, not a click).
-  function handleBacklogRowPointerDown(e) {
-    rowPointerDownRef.current = { x: e.clientX, y: e.clientY };
+  /* ---------------- shared: row/bar click → task detail modal ---------------- */
+  // A click opens the modal, UNLESS the pointer moved more than 5px between
+  // mousedown and click (i.e. it was a completed drag, not a click). Shared
+  // by backlog rows and Gantt bars — see wasRealClick's call sites.
+  function beginClickTracking(e) {
+    clickPointerDownRef.current = { x: e.clientX, y: e.clientY };
   }
 
+  function wasRealClick(e) {
+    const start = clickPointerDownRef.current;
+    clickPointerDownRef.current = null;
+    if (!start) return true;
+    const dx = e.clientX - start.x;
+    const dy = e.clientY - start.y;
+    return Math.sqrt(dx * dx + dy * dy) <= 5;
+  }
+
+  // A backlog row click opens the modal, UNLESS the click landed on an
+  // interactive control (priority chip/select, assign select, delete button,
+  // drag grip) or it was a completed drag (see wasRealClick).
   function handleBacklogRowClick(e, item) {
     if (e.target.closest("button, select, .bl-grip")) return;
-    const start = rowPointerDownRef.current;
-    rowPointerDownRef.current = null;
-    if (start) {
-      const dx = e.clientX - start.x;
-      const dy = e.clientY - start.y;
-      if (Math.sqrt(dx * dx + dy * dy) > 5) return;
-    }
-    setDetailItemId(item.id);
+    if (!wasRealClick(e)) return;
+    setDetailTarget({ type: "backlog", id: item.id });
   }
 
-  function closeBacklogDetail() {
-    setDetailItemId(null);
+  function openGanttDetail(assignmentId) {
+    setDetailTarget({ type: "gantt", id: assignmentId });
+  }
+
+  function closeTaskDetail() {
+    setDetailTarget(null);
   }
 
   function handleLaneDrop(e, engineerId) {
@@ -1566,10 +1638,10 @@ export default function TeamGantt() {
   // Looked up from the full (unfiltered) draft list — the modal must still
   // find the item even if a filter is currently hiding its row, and it stays
   // "live" across Save/Undo since it's derived from draft, not a snapshot.
-  const detailItem = useMemo(
-    () => (detailItemId == null ? null : (draft.backlogItems || []).find((b) => b.id === detailItemId) || null),
-    [draft.backlogItems, detailItemId]
-  );
+  const detailBacklogItem = useMemo(() => {
+    if (detailTarget?.type !== "backlog") return null;
+    return (draft.backlogItems || []).find((b) => b.id === detailTarget.id) || null;
+  }, [draft.backlogItems, detailTarget]);
 
   const sortedEngineers = useMemo(() => {
     return [...(draft.engineers || [])].sort((a, b) => {
@@ -1606,6 +1678,27 @@ export default function TeamGantt() {
       for (const a of e.assignments || []) m[a.id] = a;
     return m;
   }, [draft.engineers]);
+
+  // Index of every rendered bar by assignment id, for the Gantt task-detail
+  // modal's meta grid — reuses the exact dayX/estY/startDate the visible bar
+  // already computed rather than recomputing the date math a second time.
+  const barInfoByAssignmentId = useMemo(() => {
+    const m = {};
+    for (const { engineer: eng, bars } of lanes) {
+      for (const b of bars) {
+        if (b.assignment) m[b.assignment.id] = { bar: b, engineerName: eng.name };
+      }
+    }
+    return m;
+  }, [lanes]);
+
+  const detailAssignmentInfo = useMemo(() => {
+    if (detailTarget?.type !== "gantt") return null;
+    const assignment = assignmentsById[detailTarget.id];
+    const info = barInfoByAssignmentId[detailTarget.id];
+    if (!assignment || !info) return null;
+    return { assignment, bar: info.bar, engineerName: info.engineerName };
+  }, [detailTarget, assignmentsById, barInfoByAssignmentId]);
 
   // Undirected adjacency over depends_on links, used to find the full connected
   // chain to highlight when hovering any bar in it.
@@ -1908,6 +2001,9 @@ export default function TeamGantt() {
                     setLinkingFor={setLinkingFor}
                     setHoveredId={setHoveredId}
                     setBarRef={setBarRef}
+                    onOpenDetail={openGanttDetail}
+                    beginClickTracking={beginClickTracking}
+                    wasRealClick={wasRealClick}
                   />
                 ))}
               </div>
@@ -2102,7 +2198,7 @@ export default function TeamGantt() {
                   onDragOver={(e) => handleBacklogRowDragOver(e, row.item.id)}
                   onDrop={(e) => handleBacklogRowDrop(e, row.item.id)}
                   onDragEnd={clearBacklogDrag}
-                  onMouseDown={handleBacklogRowPointerDown}
+                  onMouseDown={beginClickTracking}
                   onClick={(e) => handleBacklogRowClick(e, row.item)}
                 >
                   <td className="bl-td-grip">{editMode && <span className="bl-grip">⠿</span>}</td>
@@ -2173,12 +2269,40 @@ export default function TeamGantt() {
         </div>
       </div>
 
-      {detailItem && (
-        <BacklogDetailModal
-          item={detailItem}
+      {detailBacklogItem && (
+        <TaskDetailModal
+          taskKey={`b-${detailBacklogItem.id}`}
+          title={detailBacklogItem.title}
+          titleEditable
+          badge={<span className={`bl-chip ${priorityChipClass(detailBacklogItem.priority)}`}>{detailBacklogItem.priority}</span>}
+          body={detailBacklogItem.description}
+          meta={[
+            { label: "Owner", value: detailBacklogItem.owner || "—" },
+            { label: "Est", value: formatEstMeta(detailBacklogItem) },
+            { label: "Статус / для старта", value: detailBacklogItem.status || "—" },
+            { label: "База оценки / источник", value: detailBacklogItem.source || "—" },
+            { label: "Ист.", value: detailBacklogItem.origin || "—" },
+          ]}
           editable={editMode}
-          onClose={closeBacklogDetail}
-          onSave={(patch) => updateBacklogItem(detailItem.id, patch)}
+          onClose={closeTaskDetail}
+          onSave={(patch) => updateBacklogItem(detailBacklogItem.id, {
+            ...(patch.title !== undefined ? { title: patch.title } : {}),
+            ...(patch.body !== undefined ? { description: patch.body } : {}),
+          })}
+        />
+      )}
+
+      {detailAssignmentInfo && (
+        <TaskDetailModal
+          taskKey={`g-${detailAssignmentInfo.assignment.id}`}
+          title={detailAssignmentInfo.assignment.project || "Untitled"}
+          titleEditable={false}
+          badge={<GanttDetailBadge assignment={detailAssignmentInfo.assignment} />}
+          body={detailAssignmentInfo.assignment.note}
+          meta={ganttDetailMeta(detailAssignmentInfo.bar, detailAssignmentInfo.assignment, detailAssignmentInfo.engineerName)}
+          editable={editMode}
+          onClose={closeTaskDetail}
+          onSave={(patch) => updateAssignment(detailAssignmentInfo.assignment.id, { note: patch.body })}
         />
       )}
     </div>
@@ -2289,6 +2413,7 @@ function Style() {
       .tg-e-status button{width:20px;height:20px;border-radius:5px;border:1px solid var(--border);background:var(--card);color:var(--muted);cursor:pointer;font-size:10px;font-weight:700}
       .tg-e-status button.on{background:var(--accent1);color:#06091a;border-color:var(--accent1)}
       .tg-e-del{width:20px;height:20px;border-radius:5px;border:1px solid var(--danger);background:none;color:var(--danger);cursor:pointer;font-size:10px}
+      .tg-e-detail{width:20px;height:20px;border-radius:5px;border:1px solid var(--border);background:var(--card);color:var(--accent1);cursor:pointer;font-size:11px;line-height:1}
 
       .tg-e-depends{display:flex;align-items:center;gap:6px;font-size:11px;color:var(--muted);width:100%}
       .tg-e-depends-label{white-space:nowrap}
@@ -2391,6 +2516,14 @@ function Style() {
       .bl-modal-meta{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:10px 20px;border-top:1px solid var(--border);padding-top:14px}
       .bl-modal-meta-label{display:block;font-size:9.5px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin-bottom:2px}
       .bl-modal-footer{display:flex;gap:8px;justify-content:flex-end;margin-top:16px;padding-top:14px;border-top:1px solid var(--border)}
+
+      .tg-modal-badge-wrap{display:flex;align-items:center;gap:8px}
+      .tg-status-chip{display:inline-block;font-size:10.5px;font-weight:700;padding:2px 8px;border-radius:10px;white-space:nowrap;letter-spacing:.02em;text-transform:uppercase}
+      .tg-status-active{background:rgba(0,207,255,.14);color:var(--accent1)}
+      .tg-status-queued{background:rgba(120,120,140,.16);color:var(--muted)}
+      .tg-status-continuous{background:rgba(0,207,255,.14);color:var(--accent1)}
+      .tg-status-done{background:rgba(34,197,94,.16);color:var(--success)}
+      .tg-modal-percent{font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums}
 
       @media(max-width:900px){
         .tg-wrap{padding:8px 12px 64px}
