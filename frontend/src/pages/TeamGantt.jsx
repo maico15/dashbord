@@ -1966,6 +1966,20 @@ export default function TeamGantt() {
 
             return (
               <div key={e.id} style={{ display: "contents" }}>
+                {/* Full-width row separator: the sticky name cell already draws
+                 * its own border-bottom (opaque background, so it must paint its
+                 * own line rather than reveal one underneath); this covers the
+                 * rest — the entire scrollable timeline — with the identical
+                 * border style so the two segments read as one continuous line.
+                 * A plain grid item stretches across its whole column/row span
+                 * regardless of scroll position, so it isn't clipped to the
+                 * viewport. One per engineer, drawn below their whole
+                 * stacked-bar block — never between their own sub-rows — since
+                 * it spans the same laneRowSpan as the bars. */}
+                <div
+                  className="tg-row-divider"
+                  style={{ gridColumn: `2 / ${DAY_COLS + 2}`, gridRow: laneRowSpan }}
+                />
                 <div className="tg-name-row" style={{ gridColumn: 1, gridRow: laneRowSpan }}>
                   <span className="tg-dot" style={{ background: color }} />
                   <span className="tg-eng-name">{e.name}</span>
@@ -2371,6 +2385,7 @@ function Style() {
       .tg-today-line{position:absolute;left:50%;top:0;bottom:0;width:2px;background:var(--success);transform:translateX(-50%);pointer-events:none;z-index:1}
 
       .tg-name-row{position:sticky;left:0;background:var(--bg);z-index:3;display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:6px 8px 6px 0;border-bottom:1px solid var(--border)}
+      .tg-row-divider{position:relative;pointer-events:none;z-index:1;border-bottom:1px solid var(--border)}
       .tg-dot{width:9px;height:9px;border-radius:50%;flex:none}
       .tg-eng-name{font-size:13px;font-weight:600;white-space:nowrap}
       .tg-add-btn{margin-left:auto;font-size:10.5px;font-weight:600;color:var(--accent1);background:none;border:1px solid var(--border);border-radius:7px;padding:2px 8px;cursor:pointer;font-family:inherit;position:relative;z-index:2}
