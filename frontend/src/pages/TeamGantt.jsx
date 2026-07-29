@@ -551,6 +551,125 @@ function EstHoursCell({ item, editable, onChange }) {
   );
 }
 
+/* ---------------- backlog: task detail modal ---------------- */
+
+const BACKLOG_DESC_PREFIX_RE = /^(ЦЕЛЬ:|ЧТО СДЕЛАТЬ:|ПРОФИТ:)/;
+
+function formatEstMeta(item) {
+  if (item.est_hours != null) return formatEstHours(item.est_hours);
+  return `${item.est_days} дн.`;
+}
+
+/** Full task detail, opened by clicking a backlog row (see
+ *  handleBacklogRowClick). Edit mode swaps title/description for an input +
+ *  textarea with a Save button (persisted via the same updateBacklogItem /
+ *  draft-queue path as every other backlog edit); viewer mode renders the
+ *  description read-only with \n preserved and the ЦЕЛЬ:/ЧТО СДЕЛАТЬ:/ПРОФИТ:
+ *  prefixes bolded. Esc, a backdrop click, or × all close it without saving. */
+function BacklogDetailModal({ item, editable, onClose, onSave }) {
+  const [title, setTitle] = useState(item.title);
+  const [description, setDescription] = useState(item.description || "");
+  const containerRef = useRef(null);
+
+  useEffect(() => {
+    setTitle(item.title);
+    setDescription(item.description || "");
+  }, [item.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    containerRef.current?.focus();
+    function onKeyDown(e) {
+      if (e.key === "Escape") onClose();
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [onClose]);
+
+  function trapTab(e) {
+    if (e.key !== "Tab" || !containerRef.current) return;
+    const focusables = containerRef.current.querySelectorAll(
+      'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
+    );
+    if (!focusables.length) return;
+    const first = focusables[0];
+    const last = focusables[focusables.length - 1];
+    if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus() }
+    else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus() }
+  }
+
+  const dirty = editable && (title !== item.title || description !== (item.description || ""));
+
+  function handleSave() {
+    const patch = {};
+    if (title.trim() && title !== item.title) patch.title = title.trim();
+    if (description !== (item.description || "")) patch.description = description;
+    if (Object.keys(patch).length) onSave(patch);
+    onClose();
+  }
+
+  return (
+    <div className="bl-modal-backdrop" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose() }}>
+      <div
+        className="card bl-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-label={item.title || "Backlog item"}
+        tabIndex={-1}
+        ref={containerRef}
+        onKeyDown={trapTab}
+      >
+        <button className="bl-modal-close" onClick={onClose} title="Закрыть (Esc)">×</button>
+
+        <div className="bl-modal-head">
+          {editable ? (
+            <input className="bl-modal-title-input" value={title} onChange={(e) => setTitle(e.target.value)} />
+          ) : (
+            <h3 className="bl-modal-title">{item.title}</h3>
+          )}
+          <span className={`bl-chip ${priorityChipClass(item.priority)}`}>{item.priority}</span>
+        </div>
+
+        <div className="bl-modal-body">
+          {editable ? (
+            <textarea
+              className="bl-modal-desc-input"
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+              rows={8}
+            />
+          ) : (
+            <div className="bl-modal-desc">
+              {(item.description || "").split("\n").map((line, i) => {
+                const m = line.match(BACKLOG_DESC_PREFIX_RE);
+                return (
+                  <div key={i} className="bl-modal-desc-line">
+                    {m ? <><strong>{m[1]}</strong>{line.slice(m[1].length)}</> : (line || " ")}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          <div className="bl-modal-meta">
+            <div><span className="bl-modal-meta-label">Owner</span><span>{item.owner || "—"}</span></div>
+            <div><span className="bl-modal-meta-label">Est</span><span>{formatEstMeta(item)}</span></div>
+            <div><span className="bl-modal-meta-label">Статус / для старта</span><span>{item.status || "—"}</span></div>
+            <div><span className="bl-modal-meta-label">База оценки / источник</span><span>{item.source || "—"}</span></div>
+            <div><span className="bl-modal-meta-label">Ист.</span><span>{item.origin || "—"}</span></div>
+          </div>
+        </div>
+
+        {editable && (
+          <div className="bl-modal-footer">
+            <button className="tg-btn" disabled={!dirty} onClick={handleSave}>Сохранить</button>
+            <button className="tg-btn" onClick={onClose}>Отмена</button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 /* ---------------- inline edit controls ---------------- */
 
 function AssignmentEditor({ a, hidePercentEst, onChange, onDelete, predecessorLabel, onStartLink, linking, snapWarning, onSnap }) {
@@ -812,6 +931,13 @@ export default function TeamGantt() {
   const [newItemHours, setNewItemHours] = useState("");
   const [confirmDeleteId, setConfirmDeleteId] = useState(null); // backlog item.id awaiting delete confirm
   const autoScrollRef = useRef(null); // { speed, rafId } while a drag is near a viewport edge
+  const rowPointerDownRef = useRef(null); // {x,y} on row mousedown, to tell a click from a completed drag
+
+  const [detailItemId, setDetailItemId] = useState(null); // backlog item.id shown in the task-detail modal
+  const [blSearch, setBlSearch] = useState("");
+  const [blSearchDebounced, setBlSearchDebounced] = useState("");
+  const [blPriorityFilter, setBlPriorityFilter] = useState([]); // selected priority chip values; [] = all
+  const [blOwnerFilter, setBlOwnerFilter] = useState(""); // "" = все
 
   // Draft layer: nothing in edit mode writes to the backend until Save. Every
   // action pushes onto changeQueue; computeDraftState (below) replays it on
@@ -855,6 +981,11 @@ export default function TeamGantt() {
   }
 
   useEffect(() => { load() }, []);
+
+  useEffect(() => {
+    const t = setTimeout(() => setBlSearchDebounced(blSearch), 200);
+    return () => clearTimeout(t);
+  }, [blSearch]);
 
   const ensurePassword = () => {
     if (pwRef.current) return pwRef.current;
@@ -1120,15 +1251,18 @@ export default function TeamGantt() {
     );
   }
 
+  // Reorder/assign drag is disabled while any backlog filter is active —
+  // dropping between rows hidden by the filter would produce a surprising
+  // order (see the `bl-filter-hint` shown next to the filter bar).
   function handleBacklogRowDragStart(e, itemId) {
-    if (!editMode) return;
+    if (!editMode || hasActiveBacklogFilter) return;
     e.dataTransfer.effectAllowed = "move";
     e.dataTransfer.setData("text/plain", String(itemId));
     setBacklogDragId(itemId);
   }
 
   function handleBacklogRowDragOver(e, itemId) {
-    if (!editMode || backlogDragId == null) return;
+    if (!editMode || hasActiveBacklogFilter || backlogDragId == null) return;
     e.preventDefault();
     e.dataTransfer.dropEffect = "move";
     updateAutoScroll(e.clientY);
@@ -1138,7 +1272,7 @@ export default function TeamGantt() {
   }
 
   function handleBacklogRowDrop(e, targetId) {
-    if (!editMode) return;
+    if (!editMode || hasActiveBacklogFilter) return;
     e.preventDefault();
     e.stopPropagation();
     const draggingId = backlogDragId;
@@ -1156,14 +1290,14 @@ export default function TeamGantt() {
 
   // Dropping onto a group header counts as dropping at the top of that block.
   function handleBacklogHeaderDragOver(e) {
-    if (!editMode || backlogDragId == null) return;
+    if (!editMode || hasActiveBacklogFilter || backlogDragId == null) return;
     e.preventDefault();
     e.dataTransfer.dropEffect = "move";
     updateAutoScroll(e.clientY);
   }
 
   function handleBacklogHeaderDrop(e, rank) {
-    if (!editMode) return;
+    if (!editMode || hasActiveBacklogFilter) return;
     e.preventDefault();
     e.stopPropagation();
     const draggingId = backlogDragId;
@@ -1196,6 +1330,31 @@ export default function TeamGantt() {
     setConfirmDeleteId(null);
     setBacklogToast("Удалено (не вернётся при синке)");
     setTimeout(() => setBacklogToast(""), 5000);
+  }
+
+  /* ---------------- backlog: row click → task detail modal ---------------- */
+  // A row click opens the modal, UNLESS the click landed on an interactive
+  // control (priority chip/select, assign select, delete button, drag grip)
+  // or the pointer moved more than 5px between mousedown and click (i.e. it
+  // was a completed drag, not a click).
+  function handleBacklogRowPointerDown(e) {
+    rowPointerDownRef.current = { x: e.clientX, y: e.clientY };
+  }
+
+  function handleBacklogRowClick(e, item) {
+    if (e.target.closest("button, select, .bl-grip")) return;
+    const start = rowPointerDownRef.current;
+    rowPointerDownRef.current = null;
+    if (start) {
+      const dx = e.clientX - start.x;
+      const dy = e.clientY - start.y;
+      if (Math.sqrt(dx * dx + dy * dy) > 5) return;
+    }
+    setDetailItemId(item.id);
+  }
+
+  function closeBacklogDetail() {
+    setDetailItemId(null);
   }
 
   function handleLaneDrop(e, engineerId) {
@@ -1327,8 +1486,10 @@ export default function TeamGantt() {
 
   // Flattened render list: a non-draggable group-header entry before the
   // first item of each priority rank actually present, then items with a
-  // continuous `num` (headers aren't counted in the # column).
-  const backlogRows = useMemo(() => {
+  // continuous `num` (headers aren't counted in the # column). Computed over
+  // the FULL unfiltered set so `num` is always the row's true position —
+  // filtering (below) only hides rows, it never renumbers them.
+  const backlogRowsAll = useMemo(() => {
     const rows = [];
     let lastRank = null;
     let num = 0;
@@ -1343,6 +1504,72 @@ export default function TeamGantt() {
     }
     return rows;
   }, [groupedBacklog]);
+
+  const distinctBacklogOwners = useMemo(() => {
+    const set = new Set();
+    for (const b of groupedBacklog) if (b.owner) set.add(b.owner);
+    return Array.from(set).sort((a, b) => a.localeCompare(b));
+  }, [groupedBacklog]);
+
+  const hasActiveBacklogFilter =
+    blPriorityFilter.length > 0 || blOwnerFilter !== "" || blSearchDebounced.trim() !== "";
+
+  function matchesBacklogFilters(item) {
+    if (blPriorityFilter.length && !blPriorityFilter.some((p) => priorityRank(item.priority) === priorityRank(p))) {
+      return false;
+    }
+    if (blOwnerFilter && !(item.owner || "").toLowerCase().includes(blOwnerFilter.toLowerCase())) return false;
+    if (blSearchDebounced.trim()) {
+      const q = blSearchDebounced.trim().toLowerCase();
+      const haystack = `${item.title || ""} ${item.description || ""} ${item.source || ""}`.toLowerCase();
+      if (!haystack.includes(q)) return false;
+    }
+    return true;
+  }
+
+  const visibleBacklogIds = useMemo(() => {
+    return new Set(groupedBacklog.filter(matchesBacklogFilters).map((b) => b.id));
+  }, [groupedBacklog, blPriorityFilter, blOwnerFilter, blSearchDebounced]);
+
+  // Filtering only hides rows — a group header survives only if at least one
+  // of the item rows following it (before the next header) is still visible,
+  // and every surviving item keeps the `num` it had in backlogRowsAll.
+  const backlogRows = useMemo(() => {
+    if (!hasActiveBacklogFilter) return backlogRowsAll;
+    const kept = [];
+    for (let i = 0; i < backlogRowsAll.length; i++) {
+      const row = backlogRowsAll[i];
+      if (row.kind === "item") {
+        if (visibleBacklogIds.has(row.item.id)) kept.push(row);
+        continue;
+      }
+      let hasVisible = false;
+      for (let j = i + 1; j < backlogRowsAll.length && backlogRowsAll[j].kind === "item"; j++) {
+        if (visibleBacklogIds.has(backlogRowsAll[j].item.id)) { hasVisible = true; break; }
+      }
+      if (hasVisible) kept.push(row);
+    }
+    return kept;
+  }, [backlogRowsAll, hasActiveBacklogFilter, visibleBacklogIds]);
+
+  function toggleBacklogPriorityFilter(p) {
+    setBlPriorityFilter((cur) => (cur.includes(p) ? cur.filter((x) => x !== p) : [...cur, p]));
+  }
+
+  function resetBacklogFilters() {
+    setBlSearch("");
+    setBlSearchDebounced("");
+    setBlPriorityFilter([]);
+    setBlOwnerFilter("");
+  }
+
+  // Looked up from the full (unfiltered) draft list — the modal must still
+  // find the item even if a filter is currently hiding its row, and it stays
+  // "live" across Save/Undo since it's derived from draft, not a snapshot.
+  const detailItem = useMemo(
+    () => (detailItemId == null ? null : (draft.backlogItems || []).find((b) => b.id === detailItemId) || null),
+    [draft.backlogItems, detailItemId]
+  );
 
   const sortedEngineers = useMemo(() => {
     return [...(draft.engineers || [])].sort((a, b) => {
@@ -1692,7 +1919,49 @@ export default function TeamGantt() {
       <div className="bl-section">
         <div className="bl-head-row">
           <h2 className="bl-title">Backlog</h2>
-          <span className="bl-count">{draft.backlogItems.length} item{draft.backlogItems.length === 1 ? "" : "s"}</span>
+          <span className="bl-count">
+            {hasActiveBacklogFilter
+              ? `${visibleBacklogIds.size} of ${groupedBacklog.length}`
+              : `${draft.backlogItems.length} item${draft.backlogItems.length === 1 ? "" : "s"}`}
+          </span>
+
+          <div className="bl-filters">
+            <input
+              className="bl-filter-search"
+              type="search"
+              placeholder="поиск…"
+              value={blSearch}
+              onChange={(e) => setBlSearch(e.target.value)}
+            />
+            <div className="bl-filter-priorities">
+              {BACKLOG_PRIORITIES.map((p) => (
+                <button
+                  key={p}
+                  type="button"
+                  className={`bl-chip bl-filter-chip ${priorityChipClass(p)}${
+                    blPriorityFilter.includes(p) ? " bl-filter-chip-active" : ""
+                  }`}
+                  onClick={() => toggleBacklogPriorityFilter(p)}
+                >
+                  {p}
+                </button>
+              ))}
+            </div>
+            <select
+              className="bl-filter-owner"
+              value={blOwnerFilter}
+              onChange={(e) => setBlOwnerFilter(e.target.value)}
+            >
+              <option value="">все</option>
+              {distinctBacklogOwners.map((o) => (
+                <option key={o} value={o}>{o}</option>
+              ))}
+            </select>
+            {hasActiveBacklogFilter && (
+              <button type="button" className="bl-filter-reset" onClick={resetBacklogFilters}>сбросить</button>
+            )}
+          </div>
+
           {editMode && (
             <button className="tg-btn" onClick={() => setAddingItem((v) => !v)}>+ item</button>
           )}
@@ -1705,6 +1974,10 @@ export default function TeamGantt() {
             {backlogSyncing ? "⟳ Syncing…" : "⟳ Sync from Sheet"}
           </button>
         </div>
+
+        {editMode && hasActiveBacklogFilter && (
+          <div className="bl-filter-hint">сбросьте фильтр, чтобы менять порядок</div>
+        )}
 
         <div className="bl-source-row">
           <span>источник: Google Sheet</span>
@@ -1806,6 +2079,9 @@ export default function TeamGantt() {
               {draft.backlogItems.length === 0 && !addingItem && (
                 <tr><td className="bl-empty" colSpan={editMode ? 12 : 10}>Backlog is empty</td></tr>
               )}
+              {draft.backlogItems.length > 0 && backlogRows.length === 0 && (
+                <tr><td className="bl-empty" colSpan={editMode ? 12 : 10}>Нет совпадений</td></tr>
+              )}
               {backlogRows.map((row) => row.kind === "header" ? (
                 <tr
                   key={`bl-hdr-${row.rank}`}
@@ -1818,7 +2094,7 @@ export default function TeamGantt() {
               ) : (
                 <tr
                   key={row.item.id}
-                  draggable={editMode}
+                  draggable={editMode && !hasActiveBacklogFilter}
                   className={`bl-row${backlogDragId === row.item.id ? " bl-row-dragging" : ""}${
                     backlogOverRow?.id === row.item.id ? ` bl-row-drop-${backlogOverRow.pos}` : ""
                   }${row.item.__pending ? " bl-row-pending" : ""}`}
@@ -1826,6 +2102,8 @@ export default function TeamGantt() {
                   onDragOver={(e) => handleBacklogRowDragOver(e, row.item.id)}
                   onDrop={(e) => handleBacklogRowDrop(e, row.item.id)}
                   onDragEnd={clearBacklogDrag}
+                  onMouseDown={handleBacklogRowPointerDown}
+                  onClick={(e) => handleBacklogRowClick(e, row.item)}
                 >
                   <td className="bl-td-grip">{editMode && <span className="bl-grip">⠿</span>}</td>
                   <td className="bl-td-num">{row.num}</td>
@@ -1894,6 +2172,15 @@ export default function TeamGantt() {
           </table>
         </div>
       </div>
+
+      {detailItem && (
+        <BacklogDetailModal
+          item={detailItem}
+          editable={editMode}
+          onClose={closeBacklogDetail}
+          onSave={(patch) => updateBacklogItem(detailItem.id, patch)}
+        />
+      )}
     </div>
   );
 }
@@ -2017,7 +2304,16 @@ function Style() {
       .bl-section{margin-top:36px}
       .bl-head-row{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:8px}
       .bl-title{font-size:16px;font-weight:800;margin:0;letter-spacing:-.01em}
-      .bl-count{font-size:11.5px;color:var(--muted)}
+      .bl-count{font-size:11.5px;color:var(--muted);white-space:nowrap}
+      .bl-filters{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-left:auto}
+      .bl-filter-search{font-family:inherit;font-size:11.5px;border-radius:6px;border:1px solid var(--border);background:var(--card);color:var(--text);padding:4px 8px;width:140px}
+      .bl-filter-priorities{display:flex;gap:4px}
+      .bl-filter-chip{border:1px solid transparent;font-family:inherit;cursor:pointer;opacity:.5}
+      .bl-filter-chip:hover{opacity:.8}
+      .bl-filter-chip-active{opacity:1;border-color:currentColor}
+      .bl-filter-owner{font-family:inherit;font-size:11.5px;border-radius:6px;border:1px solid var(--border);background:var(--card);color:var(--text);padding:3px 6px;max-width:160px}
+      .bl-filter-reset{background:none;border:none;color:var(--accent1);font-size:11px;cursor:pointer;font-family:inherit;text-decoration:underline;padding:0}
+      .bl-filter-hint{font-size:10.5px;color:var(--warning);margin:-4px 0 8px}
       .bl-source-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:11px;color:var(--muted);margin-bottom:12px}
       .bl-url-display{color:var(--text);font-family:monospace;font-size:10.5px}
       .bl-url-edit-btn{background:none;border:1px solid var(--border);border-radius:6px;color:var(--accent1);font-size:11px;padding:1px 6px;cursor:pointer;font-family:inherit}
@@ -2042,6 +2338,7 @@ function Style() {
       .bl-empty{text-align:center;color:var(--muted);padding:24px 0}
       .bl-group-header td{padding:4px 10px;background:var(--panel2, rgba(127,127,127,.08));color:var(--muted);font-size:10.5px;font-weight:700;letter-spacing:.04em;text-transform:uppercase}
       .bl-grip{color:var(--muted);font-size:13px;line-height:1}
+      .bl-row{cursor:pointer}
       .bl-row[draggable="true"]{cursor:grab}
       .bl-row[draggable="true"]:active{cursor:grabbing}
       .bl-row-dragging{opacity:.4}
@@ -2080,6 +2377,20 @@ function Style() {
       .bl-del-btn.warn{background:var(--danger);color:#fff;border-color:var(--danger)}
       .bl-confirm-del{display:flex;align-items:center;gap:6px;white-space:nowrap}
       .bl-confirm-text{font-size:10.5px;color:var(--warning)}
+
+      .bl-modal-backdrop{position:fixed;inset:0;background:rgba(6,9,26,.55);display:flex;align-items:flex-start;justify-content:center;padding:60px 20px;z-index:60;overflow-y:auto}
+      .bl-modal{position:relative;width:100%;max-width:640px;max-height:80vh;display:flex;flex-direction:column;padding:20px;overflow:hidden}
+      .bl-modal-close{position:absolute;top:12px;right:12px;width:28px;height:28px;border-radius:8px;border:1px solid var(--border);background:var(--card);color:var(--muted);cursor:pointer;font-size:15px;line-height:1}
+      .bl-modal-head{display:flex;align-items:center;gap:10px;padding-right:36px;margin-bottom:14px}
+      .bl-modal-title{font-size:18px;font-weight:800;margin:0;letter-spacing:-.01em}
+      .bl-modal-title-input{font-size:16px;font-weight:700;font-family:inherit;flex:1;border-radius:8px;border:1px solid var(--border);background:var(--card);color:var(--text);padding:6px 10px}
+      .bl-modal-body{overflow-y:auto;flex:1}
+      .bl-modal-desc{font-size:13px;line-height:1.5;color:var(--text);margin-bottom:16px;white-space:pre-wrap}
+      .bl-modal-desc-line{min-height:1.5em}
+      .bl-modal-desc-input{width:100%;font-family:inherit;font-size:13px;line-height:1.5;border-radius:8px;border:1px solid var(--border);background:var(--card);color:var(--text);padding:8px 10px;resize:vertical;margin-bottom:16px}
+      .bl-modal-meta{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:10px 20px;border-top:1px solid var(--border);padding-top:14px}
+      .bl-modal-meta-label{display:block;font-size:9.5px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin-bottom:2px}
+      .bl-modal-footer{display:flex;gap:8px;justify-content:flex-end;margin-top:16px;padding-top:14px;border-top:1px solid var(--border)}
 
       @media(max-width:900px){
         .tg-wrap{padding:8px 12px 64px}
