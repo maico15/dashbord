@@ -453,6 +453,12 @@ export default function TeamPlan() {
   const dragRef = useRef(null);
   const [dragVisual, setDragVisual] = useState(null);
   const clickPointerDownRef = useRef(null);
+  const ganttRef = useRef(null);
+  const backlogRef = useRef(null);
+  const capacityRef = useRef(null);
+  const risksRef = useRef(null);
+  const ganttScrollRef = useRef(null);
+  const [activeView, setActiveView] = useState("gantt");
 
   const today = useMemo(() => {
     const t = new Date();
@@ -668,6 +674,64 @@ export default function TeamPlan() {
     return Math.sqrt(dx * dx + dy * dy) <= 5;
   }
 
+  function scrollToSection(view) {
+    setActiveView(view);
+    const refMap = {
+      gantt: ganttRef,
+      backlog: backlogRef,
+      capacity: capacityRef,
+      risks: risksRef,
+    };
+    refMap[view]?.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+
+  function focusToday() {
+    scrollToSection("gantt");
+    const scroller = ganttScrollRef.current;
+    if (!scroller || todayIdx < 0) return;
+    const approxColWidth = Math.max(24, (scroller.scrollWidth - 240) / DAY_COLS);
+    scroller.scrollTo({
+      left: Math.max(0, 240 + todayIdx * approxColWidth - scroller.clientWidth / 2),
+      behavior: "smooth",
+    });
+  }
+
+  function focusPlanning() {
+    scrollToSection("backlog");
+    if (!editMode) {
+      setToast("Enable Edit mode to assign backlog items.");
+      setTimeout(() => setToast(""), 4000);
+    }
+  }
+
+  function applySavedView(view) {
+    if (view === "team") {
+      setQuery("");
+      setTeamFilter("all");
+      scrollToSection("gantt");
+      return;
+    }
+    if (view === "risk") {
+      setQuery("");
+      setTeamFilter("all");
+      scrollToSection("risks");
+      return;
+    }
+    if (view === "next") {
+      setQuery("");
+      setTeamFilter("all");
+      focusToday();
+      return;
+    }
+    if (view === "idle") {
+      setTeamFilter("all");
+      setQuery("");
+      scrollToSection("gantt");
+      setToast("Idle engineers are shown as dashed red idle windows.");
+      setTimeout(() => setToast(""), 4000);
+    }
+  }
+
   // The rendered view = last-fetched base data with changeQueue replayed on
   // top. In view mode changeQueue is always empty, so draft === base exactly.
   const draft = useMemo(
@@ -749,10 +813,10 @@ export default function TeamPlan() {
           </div>
         </div>
         <nav className="tp-tabs" aria-label="Team plan views">
-          <button className="tp-tab active">Gantt</button>
-          <button className="tp-tab">Backlog</button>
-          <button className="tp-tab">Capacity</button>
-          <button className="tp-tab">Risks</button>
+          <button className={`tp-tab${activeView === "gantt" ? " active" : ""}`} onClick={() => scrollToSection("gantt")}>Gantt</button>
+          <button className={`tp-tab${activeView === "backlog" ? " active" : ""}`} onClick={() => scrollToSection("backlog")}>Backlog</button>
+          <button className={`tp-tab${activeView === "capacity" ? " active" : ""}`} onClick={() => scrollToSection("capacity")}>Capacity</button>
+          <button className={`tp-tab${activeView === "risks" ? " active" : ""}`} onClick={() => scrollToSection("risks")}>Risks</button>
         </nav>
         <div className="tp-actions">
           <Link to="/team-gantt" className="tp-link-btn">Old Gantt</Link>
@@ -792,10 +856,10 @@ export default function TeamPlan() {
         <aside className="tp-sidebar">
           <section className="tp-side-section">
             <div className="tp-section-label">Saved views</div>
-            <button className="tp-view active">Team Plan <span>Current</span></button>
-            <button className="tp-view">Delivery Risk</button>
-            <button className="tp-view">Next 2 Weeks</button>
-            <button className="tp-view">Idle Engineers</button>
+            <button className="tp-view active" onClick={() => applySavedView("team")}>Team Plan <span>Current</span></button>
+            <button className="tp-view" onClick={() => applySavedView("risk")}>Delivery Risk</button>
+            <button className="tp-view" onClick={() => applySavedView("next")}>Next 2 Weeks</button>
+            <button className="tp-view" onClick={() => applySavedView("idle")}>Idle Engineers</button>
           </section>
 
           <section className="tp-side-section">
@@ -822,15 +886,15 @@ export default function TeamPlan() {
         </aside>
 
         <section className="tp-board">
-          <div className="tp-board-toolbar">
+          <div className="tp-board-toolbar" ref={ganttRef}>
             <div>
               <h1>Gantt</h1>
               <p>6-week delivery plan with load and risk visibility</p>
             </div>
             <div className="tp-toolbar-actions">
-              <button className="tp-small-btn">6 weeks</button>
-              <button className="tp-small-btn">Today</button>
-              <button className="tp-primary-btn">Plan task</button>
+              <button className="tp-small-btn" disabled title="Current fixed planning window — always shows 6 weeks">6 weeks</button>
+              <button className="tp-small-btn" onClick={focusToday}>Today</button>
+              <button className="tp-primary-btn" onClick={focusPlanning}>Plan task</button>
             </div>
           </div>
 
@@ -839,7 +903,7 @@ export default function TeamPlan() {
           {saveError && <div className="tp-inline-error">{saveError}</div>}
 
           {!loading && !error && (
-            <div className="tp-gantt">
+            <div className="tp-gantt" ref={ganttScrollRef}>
               <div
                 className="tp-gantt-grid"
                 style={{
@@ -906,7 +970,7 @@ export default function TeamPlan() {
             </div>
           )}
 
-          <div className="tp-backlog">
+          <div className="tp-backlog" ref={backlogRef}>
             <div className="tp-backlog-head">
               <div>
                 <h2>Backlog</h2>
@@ -944,7 +1008,7 @@ export default function TeamPlan() {
                       </select>
                     </span>
                   ) : (
-                    <span className="tp-assign muted">Assign</span>
+                    <span className="tp-assign muted" title="Enable Edit mode to assign this item">View only</span>
                   )}
                 </div>
               ))}
@@ -1099,7 +1163,7 @@ export default function TeamPlan() {
             )}
           </section>
 
-          <section className="tp-panel">
+          <section className="tp-panel" ref={capacityRef}>
             <div className="tp-panel-head"><span>Capacity</span></div>
             {(draft.engineers || []).slice(0, 5).map((e) => {
               const cap = capacityFor(e);
@@ -1113,7 +1177,7 @@ export default function TeamPlan() {
             })}
           </section>
 
-          <section className="tp-panel">
+          <section className="tp-panel" ref={risksRef}>
             <div className="tp-panel-head"><span>Risks</span></div>
             {risks.length === 0 && <div className="tp-muted-box">No delivery risks detected.</div>}
             {risks.map((risk, idx) => (
@@ -1166,7 +1230,7 @@ function Style() {
       .tp-board{min-width:0;padding:16px;overflow:auto}
       .tp-board-toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:12px}
       .tp-board-toolbar h1{font-size:22px;margin:0}.tp-board-toolbar p{font-size:12px;color:var(--muted);margin-top:3px}
-      .tp-toolbar-actions{display:flex;align-items:center;gap:8px}.tp-small-btn{padding:7px 10px}.tp-primary-btn{padding:8px 12px;background:var(--accent1);border-color:var(--accent1);color:#07111f;font-weight:700}
+      .tp-toolbar-actions{display:flex;align-items:center;gap:8px}.tp-small-btn{padding:7px 10px}.tp-small-btn:disabled{opacity:.45;cursor:default}.tp-primary-btn{padding:8px 12px;background:var(--accent1);border-color:var(--accent1);color:#07111f;font-weight:700}
       .tp-state{padding:46px;text-align:center;color:var(--muted);background:var(--card);border:1px solid var(--border);border-radius:8px}.tp-state.error{color:var(--danger)}
       .tp-gantt{background:var(--card);border:1px solid var(--border);border-radius:8px;overflow:auto}
       .tp-gantt-grid{display:grid;min-width:1120px;position:relative}
