@@ -339,6 +339,11 @@ export default function Dashboard() {
               📅 Gantt
             </Link>
           )}
+          {activeDept === IT_DEPT_ID && (
+            <Link to="/team-plan" className="tab-btn" style={{ textDecoration: 'none', display: 'inline-flex', alignItems: 'center' }}>
+              Team Plan
+            </Link>
+          )}
         </div>
 
         {activeTab === 'dev'          && <DevTab />}
