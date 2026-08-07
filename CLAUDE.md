@@ -9,13 +9,17 @@ Engineering Dashboard — a full-stack team performance tracker with gamificatio
 ## Stack
 
 - **Frontend**: React 18 + Vite, React Router v6, Recharts, Chart.js — served on port 3000
-- **Backend**: Python FastAPI + SQLite/PostgreSQL via SQLAlchemy — served on port 8000
-- **DB layer**: `backend/database.py` — SQLAlchemy wrapper with a `DBWrapper`/`Cursor` shim that translates SQLite syntax (`INSERT OR IGNORE`, `?` placeholders, `PRAGMA`) to PostgreSQL transparently
+- **Backend**: Python FastAPI + PostgreSQL via SQLAlchemy Core (no ORM) — served on port 8000
+- **DB layer**: `backend/database.py` — a `DBWrapper`/`Cursor` shim over SQLAlchemy Core that translates SQLite syntax (`INSERT OR IGNORE`, `?` placeholders, `PRAGMA`, `AUTOINCREMENT`) to PostgreSQL. `DATABASE_URL` is **required**; the app refuses to start without it (no silent SQLite fallback — avoids split-brain writes if it's ever unset in an env). SQLite still works for local testing if you explicitly set `DATABASE_URL=sqlite:///./dashboard.db`, but Postgres (via `docker-compose.yml`) is the supported local/prod backend.
 - **Auth**: `?password=` query param on protected endpoints; `ADMIN_PASSWORD` global loaded from `config` table at startup
 
 ## Running Locally
 
 ```bash
+# Postgres (once, or after `docker compose down -v`)
+docker compose up -d
+export DATABASE_URL=postgresql://dashboard:dashboard@localhost:5432/dashboard
+
 # Backend
 cd backend && python -m uvicorn main:app --port 8000 --reload
 
@@ -36,14 +40,28 @@ cd frontend && npm run dev
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `DATABASE_URL` | — | Full SQLAlchemy URL; takes priority over `DB_PATH` |
-| `DB_PATH` | `./dashboard.db` | SQLite file path when `DATABASE_URL` not set |
+| `DATABASE_URL` | — (**required**) | SQLAlchemy connection string. App raises at import time and refuses to boot if unset — see `backend/database.py`. Use `postgresql://...` in every deployed environment; `sqlite:///...` is accepted for local-only testing but must be set explicitly. |
 | `ADMIN_PASSWORD` | `admin123` | Initial admin password (overridden by value in config table) |
 | `ANTHROPIC_ADMIN_KEY` | — | Anthropic Admin API key for AI usage sync |
 | `GITHUB_TOKEN` | — | GitHub token for PR sync |
 | `SLACK_BOT_TOKEN` | — | Slack bot token for daily report sync |
 
-For persistent SQLite on Render: mount a disk at e.g. `/data` and set `DB_PATH=/data/dashboard.db`.
+Local Postgres: `docker-compose.yml` runs `postgres:16` with a named volume — `docker compose up -d`, then set `DATABASE_URL=postgresql://dashboard:dashboard@localhost:5432/dashboard`.
+
+### Migrating existing SQLite data
+
+`scripts/migrate_sqlite_to_pg.py` copies every table from a SQLite `dashboard.db` into
+the Postgres database at `DATABASE_URL`, preserving row ids (via
+`OVERRIDING SYSTEM VALUE` + `setval()` on each identity column's sequence) and
+printing a per-table row-count/checksum report. Run with `--dry-run` first; always
+point `--sqlite-path` at a **copy** of the database, never the live file. See
+`scripts/verify_migration.py` for post-migration smoke, write-path, and concurrency
+checks against a running server.
+
+The production deployment target is moving from Render to ECS (owned by
+Bachinskiy) as part of this cutover — this doc only covers what changed on the
+application side (`DATABASE_URL` now mandatory); ECS task/service config is out of
+scope here.
 
 ## Architecture
 
@@ -162,7 +180,9 @@ These are merged into the saved config on every startup as defaults (saved value
 ## Data Persistence Notes
 
 - `seed_data()` only runs when `team_members` is empty — safe across restarts
-- On Render (ephemeral filesystem), set `DB_PATH` to a persistent disk mount to survive deploys
+- Data now persists in Postgres (`DATABASE_URL`), not an on-disk SQLite file, so
+  filesystem persistence at the deploy target (Render disk, ECS ephemeral storage,
+  etc.) is no longer a concern for the database itself
 - `DELETE /api/metrics/mock?password=...` clears all metric rows from weeks before the current week
 
 ## PR Workflow

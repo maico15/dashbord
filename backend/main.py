@@ -1,5 +1,4 @@
 import os
-DB_PATH = os.environ.get("DB_PATH", "./dashboard.db")
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
@@ -18,7 +17,7 @@ import io
 import math
 from datetime import datetime, timedelta
 from apscheduler.schedulers.background import BackgroundScheduler
-from database import get_db, IS_POSTGRES
+from database import get_db
 
 ADMIN_PASSWORD = "admin123"
 TELEMETRY_SECRET = os.environ.get("TELEMETRY_SECRET", "")
@@ -222,7 +221,7 @@ def init_db():
             stream TEXT NOT NULL DEFAULT 'dev',
             tasks TEXT NOT NULL DEFAULT '',
             created_at TEXT NOT NULL DEFAULT (datetime('now')),
-            updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT DEFAULT (datetime('now')),
             UNIQUE(engineer_id, week_number, year)
         );
 
@@ -457,45 +456,18 @@ def init_db():
             [("IT", "it"), ("Test", "test")]
         )
         conn.commit()
-    # Add blocked_count for existing SQLite databases that pre-date this column
-    if not IS_POSTGRES:
-        c = conn.cursor()
-        c.execute("PRAGMA table_info(dev_metrics)")
-        cols = [row["name"] for row in c.fetchall()]
-        if "blocked_count" not in cols:
-            conn.execute("ALTER TABLE dev_metrics ADD COLUMN blocked_count INTEGER DEFAULT 0")
-            conn.commit()
-    # Add commits_count for existing databases (works for SQLite and Postgres)
-    try:
-        conn.execute("ALTER TABLE dev_metrics ADD COLUMN commits_count INTEGER DEFAULT 0")
-        conn.commit()
-    except Exception:
-        pass
-    try:
-        conn.execute("ALTER TABLE team_members ADD COLUMN position TEXT DEFAULT ''")
-        conn.commit()
-    except Exception:
-        pass
-    try:
-        conn.execute("ALTER TABLE dev_metrics ADD COLUMN avg_pr_size INTEGER DEFAULT NULL")
-        conn.commit()
-    except Exception:
-        pass
-    try:
-        conn.execute("ALTER TABLE dev_metrics ADD COLUMN ai_tokens INTEGER DEFAULT NULL")
-        conn.commit()
-    except Exception:
-        pass
-    try:
-        conn.execute("ALTER TABLE gantt_assignments ADD COLUMN depends_on INTEGER DEFAULT NULL")
-        conn.commit()
-    except Exception:
-        pass
-    try:
-        conn.execute("ALTER TABLE backlog_items ADD COLUMN est_hours REAL DEFAULT NULL")
-        conn.commit()
-    except Exception:
-        pass
+    # Idempotent column additions for databases created before these columns existed.
+    # add_column_if_missing() checks information_schema/PRAGMA first rather than
+    # relying on catching a duplicate-column error — on Postgres, an unhandled ALTER
+    # failure aborts the connection's transaction and poisons every later statement
+    # on it until a rollback(), which a bare try/except: pass never did.
+    conn.add_column_if_missing("dev_metrics", "blocked_count", "INTEGER DEFAULT 0")
+    conn.add_column_if_missing("dev_metrics", "commits_count", "INTEGER DEFAULT 0")
+    conn.add_column_if_missing("team_members", "position", "TEXT DEFAULT ''")
+    conn.add_column_if_missing("dev_metrics", "avg_pr_size", "INTEGER DEFAULT NULL")
+    conn.add_column_if_missing("dev_metrics", "ai_tokens", "INTEGER DEFAULT NULL")
+    conn.add_column_if_missing("gantt_assignments", "depends_on", "INTEGER DEFAULT NULL")
+    conn.add_column_if_missing("backlog_items", "est_hours", "REAL DEFAULT NULL")
     # ai_events and ai_usage_daily are created via executescript above (IF NOT EXISTS);
     # these no-op try/except blocks handle the case where CREATE INDEX runs on a DB
     # that was initialized before those statements were added to the script.
@@ -515,59 +487,23 @@ def init_db():
         conn.commit()
     except Exception:
         pass
-    try:
-        conn.execute("ALTER TABLE team_members ADD COLUMN department_id INTEGER DEFAULT 1")
-        conn.commit()
-    except Exception:
-        pass
-    try:
-        conn.execute("ALTER TABLE team_members ADD COLUMN email TEXT DEFAULT ''")
-        conn.commit()
-    except Exception:
-        pass
-    try:
-        conn.execute("ALTER TABLE tasks ADD COLUMN manual_override INTEGER NOT NULL DEFAULT 0")
-        conn.commit()
-    except Exception:
-        pass
-    try:
-        conn.execute("ALTER TABLE roadmap_tasks ADD COLUMN epic_id INTEGER")
-        conn.commit()
-    except Exception:
-        pass
-    try:
-        conn.execute("ALTER TABLE roadmap_tasks ADD COLUMN estimate_days REAL")
-        conn.commit()
-    except Exception:
-        pass
-    try:
-        conn.execute("ALTER TABLE roadmap_epics ADD COLUMN outcome TEXT DEFAULT ''")
-        conn.commit()
-    except Exception:
-        pass
-    try:
-        conn.execute("ALTER TABLE roadmap_epics ADD COLUMN approval TEXT DEFAULT 'review'")
-        conn.commit()
-    except Exception:
-        pass
-    try:
-        conn.execute("ALTER TABLE roadmap_tasks ADD COLUMN status TEXT DEFAULT 'active'")
-        conn.commit()
-    except Exception:
-        pass
-    try:
-        conn.execute("ALTER TABLE roadmap_epics ADD COLUMN status TEXT DEFAULT 'active'")
-        conn.commit()
-    except Exception:
-        pass
-    try:
-        conn.execute("ALTER TABLE roadmap_epics ADD COLUMN owner_id INTEGER REFERENCES team_members(id)")
-        conn.commit()
-    except Exception:
-        pass
+    conn.add_column_if_missing("team_members", "department_id", "INTEGER DEFAULT 1")
+    conn.add_column_if_missing("team_members", "email", "TEXT DEFAULT ''")
+    conn.add_column_if_missing("tasks", "manual_override", "INTEGER NOT NULL DEFAULT 0")
+    conn.add_column_if_missing("roadmap_tasks", "epic_id", "INTEGER")
+    conn.add_column_if_missing("roadmap_tasks", "estimate_days", "REAL")
+    conn.add_column_if_missing("roadmap_epics", "outcome", "TEXT DEFAULT ''")
+    conn.add_column_if_missing("roadmap_epics", "approval", "TEXT DEFAULT 'review'")
+    conn.add_column_if_missing("roadmap_tasks", "status", "TEXT DEFAULT 'active'")
+    conn.add_column_if_missing("roadmap_epics", "status", "TEXT DEFAULT 'active'")
+    conn.add_column_if_missing(
+        "roadmap_epics", "owner_id", "INTEGER REFERENCES team_members(id)"
+    )
 
     # ── weekly_tasks schema migration ────────────────────────────────────────
-    # Use PRAGMA table_info (not try/except) so failures are never swallowed.
+    # Use get_columns() (not try/except) so failures are never swallowed, and so
+    # this works on Postgres too — a bare PRAGMA sent through Cursor.execute() (as
+    # opposed to executescript()) is not translated and fails on Postgres.
     # DEFAULT '' is the only value that is a constant literal in every SQLite
     # version.  Both datetime('now') and CURRENT_TIMESTAMP were rejected as
     # non-constant for ALTER TABLE ADD COLUMN in different SQLite versions:
@@ -576,7 +512,7 @@ def init_db():
     #                          Render's Python 3.11 ships with SQLite 3.39.2
     # Therefore DEFAULT '' is the only cross-version-safe choice here.
     print("[db] Running database migrations...")
-    _wt_cols = {row[1] for row in conn.execute("PRAGMA table_info(weekly_tasks)").fetchall()}
+    _wt_cols = conn.get_columns("weekly_tasks")
 
     if "tasks" not in _wt_cols:
         conn.execute("ALTER TABLE weekly_tasks ADD COLUMN tasks TEXT NOT NULL DEFAULT ''")
@@ -604,7 +540,7 @@ def init_db():
         )
         conn.commit()
     except Exception:
-        pass
+        conn.rollback()
 
     # ── One-time: purge fake manually-entered metric data ─────────────────────
     # Uses a config flag so this only runs once per database.
@@ -627,6 +563,7 @@ def init_db():
             conn.commit()
             print("[init] Fake metric data cleaned; score rules updated.")
         except Exception as ex:
+            conn.rollback()
             print(f"[init] Fake data cleanup error: {ex}")
 
     # ── One-time: fix stream assignments per real engineer roles ──────────────
@@ -647,6 +584,7 @@ def init_db():
             conn.commit()
             print("[init] Stream assignments corrected for all engineers.")
         except Exception as ex:
+            conn.rollback()
             print(f"[init] Stream fix error: {ex}")
 
     # ── One-time: remove fake bulk-inserted dev_metrics for weeks 14-21 ───────
@@ -667,6 +605,7 @@ def init_db():
             conn.commit()
             print(f"[init] Removed {deleted} fake dev_metrics rows (weeks 14-21 / 2026).")
         except Exception as ex:
+            conn.rollback()
             print(f"[init] Fake dev weeks removal error: {ex}")
 
     # ── Normalize ai_tool_sessions.tool to lowercase (idempotent) ─────────────
@@ -4709,14 +4648,15 @@ def post_weekly_tasks(data: WeeklyTasksBody, password: str = ""):
     print(f"[weekly-tasks] save engineer_id={data.engineer_id} week={data.week} year={data.year} tasks_len={len(data.tasks)}")
     conn = get_db()
     c = conn.cursor()
+    now_iso = datetime.utcnow().isoformat()
     try:
         c.execute(
             "INSERT INTO weekly_tasks "
             "(engineer_id, week_number, year, what_was_done, next_week, stream, tasks, updated_at) "
-            "VALUES (?, ?, ?, '[]', '[]', 'dev', ?, datetime('now')) "
+            "VALUES (?, ?, ?, '[]', '[]', 'dev', ?, ?) "
             "ON CONFLICT(engineer_id, week_number, year) DO UPDATE SET "
-            "tasks=excluded.tasks, updated_at=datetime('now')",
-            (data.engineer_id, data.week, data.year, data.tasks),
+            "tasks=excluded.tasks, updated_at=excluded.updated_at",
+            (data.engineer_id, data.week, data.year, data.tasks, now_iso),
         )
         conn.commit()
     except Exception as ex:
