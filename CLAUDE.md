@@ -167,3 +167,16 @@ These are merged into the saved config on every startup as defaults (saved value
 
 ## PR Workflow
 All changes must go through pull requests.
+
+## Environment-gated merges
+
+A PR that changes runtime environment requirements (new mandatory env vars,
+external services, changed start commands) must:
+- carry "DO NOT MERGE until infra ready" at the top of its description,
+- list the exact preconditions (e.g. "DATABASE_URL set on Render pointing to a
+  live Postgres with migrated data"),
+- never be merged on a generic "ship it / кати" instruction alone — the agent must
+  re-confirm that the listed preconditions are met before merging.
+
+Reason: main auto-deploys; merging such a PR early takes production down
+(incident 2026-08-07, PR #72).
