@@ -33,6 +33,7 @@ def _load_password():
         row = c.fetchone()
         if row and row["value"]:
             ADMIN_PASSWORD = row["value"]
+        print("[init] load admin password: OK")
     except Exception as ex:
         conn.rollback()
         print(f"[init] load admin password: skipped/rolled back: {ex}")
@@ -113,6 +114,9 @@ async def lifespan(app):
             conn.close()
         if count == 0:
             seed_data()
+            print("[init] seed data: OK (seeded an empty database)")
+        else:
+            print(f"[init] seed data: OK (skipped, {count} team member(s) present)")
 
     def _normalize_backlog():
         conn = get_db()
