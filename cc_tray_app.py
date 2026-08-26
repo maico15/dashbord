@@ -9,6 +9,7 @@ import json
 import pathlib
 import threading
 import time
+from collections import OrderedDict
 from datetime import datetime, timezone
 
 try:
@@ -29,12 +30,25 @@ except ImportError:
 import tkinter as tk
 from tkinter import messagebox, ttk
 
+from cc_memdebug import rss_mb, top_allocations
+
 CREATE_NO_WINDOW = 0x08000000  # Windows: don't flash a console window
+
+# One Session for the whole process. requests.post()/requests.get() build a fresh
+# Session — and therefore a fresh connection pool, adapters and TLS context — on
+# every single call, which at a 60s poll (and far worse under retry storms) is
+# both a per-cycle allocation churn and a steady stream of new TCP/TLS handshakes.
+_SESSION = requests.Session()
+_SESSION.headers.update({"User-Agent": "cc-telemetry-tray"})
+_SESSION.mount("https://", requests.adapters.HTTPAdapter(
+    pool_connections=4, pool_maxsize=4, max_retries=0))
+_SESSION.mount("http://", requests.adapters.HTTPAdapter(
+    pool_connections=4, pool_maxsize=4, max_retries=0))
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-APP_VERSION           = "3.1"
+APP_VERSION           = "3.2"
 APP_NAME              = f"Claude Telemetry v{APP_VERSION}"   # for display in UI only
 AUTOSTART_NAME        = "CCTelemetry"                        # stable autostart name, WITHOUT version
 GITHUB_REPO           = "maico15/dashbord"
@@ -45,12 +59,27 @@ CONFIG_PATH     = HOME / ".claude" / "telemetry_config.json"
 BUFFER_PATH     = HOME / ".claude" / "telemetry_buffer.jsonl"
 SEEN_PATH       = HOME / ".claude" / ".telemetry_seen"
 LOG_PATH        = HOME / ".claude" / "telemetry_tray.log"
+OFFSETS_PATH    = HOME / ".claude" / ".telemetry_offsets.json"
+DROPS_PATH      = HOME / ".claude" / ".telemetry_drops.json"
 SESSIONS_GLOB   = "projects/**/*.jsonl"
 POLL_INTERVAL   = 60
 MAX_SEEN        = 50_000
 SEND_CHUNK      = 200
 REQUEST_TIMEOUT = 15
 DEFAULT_ENDPOINT = "https://dashbord-5u0i.onrender.com"
+
+# Retry buffer: hard cap, drop-oldest. Without this an engineer who is offline
+# (or misconfigured, so every POST 401s) grows telemetry_buffer.jsonl forever and
+# reloads all of it into memory on every cycle.
+MAX_BUFFER_EVENTS = 5_000
+
+# Log rotation — the old _log() appended to a file that was never rotated.
+LOG_MAX_BYTES     = 2 * 1024 * 1024
+LOG_BACKUP_COUNT  = 3
+
+# Self-watchdog (Part 3). Overridable via telemetry_config.json -> max_rss_mb.
+DEFAULT_MAX_RSS_MB = 300
+WATCHDOG_INTERVAL  = 60
 
 # Browser tracking
 BROWSER_POLL_INTERVAL = 30   # seconds
@@ -192,11 +221,51 @@ _C_RED    = (239,  68,  68, 255)
 # ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
+_LOGGER = None
+_LOGGER_LOCK = threading.Lock()
+
+
+def _get_logger():
+    """One RotatingFileHandler for the process lifetime.
+
+    The previous _log() opened the log file on every call and never rotated it,
+    so telemetry_tray.log grew without bound (6.1 MB on a live machine at the
+    time this was fixed). The handler is built once and reused; nothing in the
+    hot path creates handlers.
+    """
+    global _LOGGER
+    if _LOGGER is not None:
+        return _LOGGER
+    with _LOGGER_LOCK:
+        if _LOGGER is not None:
+            return _LOGGER
+        import logging
+        from logging.handlers import RotatingFileHandler
+
+        logger = logging.getLogger("cc_telemetry")
+        logger.setLevel(logging.INFO)
+        logger.propagate = False
+        if not logger.handlers:
+            try:
+                LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+                handler = RotatingFileHandler(
+                    LOG_PATH, maxBytes=LOG_MAX_BYTES,
+                    backupCount=LOG_BACKUP_COUNT, encoding="utf-8",
+                )
+                handler.setFormatter(
+                    logging.Formatter("%(asctime)s  %(message)s",
+                                      datefmt="%Y-%m-%d %H:%M:%S")
+                )
+                logger.addHandler(handler)
+            except Exception:
+                logger.addHandler(logging.NullHandler())
+        _LOGGER = logger
+        return _LOGGER
+
+
 def _log(msg: str) -> None:
     try:
-        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        with open(LOG_PATH, "a", encoding="utf-8") as f:
-            f.write(f"{ts}  {msg}\n")
+        _get_logger().info(msg)
     except Exception:
         pass
 
@@ -258,19 +327,53 @@ def _ensure_single_instance() -> None:
 # ---------------------------------------------------------------------------
 # Seen / buffer helpers
 # ---------------------------------------------------------------------------
-def _load_seen() -> set:
+def _load_seen() -> "OrderedDict":
+    """Recently-seen event ids, oldest first.
+
+    An OrderedDict used as an ordered set: a plain set has no order, so the old
+    `list(seen)[-MAX_SEEN:]` trimmed an arbitrary subset rather than the newest
+    ids — meaning old ids could survive while fresh ones were discarded, and
+    already-sent events got resent. Insertion order makes the cap mean what it
+    says and keeps the in-memory structure bounded at MAX_SEEN.
+    """
     try:
         lines = SEEN_PATH.read_text(encoding="utf-8").splitlines()
-        return set(lines[-MAX_SEEN:])
+        return OrderedDict.fromkeys(line for line in lines[-MAX_SEEN:] if line)
     except Exception:
-        return set()
+        return OrderedDict()
 
-def _save_seen(seen: set) -> None:
+def _remember_seen(seen: "OrderedDict", event_id: str) -> None:
+    """Add an id and evict the oldest once over the cap."""
+    if event_id in seen:
+        seen.move_to_end(event_id)
+    else:
+        seen[event_id] = None
+    while len(seen) > MAX_SEEN:
+        seen.popitem(last=False)
+
+def _save_seen(seen: "OrderedDict") -> None:
     try:
         SEEN_PATH.parent.mkdir(parents=True, exist_ok=True)
         SEEN_PATH.write_text("\n".join(list(seen)[-MAX_SEEN:]), encoding="utf-8")
     except Exception:
         pass
+
+def _load_offsets() -> dict:
+    """Per-file byte offsets: {path: last_consumed_byte}."""
+    try:
+        data = json.loads(OFFSETS_PATH.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _save_offsets(offsets: dict) -> None:
+    try:
+        OFFSETS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        OFFSETS_PATH.write_text(json.dumps(offsets), encoding="utf-8")
+    except Exception:
+        pass
+
 
 def _load_buffer() -> list:
     try:
@@ -292,9 +395,54 @@ def _save_buffer(events: list) -> None:
     except Exception:
         pass
 
-def _append_buffer(events: list) -> None:
-    existing = _load_buffer()
-    _save_buffer(existing + events)
+def _trim_buffer(events: list) -> tuple:
+    """Cap the retry buffer, dropping oldest first. Returns (kept, dropped_count)."""
+    if len(events) <= MAX_BUFFER_EVENTS:
+        return events, 0
+    dropped = len(events) - MAX_BUFFER_EVENTS
+    return events[-MAX_BUFFER_EVENTS:], dropped
+
+
+def _bump_drop_counter(n: int) -> int:
+    """Persist a running count of events dropped from a full retry buffer."""
+    if n <= 0:
+        return 0
+    total = n
+    try:
+        prev = json.loads(DROPS_PATH.read_text(encoding="utf-8")).get("dropped", 0)
+        total = int(prev) + n
+    except Exception:
+        pass
+    try:
+        DROPS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        DROPS_PATH.write_text(json.dumps({"dropped": total}), encoding="utf-8")
+    except Exception:
+        pass
+    return total
+
+
+def _read_drop_counter() -> int:
+    try:
+        return int(json.loads(DROPS_PATH.read_text(encoding="utf-8")).get("dropped", 0))
+    except Exception:
+        return 0
+
+
+def _replace_buffer(events: list) -> None:
+    """Write the retry buffer to exactly `events`, capped, counting drops.
+
+    Replaces the old _append_buffer(). That appended failed events on top of a
+    buffer that *already contained them* — _do_cycle() sent buffered+new, and on
+    failure appended the whole batch back — so one offline cycle roughly doubled
+    the buffer, and the next doubled it again. The file (and the list read from
+    it every cycle) grew geometrically.
+    """
+    kept, dropped = _trim_buffer(events)
+    if dropped:
+        total = _bump_drop_counter(dropped)
+        _log(f"buffer full ({MAX_BUFFER_EVENTS}) — dropped {dropped} oldest "
+             f"event(s), {total} dropped since install")
+    _save_buffer(kept)
 
 
 def _load_browser_buffer() -> list:
@@ -317,9 +465,18 @@ def _save_browser_buffer(events: list) -> None:
     except Exception:
         pass
 
+MAX_BROWSER_BUFFER = 500
+
+
 def _append_browser_buffer(event: dict) -> None:
     existing = _load_browser_buffer()
     existing.append(event)
+    if len(existing) > MAX_BROWSER_BUFFER:
+        dropped = len(existing) - MAX_BROWSER_BUFFER
+        existing = existing[-MAX_BROWSER_BUFFER:]
+        total = _bump_drop_counter(dropped)
+        _log(f"browser buffer full ({MAX_BROWSER_BUFFER}) — dropped {dropped} "
+             f"oldest, {total} dropped since install")
     _save_browser_buffer(existing)
 
 # ---------------------------------------------------------------------------
@@ -335,10 +492,49 @@ def _event_id(session_id, timestamp, tokens_in, tokens_out) -> str:
     raw = f"{session_id}{timestamp}{tokens_in}{tokens_out}"
     return hashlib.sha256(raw.encode()).hexdigest()
 
-def _parse_file(path: pathlib.Path, seen: set) -> list:
+def _read_new_lines(path: pathlib.Path, offsets: dict) -> tuple:
+    """Yield only bytes appended since the last cycle. Returns (lines, new_offset).
+
+    Session .jsonl files are append-only and reach tens of MB; the previous
+    implementation read every byte of every file on every poll (21 MB across 15
+    files on the machine this was profiled on, every 60s). Reading from a stored
+    offset makes a steady-state cycle read approximately nothing.
+
+    A short read (file replaced or truncated) resets the offset to 0 so the file
+    is re-ingested rather than silently skipped; `seen` still dedupes the events.
+    """
+    key = str(path)
+    start = offsets.get(key, 0)
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return [], start
+    if size < start:
+        start = 0  # truncated or rotated
+    if size == start:
+        return [], start
+    try:
+        with open(path, "rb") as fh:      # context manager: handle always closed
+            fh.seek(start)
+            chunk = fh.read(size - start)
+    except OSError as exc:
+        _log(f"read error {path}: {exc}")
+        return [], start
+    # Only consume through the last complete line; a partially-written trailing
+    # record is re-read next cycle rather than parsed as corrupt JSON.
+    cut = chunk.rfind(b"\n")
+    if cut == -1:
+        return [], start
+    consumed = chunk[: cut + 1]
+    text = consumed.decode("utf-8", errors="replace")
+    return text.splitlines(), start + len(consumed)
+
+
+def _parse_file(path: pathlib.Path, seen: set, offsets: dict) -> list:
     events = []
     try:
-        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        lines, new_offset = _read_new_lines(path, offsets)
+        for line in lines:
             line = line.strip()
             if not line:
                 continue
@@ -377,14 +573,21 @@ def _parse_file(path: pathlib.Path, seen: set) -> list:
                 "model":              model,
                 "repo":               _repo_from_cwd(cwd),
             })
+        offsets[str(path)] = new_offset
     except Exception as e:
         _log(f"parse error {path}: {e}")
     return events
 
-def _collect(seen: set) -> list:
+def _collect(seen: set, offsets: dict) -> list:
     events = []
+    live = set()
     for p in sorted(CLAUDE_DIR.glob(SESSIONS_GLOB)):
-        events.extend(_parse_file(p, seen))
+        live.add(str(p))
+        events.extend(_parse_file(p, seen, offsets))
+    # Prune offsets for files that no longer exist, so the map cannot grow
+    # without bound as sessions are archived or deleted.
+    for stale in [k for k in offsets if k not in live]:
+        del offsets[stale]
     return events
 
 # ---------------------------------------------------------------------------
@@ -398,7 +601,7 @@ def _send_chunk(events: list, cfg: dict) -> bool:
             "secret":      cfg["secret"],
             "events":      events,
         }
-        r = requests.post(url, json=payload, timeout=REQUEST_TIMEOUT)
+        r = _SESSION.post(url, json=payload, timeout=REQUEST_TIMEOUT)
         if r.status_code == 200:
             d = r.json()
             _log(f"sent {len(events)} -> accepted={d.get('accepted')} dup={d.get('duplicates')}")
@@ -413,8 +616,14 @@ def _send_chunk(events: list, cfg: dict) -> bool:
         return False
 
 def _send_all(events: list, cfg: dict) -> tuple:
+    """Returns (ok_count, failed_events).
+
+    Deliberately does NOT touch the buffer file — the caller owns buffer state
+    and rewrites it once with exactly what still needs retrying. Appending here
+    (as this used to) double-counted events that came *from* the buffer.
+    """
     if not events:
-        return 0, None
+        return 0, []
     ok_count = 0
     failed = []
     for i in range(0, len(events), SEND_CHUNK):
@@ -423,10 +632,7 @@ def _send_all(events: list, cfg: dict) -> tuple:
             ok_count += len(chunk)
         else:
             failed.extend(chunk)
-    if failed:
-        _append_buffer(failed)
-        return ok_count, f"Send failed — {len(failed)} buffered"
-    return ok_count, None
+    return ok_count, failed
 
 # ---------------------------------------------------------------------------
 # Browser URL detection
@@ -589,7 +795,7 @@ def _send_browser_session(cfg: dict, tool: str, duration_sec: int, date_str: str
     try:
         url = cfg["endpoint"].rstrip("/") + "/api/telemetry/tool-sessions"
         payload = {"engineer_id": str(cfg["engineer_id"]), "secret": cfg["secret"], **event}
-        r = requests.post(url, json=payload, timeout=REQUEST_TIMEOUT)
+        r = _SESSION.post(url, json=payload, timeout=REQUEST_TIMEOUT)
         if r.status_code == 200:
             _log(f"browser session sent: tool={tool} duration={duration_sec}s")
             _flush_browser_buffer(cfg)
@@ -608,21 +814,24 @@ def _flush_browser_buffer(cfg: dict) -> None:
     buffered = _load_browser_buffer()
     if not buffered:
         return
-    sent = []
+    remaining = []
+    sent_count = 0
+    url = cfg["endpoint"].rstrip("/") + "/api/telemetry/tool-sessions"
     for event in buffered:
         try:
-            url = cfg["endpoint"].rstrip("/") + "/api/telemetry/tool-sessions"
             payload = {"engineer_id": str(cfg["engineer_id"]), "secret": cfg["secret"], **event}
-            r = requests.post(url, json=payload, timeout=REQUEST_TIMEOUT)
+            r = _SESSION.post(url, json=payload, timeout=REQUEST_TIMEOUT)
             if r.status_code == 200:
-                sent.append(event)
-                _log(f"browser buffer flushed: tool={event['tool']} duration={event['duration_sec']}s")
+                sent_count += 1
+                continue
         except Exception:
             pass
-    remaining = [e for e in buffered if e not in sent]
+        # Track survivors by position rather than `e not in sent`, which was an
+        # O(n^2) scan comparing dicts and mis-handled duplicate events.
+        remaining.append(event)
     _save_browser_buffer(remaining)
-    if sent:
-        _log(f"browser buffer: flushed {len(sent)}, remaining {len(remaining)}")
+    if sent_count:
+        _log(f"browser buffer: flushed {sent_count}, remaining {len(remaining)}")
 
 
 # ---------------------------------------------------------------------------
@@ -721,6 +930,7 @@ class TelemetryTrayApp:
         self._browser_thread         = None
         self._heartbeat_thread       = None
         self._update_thread          = None
+        self._watchdog_thread        = None
         self._pending_update         = None
         self._settings_win           = None
         self._status                 = "Initializing..."
@@ -729,7 +939,11 @@ class TelemetryTrayApp:
         self._browser_last_seen      = None
         self._load_cfg()
 
+    _memdebug_cfg_override = None
+
     def _load_cfg(self) -> dict:
+        if self._memdebug_cfg_override is not None:
+            return self._memdebug_cfg_override
         try:
             with open(CONFIG_PATH, encoding="utf-8") as f:
                 return json.load(f)
@@ -751,9 +965,8 @@ class TelemetryTrayApp:
         if not cfg.get("engineer_id") or not cfg.get("secret"):
             return False
         try:
-            import requests
             url = cfg.get("endpoint", DEFAULT_ENDPOINT).rstrip("/") + "/api/telemetry/verify"
-            r = requests.post(url, json={
+            r = _SESSION.post(url, json={
                 "engineer_id": cfg["engineer_id"],
                 "secret": cfg["secret"]
             }, timeout=5)
@@ -778,7 +991,10 @@ class TelemetryTrayApp:
         self._update_thread = threading.Thread(
             target=self._update_loop, name="updater", daemon=True)
         self._update_thread.start()
-        _log("polling started (claude code + browser + heartbeat + updater)")
+        self._watchdog_thread = threading.Thread(
+            target=self._watchdog_loop, name="watchdog", daemon=True)
+        self._watchdog_thread.start()
+        _log("polling started (claude code + browser + heartbeat + updater + watchdog)")
 
     def _stop_poll(self) -> None:
         self._stop.set()
@@ -839,22 +1055,84 @@ class TelemetryTrayApp:
             self._stop.wait(BROWSER_POLL_INTERVAL)
 
     def _heartbeat_loop(self) -> None:
-        """Ping backend every 10 minutes to prevent Render free plan sleep."""
+        """Ping backend every 10 minutes to prevent Render free plan sleep.
+
+        Also reports this agent's RSS so fleet-wide memory is visible on the
+        dashboard rather than only in each machine's local log.
+        """
         while not self._stop.is_set():
             try:
                 cfg = self._load_cfg()
-                endpoint = cfg.get("endpoint", DEFAULT_ENDPOINT)
-                r = requests.get(
-                    f"{endpoint.rstrip('/')}/api/overview",
-                    timeout=10,
-                )
-                if r.status_code == 200:
-                    _log("heartbeat ok")
-                else:
-                    _log(f"heartbeat {r.status_code}")
+                endpoint = cfg.get("endpoint", DEFAULT_ENDPOINT).rstrip("/")
+                rss = rss_mb()
+                sent = False
+                if cfg.get("engineer_id") and cfg.get("secret"):
+                    try:
+                        r = _SESSION.post(
+                            f"{endpoint}/api/telemetry/heartbeat",
+                            json={
+                                "engineer_id": str(cfg["engineer_id"]),
+                                "secret":      cfg["secret"],
+                                "version":     APP_VERSION,
+                                "rss_mb":      round(rss, 1),
+                                "buffered":    len(_load_buffer()),
+                                "dropped":     _read_drop_counter(),
+                            },
+                            timeout=10,
+                        )
+                        if r.status_code == 200:
+                            _log(f"heartbeat ok rss={rss:.1f}MB")
+                            sent = True
+                        elif r.status_code == 404:
+                            # Backend not yet upgraded — fall back to the old ping
+                            # so an older dashboard keeps being kept awake.
+                            pass
+                        else:
+                            _log(f"heartbeat {r.status_code} rss={rss:.1f}MB")
+                            sent = True
+                    except Exception as exc:
+                        _log(f"heartbeat post error: {exc}")
+                if not sent:
+                    r = _SESSION.get(f"{endpoint}/api/overview", timeout=10)
+                    _log(f"heartbeat ping {r.status_code} rss={rss:.1f}MB")
             except Exception as e:
                 _log(f"heartbeat error: {e}")
             self._stop.wait(HEARTBEAT_INTERVAL)
+
+    def _watchdog_loop(self) -> None:
+        """Guardrail: if RSS crosses the configured limit, flush state and log
+        the top allocation sites so a runaway build can be diagnosed from the
+        engineer's log alone, without asking them to reproduce."""
+        warned = False
+        while not self._stop.is_set():
+            try:
+                limit = float(self._load_cfg().get("max_rss_mb", DEFAULT_MAX_RSS_MB))
+                rss = rss_mb()
+                if rss and rss > limit:
+                    if not warned:
+                        _log(f"WATCHDOG: rss={rss:.1f}MB exceeds limit {limit:.0f}MB "
+                             f"— flushing state")
+                        for line in top_allocations(15) or ["(tracemalloc not tracing)"]:
+                            _log(f"WATCHDOG   {line}")
+                        warned = True
+                    self._flush_state()
+                elif rss and rss < limit * 0.8:
+                    warned = False  # re-arm once back under 80% of the limit
+            except Exception as exc:
+                _log(f"watchdog error: {exc}")
+            self._stop.wait(WATCHDOG_INTERVAL)
+
+    def _flush_state(self) -> None:
+        """Drop in-memory caches back to disk and release what we can."""
+        import gc
+        try:
+            buffered = _load_buffer()
+            _replace_buffer(buffered)   # re-applies the cap
+            gc.collect()
+            _log(f"WATCHDOG: state flushed, rss now {rss_mb():.1f}MB, "
+                 f"buffer={len(_load_buffer())}, dropped={_read_drop_counter()}")
+        except Exception as exc:
+            _log(f"watchdog flush error: {exc}")
 
     def _update_loop(self) -> None:
         """Check for updates hourly, starting 30s after launch."""
@@ -942,23 +1220,34 @@ class TelemetryTrayApp:
             return
         try:
             seen       = _load_seen()
+            offsets    = _load_offsets()
             buffered   = _load_buffer()
-            new_events = _collect(seen)
+            new_events = _collect(seen, offsets)
             all_events = buffered + new_events
             if not all_events:
+                _save_offsets(offsets)
                 ts = datetime.now().strftime("%H:%M")
                 self._set_status(f"{ts}  +0 events sent")
                 return
-            count, err = _send_all(all_events, cfg)
+
+            count, failed = _send_all(all_events, cfg)
+
+            # Only ids that actually reached the server are marked seen; a failed
+            # event stays in the buffer and is retried, not silently dropped.
+            failed_ids = {e.get("event_id") for e in failed}
             for e in new_events:
-                seen.add(e["event_id"])
+                if e["event_id"] not in failed_ids:
+                    _remember_seen(seen, e["event_id"])
             _save_seen(seen)
-            if not err:
-                _save_buffer([])
+            _save_offsets(offsets)
+
+            # The buffer is rewritten to exactly what still needs retrying — on
+            # success that is the empty list, i.e. a real drain.
+            _replace_buffer(failed)
+
             ts = datetime.now().strftime("%H:%M")
-            buf_left = len(_load_buffer())
-            if buf_left:
-                self._set_status(f"{ts}  buffered ({buf_left})")
+            if failed:
+                self._set_status(f"{ts}  buffered ({min(len(failed), MAX_BUFFER_EVENTS)})")
             else:
                 self._set_status(f"{ts}  +{count} events sent")
         except Exception as e:
@@ -1206,7 +1495,7 @@ class TelemetryTrayApp:
 
             try:
                 url = f"{endpoint}/api/engineer/{eng_id}/stats?secret={secret}"
-                r = requests.get(url, timeout=10)
+                r = _SESSION.get(url, timeout=10)
                 if r.status_code == 401:
                     lbl_msg.config(text="Auth error — check secret.", fg="#ff453a")
                     _schedule_refresh()
@@ -1966,8 +2255,90 @@ def _cleanup_mei_folders() -> None:
         _log(f"startup cleanup error: {e}")
 
 
+def _run_memdebug(argv) -> None:
+    """Headless collector loop with tracemalloc instrumentation.
+
+    Runs the same _do_cycle() the tray runs, with no UI and no autostart/shortcut
+    side effects, so a memory profile measures the collector rather than tkinter.
+
+        python cc_tray_app.py --memdebug [--interval 1] [--snapshot-min 1]
+                              [--minutes 15] [--offline]
+    """
+    import argparse
+
+    from cc_memdebug import MemDebugger
+
+    parser = argparse.ArgumentParser(prog="cc_tray_app --memdebug")
+    parser.add_argument("--memdebug", action="store_true")
+    parser.add_argument("--interval", type=float, default=1.0,
+                        help="seconds between collector cycles (accelerated)")
+    parser.add_argument("--snapshot-min", type=float, default=1.0,
+                        help="minutes between tracemalloc snapshots")
+    parser.add_argument("--minutes", type=float, default=15.0,
+                        help="how long to run before exiting")
+    parser.add_argument("--offline", action="store_true",
+                        help="point at an unreachable endpoint to exercise the "
+                             "buffer/retry path")
+    parser.add_argument("--endpoint",
+                        help="override the dashboard endpoint (use a local stub "
+                             "so a profiling run never posts to production)")
+    parser.add_argument("--state-dir",
+                        help="redirect buffer/seen/log state into this directory "
+                             "instead of ~/.claude, so a run cannot disturb the "
+                             "real collector's state")
+    parser.add_argument("--log", default=str(pathlib.Path.cwd() / "memdebug.log"))
+    args = parser.parse_args(argv)
+
+    if args.state_dir:
+        global BUFFER_PATH, SEEN_PATH, LOG_PATH, OFFSETS_PATH, DROPS_PATH
+        global BROWSER_SESSIONS_PATH, BROWSER_BUFFER_PATH
+        state = pathlib.Path(args.state_dir)
+        state.mkdir(parents=True, exist_ok=True)
+        BUFFER_PATH           = state / "telemetry_buffer.jsonl"
+        SEEN_PATH             = state / ".telemetry_seen"
+        LOG_PATH              = state / "telemetry_tray.log"
+        OFFSETS_PATH          = state / ".telemetry_offsets.json"
+        DROPS_PATH            = state / ".telemetry_drops.json"
+        BROWSER_SESSIONS_PATH = state / "browser_sessions.jsonl"
+        BROWSER_BUFFER_PATH   = state / "browser_sessions_buffer.jsonl"
+
+    app = TelemetryTrayApp()
+    cfg = dict(app._load_cfg())
+    if args.offline:
+        # A port nothing listens on: every POST fails fast, exercising the
+        # failure path without waiting on DNS or a 15s timeout.
+        cfg["endpoint"] = "http://127.0.0.1:9"
+    elif args.endpoint:
+        cfg["endpoint"] = args.endpoint
+    if args.offline or args.endpoint:
+        app._memdebug_cfg_override = cfg
+
+    dbg = MemDebugger(args.log, interval_sec=args.snapshot_min * 60, top=20)
+    dbg.start()
+
+    deadline = time.time() + args.minutes * 60
+    cycles = 0
+    try:
+        while time.time() < deadline:
+            app._do_cycle()
+            cycles += 1
+            time.sleep(args.interval)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        dbg._write(f"=== ran {cycles} cycles at {args.interval}s interval ===")
+        dbg.stop()
+    print(f"memdebug: {cycles} cycles, report in {args.log}")
+
+
 if __name__ == "__main__":
     import os as _os
+    import sys as _sys
+
+    if "--memdebug" in _sys.argv:
+        _run_memdebug(_sys.argv[1:])
+        _sys.exit(0)
+
     _EXE_PATH = _ensure_permanent_exe()
     _cleanup_mei_folders()
     _cleanup_old_autostart_keys()
