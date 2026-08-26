@@ -33,8 +33,10 @@ def _load_password():
         row = c.fetchone()
         if row and row["value"]:
             ADMIN_PASSWORD = row["value"]
-    except Exception:
-        pass
+        print("[init] load admin password: OK")
+    except Exception as ex:
+        conn.rollback()
+        print(f"[init] load admin password: skipped/rolled back: {ex}")
     finally:
         conn.close()
 
@@ -50,20 +52,22 @@ def _ensure_github_username_map():
         "maico15":   "Aleksandr Malyshev",
     }
     conn = get_db()
-    c = conn.cursor()
-    c.execute("SELECT value FROM config WHERE key='github_username_map'")
-    row = c.fetchone()
     try:
-        current = json_lib.loads(row["value"] if row else "{}")
-    except Exception:
-        current = {}
-    merged = {**required, **current}   # required fills gaps; saved overrides win
-    c.execute(
-        "INSERT OR REPLACE INTO config (key, value) VALUES ('github_username_map', ?)",
-        (json_lib.dumps(merged),),
-    )
-    conn.commit()
-    conn.close()
+        with conn.step("merge github_username_map"):
+            c = conn.cursor()
+            c.execute("SELECT value FROM config WHERE key='github_username_map'")
+            row = c.fetchone()
+            try:
+                current = json_lib.loads(row["value"] if row else "{}")
+            except Exception:
+                current = {}
+            merged = {**required, **current}   # required fills gaps; saved overrides win
+            c.execute(
+                "INSERT OR REPLACE INTO config (key, value) VALUES ('github_username_map', ?)",
+                (json_lib.dumps(merged),),
+            )
+    finally:
+        conn.close()
 
 
 def _auto_advance_week():
@@ -75,35 +79,57 @@ def _auto_advance_week():
     conn = get_db()
     try:
         now = datetime.utcnow().isocalendar()
-        conn.execute(
-            "INSERT OR REPLACE INTO config (key, value) VALUES ('current_week', ?)",
-            (str(now[1]),),
-        )
-        conn.execute(
-            "INSERT OR REPLACE INTO config (key, value) VALUES ('current_year', ?)",
-            (str(now[0]),),
-        )
-        conn.commit()
-        print(f"[auto_advance_week] updated to week {now[1]} / {now[0]}")
+        with conn.step(f"auto_advance_week -> week {now[1]} / {now[0]}"):
+            conn.execute(
+                "INSERT OR REPLACE INTO config (key, value) VALUES ('current_week', ?)",
+                (str(now[1]),),
+            )
+            conn.execute(
+                "INSERT OR REPLACE INTO config (key, value) VALUES ('current_year', ?)",
+                (str(now[0]),),
+            )
     finally:
         conn.close()
 
 
 @asynccontextmanager
 async def lifespan(app):
+    # Schema creation is the one genuinely essential step — without tables the API
+    # cannot serve, so a failure there should still stop the boot. Everything after it
+    # is a seed/cleanup convenience: each runs guarded so that one bad step is logged
+    # and skipped instead of aborting startup with "Application startup failed".
     init_db()
-    # Only seed if no engineers exist yet
-    conn = get_db()
-    count = conn.execute("SELECT COUNT(*) FROM team_members").fetchone()[0]
-    conn.close()
-    if count == 0:
-        seed_data()
-    _load_password()
-    _ensure_github_username_map()
-    conn = get_db()
-    _normalize_backlog_priority_blocks(conn)
-    conn.commit()
-    conn.close()
+
+    def _guarded(label, fn):
+        try:
+            fn()
+        except Exception as ex:
+            print(f"[init] {label}: skipped: {ex}")
+
+    def _seed_if_empty():
+        conn = get_db()
+        try:
+            count = conn.execute("SELECT COUNT(*) FROM team_members").fetchone()[0]
+        finally:
+            conn.close()
+        if count == 0:
+            seed_data()
+            print("[init] seed data: OK (seeded an empty database)")
+        else:
+            print(f"[init] seed data: OK (skipped, {count} team member(s) present)")
+
+    def _normalize_backlog():
+        conn = get_db()
+        try:
+            with conn.step("normalize backlog priority blocks"):
+                _normalize_backlog_priority_blocks(conn)
+        finally:
+            conn.close()
+
+    _guarded("seed data", _seed_if_empty)
+    _guarded("load admin password", _load_password)
+    _guarded("merge github_username_map", _ensure_github_username_map)
+    _guarded("normalize backlog priority blocks", _normalize_backlog)
     scheduler.add_job(_run_jira_sync,        'cron',     hour=2,  minute=0,  id='jira_daily_sync',    replace_existing=True)
     scheduler.add_job(_run_slack_reports_sync,'cron',     hour=20, minute=0,  id='slack_reports_sync', replace_existing=True)
     scheduler.add_job(_run_ai_usage_sync,    'cron',     hour=2,  minute=30, id='ai_usage_daily_sync', replace_existing=True)
@@ -116,8 +142,9 @@ async def lifespan(app):
         replace_existing=True,
     )
     scheduler.start()
-    _auto_advance_week()  # sync config on every startup (handles cold starts after week boundary)
-    _run_github_sync()    # immediate run on startup
+    # sync config on every startup (handles cold starts after a week boundary)
+    _guarded("auto_advance_week", _auto_advance_week)
+    _guarded("startup github sync", _run_github_sync)
     yield
     scheduler.shutdown(wait=False)
 
@@ -197,7 +224,11 @@ def init_db():
             rule_key TEXT NOT NULL,
             label TEXT NOT NULL,
             points INTEGER NOT NULL,
-            condition TEXT DEFAULT NULL
+            condition TEXT DEFAULT NULL,
+            -- Without this, "INSERT OR IGNORE INTO score_rules" has nothing to conflict
+            -- with and appends a duplicate row on every single startup (production had
+            -- accumulated 65 identical dev/commit rules this way before it was caught).
+            UNIQUE(stream, rule_key)
         );
 
         CREATE TABLE IF NOT EXISTS config (
@@ -447,15 +478,17 @@ def init_db():
         );
     """)
     conn.commit()
-    # Seed default departments
-    c = conn.cursor()
-    c.execute("SELECT COUNT(*) FROM departments")
-    if c.fetchone()[0] == 0:
-        c.executemany(
-            "INSERT INTO departments (name, slug) VALUES (?, ?)",
-            [("IT", "it"), ("Test", "test")]
-        )
-        conn.commit()
+    # Everything below this point is a migration/seed step, and every one of them runs
+    # inside conn.step(): on failure it rolls back and logs "skipped/rolled back: …"
+    # instead of leaving an aborted Postgres transaction that kills the next statement.
+    with conn.step("seed default departments"):
+        c = conn.cursor()
+        c.execute("SELECT COUNT(*) FROM departments")
+        if c.fetchone()[0] == 0:
+            c.executemany(
+                "INSERT INTO departments (name, slug) VALUES (?, ?)",
+                [("IT", "it"), ("Test", "test")]
+            )
     # Idempotent column additions for databases created before these columns existed.
     # add_column_if_missing() checks information_schema/PRAGMA first rather than
     # relying on catching a duplicate-column error — on Postgres, an unhandled ALTER
@@ -471,22 +504,16 @@ def init_db():
     # ai_events and ai_usage_daily are created via executescript above (IF NOT EXISTS);
     # these no-op try/except blocks handle the case where CREATE INDEX runs on a DB
     # that was initialized before those statements were added to the script.
-    try:
+    with conn.step("index idx_ai_events_engineer"):
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_ai_events_engineer "
             "ON ai_events(engineer_id, timestamp)"
         )
-        conn.commit()
-    except Exception:
-        pass
-    try:
+    with conn.step("index idx_ai_usage_daily_date"):
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_ai_usage_daily_date "
             "ON ai_usage_daily(date, engineer_id)"
         )
-        conn.commit()
-    except Exception:
-        pass
     conn.add_column_if_missing("team_members", "department_id", "INTEGER DEFAULT 1")
     conn.add_column_if_missing("team_members", "email", "TEXT DEFAULT ''")
     conn.add_column_if_missing("tasks", "manual_override", "INTEGER NOT NULL DEFAULT 0")
@@ -501,9 +528,9 @@ def init_db():
     )
 
     # ── weekly_tasks schema migration ────────────────────────────────────────
-    # Use get_columns() (not try/except) so failures are never swallowed, and so
-    # this works on Postgres too — a bare PRAGMA sent through Cursor.execute() (as
-    # opposed to executescript()) is not translated and fails on Postgres.
+    # add_column_if_missing() checks the catalog first (not try/except) so failures are
+    # never swallowed, and so this works on Postgres too — a bare PRAGMA sent through
+    # Cursor.execute() (as opposed to executescript()) is not translated and fails there.
     # DEFAULT '' is the only value that is a constant literal in every SQLite
     # version.  Both datetime('now') and CURRENT_TIMESTAMP were rejected as
     # non-constant for ALTER TABLE ADD COLUMN in different SQLite versions:
@@ -512,25 +539,12 @@ def init_db():
     #                          Render's Python 3.11 ships with SQLite 3.39.2
     # Therefore DEFAULT '' is the only cross-version-safe choice here.
     print("[db] Running database migrations...")
-    _wt_cols = conn.get_columns("weekly_tasks")
-
-    if "tasks" not in _wt_cols:
-        conn.execute("ALTER TABLE weekly_tasks ADD COLUMN tasks TEXT NOT NULL DEFAULT ''")
-        conn.commit()
-        print("[db] Added weekly_tasks.tasks column")
-    else:
-        print("[db] weekly_tasks.tasks already exists — skipping")
-
-    if "updated_at" not in _wt_cols:
-        conn.execute("ALTER TABLE weekly_tasks ADD COLUMN updated_at TEXT DEFAULT ''")
-        conn.commit()
-        print("[db] Added weekly_tasks.updated_at column")
-    else:
-        print("[db] weekly_tasks.updated_at already exists — skipping")
+    conn.add_column_if_missing("weekly_tasks", "tasks", "TEXT NOT NULL DEFAULT ''")
+    conn.add_column_if_missing("weekly_tasks", "updated_at", "TEXT DEFAULT ''")
 
     # ── One-time: fix score_rules to real-data formula ────────────────────────
     # Runs on every deploy but is idempotent after the first time.
-    try:
+    with conn.step("score_rules real-data formula"):
         conn.execute("UPDATE score_rules SET points=100 WHERE rule_key='pr_merged'")
         conn.execute("UPDATE score_rules SET points=0   WHERE rule_key='ticket_closed'")
         conn.execute("UPDATE score_rules SET points=0   WHERE rule_key='fast_cycle'")
@@ -538,102 +552,33 @@ def init_db():
             "INSERT OR IGNORE INTO score_rules (stream,rule_key,label,points) "
             "VALUES ('dev','commit','Commit',10)"
         )
-        conn.commit()
-    except Exception:
-        conn.rollback()
-
-    # ── One-time: purge fake manually-entered metric data ─────────────────────
-    # Uses a config flag so this only runs once per database.
-    c = conn.cursor()
-    c.execute("SELECT value FROM config WHERE key='_metrics_cleaned_v1'")
-    if not c.fetchone():
-        try:
-            conn.execute("DELETE FROM support_metrics")
-            conn.execute("DELETE FROM docs_metrics")
-            # Reset manual-only columns in dev_metrics; preserve real sync data
-            conn.execute(
-                "UPDATE dev_metrics SET "
-                "tickets_closed=0, cycle_time_days=0.0, "
-                "features_completed=0, deploys=0, blocked_count=0"
-            )
-            conn.execute(
-                "INSERT OR REPLACE INTO config (key,value) "
-                "VALUES ('_metrics_cleaned_v1','1')"
-            )
-            conn.commit()
-            print("[init] Fake metric data cleaned; score rules updated.")
-        except Exception as ex:
-            conn.rollback()
-            print(f"[init] Fake data cleanup error: {ex}")
-
-    # ── One-time: fix stream assignments per real engineer roles ──────────────
-    # seed_data() originally seeded all three with ["dev","support","docs"].
-    # That caused Vinogradov (docs only, no GitHub) to accumulate dev XP.
-    # Malyshev was added later via admin with an unknown stream; ensure "dev".
-    c.execute("SELECT value FROM config WHERE key='_streams_fixed_v1'")
-    if not c.fetchone():
-        try:
-            conn.execute("UPDATE team_members SET stream='[\"dev\"]'  WHERE name='Andrey Brunetkin'")
-            conn.execute("UPDATE team_members SET stream='[\"dev\"]'  WHERE name='Andrey Pogrebnyak'")
-            conn.execute("UPDATE team_members SET stream='[\"docs\"]' WHERE name='Evgeniy Vinogradov'")
-            conn.execute("UPDATE team_members SET stream='[\"dev\"]'  WHERE name='Aleksandr Malyshev'")
-            conn.execute(
-                "INSERT OR REPLACE INTO config (key,value) "
-                "VALUES ('_streams_fixed_v1','1')"
-            )
-            conn.commit()
-            print("[init] Stream assignments corrected for all engineers.")
-        except Exception as ex:
-            conn.rollback()
-            print(f"[init] Stream fix error: {ex}")
-
-    # ── One-time: remove fake bulk-inserted dev_metrics for weeks 14-21 ───────
-    # GitHub sync only writes to current_week. Weeks 14-21 were never the
-    # current week when a real sync ran, so their prs_merged / commits_count
-    # values come from the original mock seed — not real GitHub data.
-    # Week 22+ is real (GitHub sync or manual admin entry). Safe to delete old.
-    c.execute("SELECT value FROM config WHERE key='_fake_dev_weeks_removed_v1'")
-    if not c.fetchone():
-        try:
-            deleted = conn.execute(
-                "DELETE FROM dev_metrics WHERE year=2026 AND week BETWEEN 14 AND 21"
-            ).rowcount
-            conn.execute(
-                "INSERT OR REPLACE INTO config (key,value) "
-                "VALUES ('_fake_dev_weeks_removed_v1','1')"
-            )
-            conn.commit()
-            print(f"[init] Removed {deleted} fake dev_metrics rows (weeks 14-21 / 2026).")
-        except Exception as ex:
-            conn.rollback()
-            print(f"[init] Fake dev weeks removal error: {ex}")
 
     # ── Normalize ai_tool_sessions.tool to lowercase (idempotent) ─────────────
-    c = conn.cursor()
-    c.execute("""
-        SELECT id, engineer_id, tool, date, duration_sec, session_count
-        FROM ai_tool_sessions
-        WHERE tool != LOWER(tool)
-    """)
-    rows = c.fetchall()
-    for row in rows:
-        normalized = row["tool"].lower().strip()
+    with conn.step("normalize ai_tool_sessions.tool to lowercase"):
+        c = conn.cursor()
         c.execute("""
-            UPDATE ai_tool_sessions
-            SET duration_sec  = duration_sec  + ?,
-                session_count = session_count + ?
-            WHERE engineer_id = ? AND tool = ? AND date = ?
-              AND id != ?
-        """, (row["duration_sec"], row["session_count"],
-              row["engineer_id"], normalized, row["date"], row["id"]))
-        if c.rowcount > 0:
-            c.execute("DELETE FROM ai_tool_sessions WHERE id = ?", (row["id"],))
-        else:
-            c.execute("UPDATE ai_tool_sessions SET tool = ? WHERE id = ?",
-                      (normalized, row["id"]))
-    if rows:
-        conn.commit()
-        print(f"[init] Normalized {len(rows)} ai_tool_sessions tool name(s) to lowercase.")
+            SELECT id, engineer_id, tool, date, duration_sec, session_count
+            FROM ai_tool_sessions
+            WHERE tool != LOWER(tool)
+        """)
+        rows = c.fetchall()
+        for row in rows:
+            normalized = row["tool"].lower().strip()
+            c.execute("""
+                UPDATE ai_tool_sessions
+                SET duration_sec  = duration_sec  + ?,
+                    session_count = session_count + ?
+                WHERE engineer_id = ? AND tool = ? AND date = ?
+                  AND id != ?
+            """, (row["duration_sec"], row["session_count"],
+                  row["engineer_id"], normalized, row["date"], row["id"]))
+            if c.rowcount > 0:
+                c.execute("DELETE FROM ai_tool_sessions WHERE id = ?", (row["id"],))
+            else:
+                c.execute("UPDATE ai_tool_sessions SET tool = ? WHERE id = ?",
+                          (normalized, row["id"]))
+        if rows:
+            print(f"[init] Normalized {len(rows)} ai_tool_sessions tool name(s) to lowercase.")
 
     conn.close()
 
