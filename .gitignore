@@ -1,3 +1,6 @@
+# Local run artifacts
+*.log
+
 # Secrets
 .env
 .env.local
