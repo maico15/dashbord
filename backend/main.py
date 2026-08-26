@@ -220,7 +220,11 @@ def init_db():
             rule_key TEXT NOT NULL,
             label TEXT NOT NULL,
             points INTEGER NOT NULL,
-            condition TEXT DEFAULT NULL
+            condition TEXT DEFAULT NULL,
+            -- Without this, "INSERT OR IGNORE INTO score_rules" has nothing to conflict
+            -- with and appends a duplicate row on every single startup (production had
+            -- accumulated 65 identical dev/commit rules this way before it was caught).
+            UNIQUE(stream, rule_key)
         );
 
         CREATE TABLE IF NOT EXISTS config (

@@ -41,6 +41,7 @@ _CONFLICT_TARGETS: dict = {
     "ai_usage_cache":  ["key"],
     "config":          ["key"],
     "roadmap_meta":    ["key"],
+    "score_rules":     ["stream", "rule_key"],
     "dev_metrics":     ["member_id", "week", "year"],
     "support_metrics": ["member_id", "week", "year"],
     "docs_metrics":    ["member_id", "week", "year"],
