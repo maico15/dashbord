@@ -31,6 +31,7 @@ SMOKE_ENDPOINTS = [
     "/api/backlog",
     "/api/reports",
     "/api/weekly-tasks",
+    "/api/score-rules",
 ]
 
 

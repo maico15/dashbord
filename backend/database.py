@@ -1,5 +1,6 @@
 import os
 import re
+from contextlib import contextmanager
 
 try:
     from dotenv import load_dotenv
@@ -52,6 +53,28 @@ _OR_REPLACE = re.compile(
     r"INSERT\s+OR\s+REPLACE\s+INTO\s+(\w+)\s*\(([^)]+)\)", re.IGNORECASE | re.DOTALL
 )
 _OR_IGNORE = re.compile(r"INSERT\s+OR\s+IGNORE\s+INTO", re.IGNORECASE)
+_INSERT_TABLE = re.compile(r'\s*INSERT\s+INTO\s+"?(\w+)"?', re.IGNORECASE)
+
+# table name -> whether it has an "id" column, filled lazily from information_schema.
+# Appending "RETURNING id" to an INSERT against a table that has no id column (config,
+# roadmap_meta, weekly_changes, gantt_visibility, backlog_retired) raises UndefinedColumn
+# on Postgres, and any raised error aborts the whole transaction — every later statement
+# on that connection then fails with InFailedSqlTransaction. Asking the catalog once per
+# table is both cheaper and safer than issuing a statement that is expected to fail.
+_ID_COLUMN_CACHE: dict = {}
+
+
+def _table_has_id(sa_conn, table: str) -> bool:
+    if table not in _ID_COLUMN_CACHE:
+        row = sa_conn.execute(
+            text(
+                "SELECT 1 FROM information_schema.columns "
+                "WHERE table_name = :t AND column_name = 'id' LIMIT 1"
+            ),
+            {"t": table},
+        ).fetchone()
+        _ID_COLUMN_CACHE[table] = row is not None
+    return _ID_COLUMN_CACHE[table]
 
 
 class Row(dict):
@@ -115,15 +138,20 @@ class Cursor:
         sql = self._adapt_upsert(sql)
         sql, named = self._to_named(sql, params)
 
-        if IS_POSTGRES and re.match(r"\s*INSERT\s+INTO", sql, re.IGNORECASE) \
-                and "RETURNING" not in sql.upper():
+        m = _INSERT_TABLE.match(sql) if IS_POSTGRES else None
+        if m and "RETURNING" not in sql.upper() and _table_has_id(self._conn, m.group(1)):
+            # SAVEPOINT so an unexpected failure here (permissions, a concurrently
+            # dropped column) rolls back only this statement rather than aborting the
+            # caller's transaction and poisoning every statement issued after it.
+            sp = self._conn.begin_nested()
             try:
                 result = self._conn.execute(text(sql + " RETURNING id"), named)
                 row = result.fetchone()
+                sp.commit()
                 self.lastrowid = row[0] if row else None
                 return self
             except Exception:
-                pass  # table has no 'id' column; fall through to plain execute
+                sp.rollback()  # fall through to a plain execute on a clean transaction
 
         self._result = self._conn.execute(text(sql), named)
         self.rowcount = self._result.rowcount
@@ -189,6 +217,20 @@ class DBWrapper:
                 )
             self._conn.execute(text(stmt))
         self._conn.commit()
+
+    @contextmanager
+    def step(self, label: str):
+        """Run one startup/migration step so its failure can never take the process down
+        and — critically on Postgres — can never leave the connection in an aborted
+        transaction that poisons every step after it. Commits on success, rolls back and
+        logs on failure, always continues."""
+        try:
+            yield self
+            self.commit()
+            print(f"[init] {label}: OK")
+        except Exception as ex:
+            self.rollback()
+            print(f"[init] {label}: skipped/rolled back: {ex}")
 
     def commit(self):
         self._conn.commit()
