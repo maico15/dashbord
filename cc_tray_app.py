@@ -1238,12 +1238,16 @@ class TelemetryTrayApp:
             for e in new_events:
                 if e["event_id"] not in failed_ids:
                     _remember_seen(seen, e["event_id"])
+
+            # Order matters: persist the retry buffer BEFORE advancing offsets.
+            # Offsets are what stop a region of a session file being read again,
+            # so if the process died between the two, events that had advanced
+            # past the offset but were not yet buffered would be lost outright.
+            # This way the worst case is re-reading a region, which `seen`
+            # dedupes.
+            _replace_buffer(failed)
             _save_seen(seen)
             _save_offsets(offsets)
-
-            # The buffer is rewritten to exactly what still needs retrying — on
-            # success that is the empty list, i.e. a real drain.
-            _replace_buffer(failed)
 
             ts = datetime.now().strftime("%H:%M")
             if failed:

@@ -333,7 +333,6 @@ def run_once(cfg: dict) -> None:
     if not all_events:
         print("[telemetry] no new events")
         for ev in new_events:
-
             remember_seen(seen, ev["event_id"])
         save_seen(seen)
         save_offsets(offsets)
@@ -341,20 +340,22 @@ def run_once(cfg: dict) -> None:
 
     success = send_events(all_events, cfg)
 
+    # Order matters in both branches: persist buffer state BEFORE advancing
+    # offsets. Offsets are what stop a file region being read again, so dying
+    # between the two would lose events outright; this way the worst case is
+    # re-reading a region, which `seen` dedupes.
     if success:
-        for ev in all_events:
-
-            remember_seen(seen, ev["event_id"])
-        save_seen(seen)
-        save_offsets(offsets)
         save_buffer([])            # drained on success
-    else:
-        for ev in new_events:
-
+        for ev in all_events:
             remember_seen(seen, ev["event_id"])
         save_seen(seen)
         save_offsets(offsets)
+    else:
         append_buffer(new_events)  # capped, drop-oldest
+        for ev in new_events:
+            remember_seen(seen, ev["event_id"])
+        save_seen(seen)
+        save_offsets(offsets)
 
 def _redirect_to_log_if_no_console() -> None:
     """When running via pythonw.exe (no console window), redirect stdout/stderr to log file.
