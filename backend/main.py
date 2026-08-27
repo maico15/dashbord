@@ -1,4 +1,5 @@
 import os
+import threading
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
@@ -144,7 +145,16 @@ async def lifespan(app):
     scheduler.start()
     # sync config on every startup (handles cold starts after a week boundary)
     _guarded("auto_advance_week", _auto_advance_week)
-    _guarded("startup github sync", _run_github_sync)
+    # Run the startup GitHub sync off the startup path: it makes dozens of API
+    # calls and holds a DB connection for the whole run, so inline it delays
+    # readiness and ties up a pool slot exactly while the first requests land.
+    # Still wrapped in _guarded so a failure is logged, not lost in the thread.
+    threading.Thread(
+        target=_guarded,
+        args=("startup github sync", _run_github_sync),
+        daemon=True,
+        name="startup-github-sync",
+    ).start()
     yield
     scheduler.shutdown(wait=False)
 
