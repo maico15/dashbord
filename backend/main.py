@@ -3752,6 +3752,15 @@ def verify_telemetry_config(data: TelemetryVerifyRequest):
 @app.post("/api/telemetry/events")
 def ingest_telemetry(payload: TelemetryPayload):
     conn = get_db()
+    try:
+        return _ingest_telemetry(conn, payload)
+    finally:
+        # The tray agents call this constantly, so a leak here drains the pool
+        # fastest and takes the whole dashboard down with it.
+        conn.close()
+
+
+def _ingest_telemetry(conn, payload: TelemetryPayload):
     c = conn.cursor()
     # Accept global TELEMETRY_SECRET (legacy) or per-engineer secret stored by /api/register-engineer
     authed = TELEMETRY_SECRET and payload.secret == TELEMETRY_SECRET
@@ -3760,7 +3769,6 @@ def ingest_telemetry(payload: TelemetryPayload):
         row = c.fetchone()
         authed = row and row["value"] == payload.secret
     if not authed:
-        conn.close()
         raise HTTPException(401, "Invalid telemetry secret")
     accepted = 0
     duplicate = 0
@@ -3799,9 +3807,14 @@ def ingest_telemetry(payload: TelemetryPayload):
                 (payload.engineer_id, date, ev.tokens_input, ev.tokens_output),
             )
         except Exception as ex:
+            # A failed statement puts the whole Postgres transaction in the
+            # aborted state: without this rollback every later statement on this
+            # connection fails with "current transaction is aborted", the error
+            # escapes the endpoint, conn.close() below is never reached, and the
+            # connection leaks from the pool still holding its locks.
+            conn.rollback()
             print(f"[telemetry] ai_usage_daily upsert failed: {ex}")
     conn.commit()
-    conn.close()
     return {"accepted": accepted, "duplicate": duplicate}
 
 
@@ -3816,11 +3829,18 @@ class ToolSessionRequest(BaseModel):
 @app.post("/api/telemetry/tool-sessions")
 def receive_tool_session(data: ToolSessionRequest):
     conn = get_db()
+    try:
+        return _receive_tool_session(conn, data)
+    finally:
+        # Agent-driven endpoint: a leaked connection here drains the pool too.
+        conn.close()
+
+
+def _receive_tool_session(conn, data: ToolSessionRequest):
     c = conn.cursor()
     c.execute("SELECT value FROM config WHERE key=?", (f"secret_{data.engineer_id}",))
     row = c.fetchone()
     if not row or row["value"] != data.secret:
-        conn.close()
         raise HTTPException(401, "Invalid credentials")
 
     c.execute("""
@@ -3831,7 +3851,6 @@ def receive_tool_session(data: ToolSessionRequest):
             session_count = session_count + 1
     """, (int(data.engineer_id), data.tool.lower().strip(), data.date, data.duration_sec))
     conn.commit()
-    conn.close()
     return {"ok": True}
 
 

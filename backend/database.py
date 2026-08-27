@@ -35,6 +35,25 @@ if IS_POSTGRES:
         pool_timeout=30,
         pool_recycle=300,
         pool_pre_ping=True,
+        # Server-side deadlines. Most endpoints take a connection from get_db()
+        # without a try/finally, so an unexpected error mid-request can leak the
+        # connection while its transaction is in the aborted state — holding row
+        # and index locks forever, blocking later writers, and permanently
+        # consuming a pool slot until the pool is exhausted and every request
+        # fails on checkout. These make the database clean up after us:
+        #   idle_in_transaction_session_timeout - kill a connection parked in a
+        #     transaction (aborted or not) for 60s, releasing its locks and slot.
+        #   lock_timeout - fail a statement that waits 15s for a lock instead of
+        #     blocking indefinitely behind a leaked transaction.
+        #   statement_timeout - backstop for a runaway query; generous enough for
+        #     the GitHub/Jira sync jobs and startup DDL.
+        connect_args={
+            "options": (
+                "-c idle_in_transaction_session_timeout=60000 "
+                "-c lock_timeout=15000 "
+                "-c statement_timeout=120000"
+            ),
+        },
     )
 else:
     engine = create_engine(
@@ -189,6 +208,24 @@ class Cursor:
 class DBWrapper:
     def __init__(self, sa_conn):
         self._conn = sa_conn
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        """Commit on success, roll back on error, and always return the connection
+        to the pool. `with get_db() as conn:` is the safe way to acquire a
+        connection — a bare `conn = get_db()` leaks it if anything raises."""
+        try:
+            if exc_type is None:
+                self._conn.commit()
+            else:
+                self._conn.rollback()
+        except Exception:
+            pass  # never mask the original error, and never skip close()
+        finally:
+            self._conn.close()
+        return False
 
     def cursor(self) -> Cursor:
         return Cursor(self._conn)
