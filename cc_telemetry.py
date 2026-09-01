@@ -17,7 +17,7 @@ import os
 import pathlib
 import sys
 import time
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from datetime import datetime, timezone
 
 try:
@@ -97,17 +97,71 @@ def save_seen(seen: "OrderedDict") -> None:
     SEEN_PATH.parent.mkdir(parents=True, exist_ok=True)
     SEEN_PATH.write_text("\n".join(list(seen)[-MAX_SEEN:]))
 
+# The buffer is loaded more than once per cycle (run_once, then again inside the
+# append path), so a single oversized file would otherwise be billed to the drop
+# counter once per read. Key on the file's identity so each distinct on-disk state
+# is accounted exactly once per process; the counter feeds the heartbeat payload,
+# where a doubled number reads as twice the data loss that actually occurred.
+_OVERFLOW_REPORTED = set()
+
+
+def _claim_overflow_report() -> bool:
+    try:
+        st = BUFFER_PATH.stat()
+        key = (st.st_size, st.st_mtime_ns)
+    except OSError:
+        return True
+    if key in _OVERFLOW_REPORTED:
+        return False
+    _OVERFLOW_REPORTED.add(key)
+    return True
+
 def load_buffer() -> list:
+    """Tail of the retry buffer, bounded at MAX_BUFFER_EVENTS and deduped by id.
+
+    The cap used to be applied only on the write path, so a buffer that had grown
+    past it could never be recovered: read_text() on a 658 MB file (2.1M lines,
+    24 distinct events once deduped) materialised the whole thing, splitlines()
+    doubled it, then one dict per line — ~6 GB resident, and the process died
+    inside the load before append_buffer()'s trim was ever reached. Streaming into
+    a bounded deque keeps a poisoned file survivable, and deduping here means the
+    next save_buffer() writes the collapsed set back out.
+    """
     if not BUFFER_PATH.exists():
         return []
-    events = []
+
+    window = deque(maxlen=MAX_BUFFER_EVENTS)
+    scanned = 0
     try:
-        for line in BUFFER_PATH.read_text().splitlines():
-            line = line.strip()
-            if line:
-                events.append(json.loads(line))
+        with open(BUFFER_PATH, "r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:               # line at a time — never the whole file
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except Exception:
+                    continue
+                if not isinstance(record, dict):
+                    continue
+                window.append(record)
+                scanned += 1
     except Exception:
         pass
+
+    deduped = OrderedDict()
+    for record in window:
+        deduped[record.get("event_id") or id(record)] = record
+    events = list(deduped.values())
+
+    overflow = scanned - len(window)
+    if overflow > 0 and _claim_overflow_report():
+        total = _bump_drop_counter(overflow)
+        print(f"[telemetry] buffer oversized ({scanned} lines) — dropped {overflow} "
+              f"oldest event(s), {total} dropped since install")
+    collapsed = len(window) - len(events)
+    if collapsed > 0:
+        print(f"[telemetry] collapsed {collapsed} duplicate event(s) from buffer")
     return events
 
 def save_buffer(events: list) -> None:
