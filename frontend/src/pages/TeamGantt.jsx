@@ -788,7 +788,7 @@ function AssignmentEditor({ a, hidePercentEst, onChange, onDelete, predecessorLa
 function GanttBar({
   bar, color, gridRow, editMode, dragVisual, linkingFor, assignmentsById,
   onBeginDrag, onUpdate, onDelete, setLinkingFor, setHoveredId, setBarRef,
-  onOpenDetail, beginClickTracking, wasRealClick,
+  onOpenDetail, beginClickTracking, wasRealClick, selectedId, onSelect,
 }) {
   // Viewer mode: a plain click opens the shared task-detail modal (bars
   // aren't draggable in viewer mode, so no other click behavior to protect).
@@ -873,7 +873,10 @@ function GanttBar({
   const cols = drag
     ? drag.kind === "move"
       ? { colStart: bar.colStart + drag.deltaCols, colEnd: bar.colEnd + drag.deltaCols }
-      : { colStart: bar.colStart, colEnd: Math.max(bar.colStart + 1, bar.colEnd + drag.deltaCols) }
+      : drag.kind === "resize-left"
+        // Left edge moves, right edge pinned — clamped so the bar keeps >= 1 column.
+        ? { colStart: Math.min(bar.colEnd - 1, bar.colStart + drag.deltaCols), colEnd: bar.colEnd }
+        : { colStart: bar.colStart, colEnd: Math.max(bar.colStart + 1, bar.colEnd + drag.deltaCols) }
     : { colStart: bar.colStart, colEnd: bar.colEnd };
   const baseStartDate = isQueued ? bar.startLabel : bar.startDate;
   const warn = dependencyWarning(bar.assignment, assignmentsById, baseStartDate);
@@ -889,6 +892,7 @@ function GanttBar({
           ? `tg-bar tg-queued${editMode ? " tg-editing tg-draggable" : ""}${drag ? " tg-dragging" : ""}`
           : `tg-bar tg-active${bar.overdue ? " tg-overdue" : ""}${editMode ? " tg-editing tg-draggable" : ""}${drag ? " tg-dragging" : ""}`
         ) + (bar.assignment.__pending ? " tg-bar-pending" : "")
+          + (editMode && selectedId === bar.assignment.id ? " tg-bar-selected" : "")
       }
       style={{
         gridColumn: `${cols.colStart + 2} / ${cols.colEnd + 2}`,
@@ -898,7 +902,11 @@ function GanttBar({
       onMouseDown={
         !editMode
           ? beginClickTracking
-          : (linkingFor == null ? (e) => onBeginDrag(e, "move", bar.assignment, isQueued, bar.colStart, bar.colEnd, baseStartDate) : undefined)
+          : (linkingFor == null
+              // Track the press as well as starting the drag: a press that never
+              // moved is a click, and selects the bar for the side panel.
+              ? (e) => { beginClickTracking(e); onBeginDrag(e, "move", bar.assignment, isQueued, bar.colStart, bar.colEnd, baseStartDate) }
+              : undefined)
       }
       onClick={
         !editMode
@@ -907,7 +915,7 @@ function GanttBar({
               e.stopPropagation();
               if (linkingFor !== bar.assignment.id) onUpdate(linkingFor, { depends_on: bar.assignment.id });
               setLinkingFor(null);
-            } : undefined)
+            } : (e) => { if (wasRealClick(e)) onSelect(bar.assignment.id) })
       }
       onMouseEnter={() => setHoveredId(bar.assignment.id)}
       onMouseLeave={() => setHoveredId((h) => (h === bar.assignment.id ? null : h))}
@@ -932,7 +940,15 @@ function GanttBar({
       )}
       {editMode && (
         <div
-          className="tg-bar-resize"
+          className="tg-bar-resize tg-bar-resize-left"
+          title="Drag to change the start date (end stays put)"
+          onMouseDown={(e) => onBeginDrag(e, "resize-left", bar.assignment, isQueued, bar.colStart, bar.colEnd, baseStartDate)}
+        />
+      )}
+      {editMode && (
+        <div
+          className="tg-bar-resize tg-bar-resize-right"
+          title="Drag to change the duration"
           onMouseDown={(e) => onBeginDrag(e, "resize", bar.assignment, isQueued, bar.colStart, bar.colEnd, baseStartDate)}
         />
       )}
@@ -952,6 +968,159 @@ function GanttBar({
         />
       )}
     </div>
+  );
+}
+
+/* ---------------- right-side editor panel ---------------- */
+
+const PANEL_STATUSES = ["active", "queued", "continuous", "done"];
+
+/** Slide-in editor for a single assignment (edit mode only).
+ *
+ *  Apply stages ONE gantt_update carrying only the fields that actually
+ *  changed, and Delete stages a gantt_delete — both go through the same draft
+ *  queue as every other edit-mode action rather than writing to the backend,
+ *  so Undo / Discard / the unsaved badges keep working. computeDraftState
+ *  already drops a deleted assignment from the rendered state, so there is no
+ *  separate local removal to do here.
+ *
+ *  `form` is deliberately NOT cleared when the selection goes away: the panel
+ *  keeps its last contents while it slides out, otherwise the fields would
+ *  blank out mid-transition.
+ */
+function TaskSidePanel({ assignment, onApply, onDelete, onClose }) {
+  const [form, setForm] = useState(null);
+  const panelRef = useRef(null);
+
+  const seedKey = assignment
+    ? [assignment.id, assignment.project, assignment.start_date,
+       assignment.est_days, assignment.percent, assignment.status].join("|")
+    : null;
+
+  // Re-seed on a new selection, and also when the underlying record changes
+  // underneath an open panel (a drag can move the very bar being edited).
+  useEffect(() => {
+    if (!assignment) return;
+    setForm({
+      project: assignment.project || "",
+      start_date: assignment.start_date || "",
+      est_days: assignment.est_days ?? 1,
+      percent: assignment.percent ?? 0,
+      status: assignment.status || "active",
+    });
+  }, [seedKey]);
+
+  useEffect(() => {
+    if (!assignment) return;
+    // No stopPropagation: the board's own Escape handler also cancels an
+    // in-flight drag and clears link mode, and both should still run.
+    function onKey(e) { if (e.key === "Escape") onClose() }
+    function onDown(e) {
+      if (panelRef.current && panelRef.current.contains(e.target)) return;
+      const near = e.target.closest ? e.target.closest(".tg-bar, .tg-controls") : null;
+      // Clicking another bar switches selection rather than closing. Toolbar
+      // clicks must not clear it either: this runs on mousedown, so closing
+      // here would disable "Delete selected" before its click ever fired.
+      if (near) return;
+      onClose();
+    }
+    window.addEventListener("keydown", onKey);
+    document.addEventListener("mousedown", onDown);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      document.removeEventListener("mousedown", onDown);
+    };
+  }, [assignment, onClose]);
+
+  const open = !!assignment;
+
+  function set(field, value) {
+    setForm((f) => (f ? { ...f, [field]: value } : f));
+  }
+
+  function apply() {
+    if (!assignment || !form) return;
+    const patch = {};
+    if (form.project !== (assignment.project || "")) patch.project = form.project;
+    if (form.start_date && form.start_date !== assignment.start_date) patch.start_date = form.start_date;
+    const est = Math.max(1, parseInt(form.est_days, 10) || 1);
+    if (est !== assignment.est_days) patch.est_days = est;
+    const pct = Math.min(100, Math.max(0, Number(form.percent)));
+    if (pct !== assignment.percent) patch.percent = pct;
+    if (form.status !== assignment.status) patch.status = form.status;
+    if (Object.keys(patch).length > 0) onApply(assignment.id, patch);
+    onClose();
+  }
+
+  return (
+    <aside
+      ref={panelRef}
+      className={`tg-side-panel${open ? " open" : ""}`}
+      aria-hidden={!open}
+    >
+      {form && (
+        <>
+          <div className="tg-sp-head">
+            <span className="tg-sp-title">Task</span>
+            <button className="tg-sp-close" onClick={onClose} title="Close (Esc)">×</button>
+          </div>
+
+          <label className="tg-sp-label">Name</label>
+          <input
+            className="tg-sp-input"
+            type="text"
+            value={form.project}
+            onChange={(e) => set("project", e.target.value)}
+          />
+
+          <label className="tg-sp-label">Start date</label>
+          <input
+            className="tg-sp-input"
+            type="date"
+            value={form.start_date}
+            onChange={(e) => set("start_date", e.target.value)}
+          />
+
+          <label className="tg-sp-label">Est. days</label>
+          <input
+            className="tg-sp-input"
+            type="number"
+            min="1"
+            value={form.est_days}
+            onChange={(e) => set("est_days", e.target.value)}
+          />
+
+          <label className="tg-sp-label">Progress — {form.percent}%</label>
+          <input
+            className="tg-sp-range"
+            type="range"
+            min="0"
+            max="100"
+            value={form.percent}
+            onChange={(e) => set("percent", Number(e.target.value))}
+          />
+
+          <label className="tg-sp-label">Status</label>
+          <div className="tg-sp-status">
+            {PANEL_STATUSES.map((s) => (
+              <button
+                key={s}
+                className={s === form.status ? "on" : ""}
+                onClick={() => set("status", s)}
+              >{s}</button>
+            ))}
+          </div>
+
+          <div className="tg-sp-actions">
+            <button className="tg-btn tg-sp-apply" onClick={apply}>Apply</button>
+            <button
+              className="tg-btn tg-sp-delete"
+              onClick={() => { if (assignment) { onDelete(assignment.id); onClose() } }}
+            >Delete</button>
+          </div>
+        </>
+      )}
+    </aside>
   );
 }
 
@@ -997,6 +1166,7 @@ export default function TeamGantt() {
   const clickPointerDownRef = useRef(null); // {x,y} on mousedown, to tell a click from a completed drag (backlog rows + gantt bars)
 
   const [detailTarget, setDetailTarget] = useState(null); // {type:"backlog"|"gantt", id} shown in the shared task-detail modal, or null
+  const [selectedId, setSelectedId] = useState(null); // assignment shown in the right-side edit panel (edit mode only)
   const [blSearch, setBlSearch] = useState("");
   const [blSearchDebounced, setBlSearchDebounced] = useState("");
   const [blPriorityFilter, setBlPriorityFilter] = useState([]); // selected priority chip values; [] = all
@@ -1472,6 +1642,16 @@ export default function TeamGantt() {
       const newStart = toISODate(addDays(parseISODate(info.baseStartDate), info.deltaCols));
       if (info.isQueued) patch.queue_start = newStart;
       else patch.start_date = newStart;
+    } else if (info.kind === "resize-left") {
+      // The right edge is pinned, so moving the start absorbs the delta into
+      // est_days. colEnd is exclusive; colEnd - 1 is the last covered column.
+      const endCol = info.colEnd - 1;
+      const newStartDate = colToDate(Math.min(endCol, info.colStart + info.deltaCols), rangeStart);
+      const endDate = colToDate(endCol, rangeStart);
+      const newStart = toISODate(newStartDate);
+      if (info.isQueued) patch.queue_start = newStart;
+      else patch.start_date = newStart;
+      patch.est_days = Math.max(1, workingDaysElapsed(newStartDate, endDate));
     } else {
       const newEndCol = info.colEnd + info.deltaCols;
       const newEndDate = colToDate(Math.max(info.colStart, newEndCol) - 1, rangeStart);
@@ -1797,6 +1977,12 @@ export default function TeamGantt() {
                 disabled={changeQueue.length === 0}
               >Отменить всё</button>
               <button
+                className="tg-btn"
+                onClick={() => { if (selectedId != null) { deleteAssignment(selectedId); setSelectedId(null) } }}
+                disabled={selectedId == null}
+                title={selectedId == null ? "Select a bar first" : "Delete the selected task"}
+              >🗑 Delete selected</button>
+              <button
                 className={`tg-btn tg-btn-save${changeQueue.length > 0 ? " on" : ""}`}
                 onClick={saveChanges}
                 disabled={changeQueue.length === 0 || saving}
@@ -1813,6 +1999,7 @@ export default function TeamGantt() {
                 setChangeQueue([]);
                 setSaveError(null);
                 setEditMode(false); setManageOpen(false); setPendingHideId(null); setLinkingFor(null);
+                setSelectedId(null);
               } else enableEdit();
             }}
           >
@@ -2018,6 +2205,8 @@ export default function TeamGantt() {
                     onOpenDetail={openGanttDetail}
                     beginClickTracking={beginClickTracking}
                     wasRealClick={wasRealClick}
+                    selectedId={selectedId}
+                    onSelect={setSelectedId}
                   />
                 ))}
               </div>
@@ -2283,6 +2472,15 @@ export default function TeamGantt() {
         </div>
       </div>
 
+      {editMode && (
+        <TaskSidePanel
+          assignment={selectedId != null ? assignmentsById[selectedId] : null}
+          onApply={updateAssignment}
+          onDelete={deleteAssignment}
+          onClose={() => setSelectedId(null)}
+        />
+      )}
+
       {detailBacklogItem && (
         <TaskDetailModal
           taskKey={`b-${detailBacklogItem.id}`}
@@ -2394,7 +2592,33 @@ function Style() {
       .tg-bar.tg-editing{position:relative;z-index:5;flex-direction:column;align-items:flex-start;padding:6px 8px;overflow:visible;min-height:auto}
       .tg-bar.tg-draggable{cursor:grab}
       .tg-bar.tg-draggable.tg-dragging{cursor:grabbing}
-      .tg-bar-resize{position:absolute;top:0;bottom:0;right:0;width:8px;cursor:col-resize;z-index:11}
+      /* 6px grab strips, only rendered in edit mode; revealed on bar hover. */
+      .tg-bar-resize{position:absolute;top:0;bottom:0;width:6px;cursor:col-resize;z-index:11;opacity:0;background:var(--text);transition:opacity 120ms ease}
+      .tg-bar:hover .tg-bar-resize{opacity:.3}
+      .tg-bar-resize:hover{opacity:.6}
+      .tg-bar-resize-left{left:0;border-radius:6px 0 0 6px}
+      .tg-bar-resize-right{right:0;border-radius:0 6px 6px 0}
+      .tg-bar-selected{outline:2px solid var(--text);outline-offset:1px}
+
+      /* right-side editor panel */
+      .tg-side-panel{position:fixed;top:0;right:0;bottom:0;width:200px;z-index:60;display:flex;flex-direction:column;gap:2px;
+        padding:14px 12px;overflow-y:auto;background:var(--card);border-left:1px solid var(--border);
+        box-shadow:-8px 0 24px rgba(0,0,0,.18);transform:translateX(100%);transition:transform 200ms ease}
+      .tg-side-panel.open{transform:translateX(0)}
+      .tg-sp-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}
+      .tg-sp-title{font-size:13px;font-weight:700;color:var(--text)}
+      .tg-sp-close{border:none;background:none;color:var(--muted);font-size:20px;line-height:1;cursor:pointer;padding:0 2px}
+      .tg-sp-label{font-size:11px;font-weight:600;color:var(--muted);margin-top:10px;margin-bottom:4px}
+      .tg-sp-input{width:100%;box-sizing:border-box;padding:6px 8px;border-radius:6px;border:1px solid var(--border);
+        background:var(--bg);color:var(--text);font-size:12.5px;font-family:inherit}
+      .tg-sp-range{width:100%;margin:2px 0}
+      .tg-sp-status{display:flex;flex-wrap:wrap;gap:4px}
+      .tg-sp-status button{flex:1 1 auto;padding:4px 6px;border-radius:999px;border:1px solid var(--border);background:var(--bg);
+        color:var(--muted);font-size:10.5px;font-weight:600;cursor:pointer;font-family:inherit}
+      .tg-sp-status button.on{background:var(--text);color:var(--card);border-color:var(--text)}
+      .tg-sp-actions{display:flex;gap:6px;margin-top:16px}
+      .tg-sp-actions .tg-btn{flex:1;padding:7px 8px;text-align:center}
+      .tg-sp-delete{color:var(--danger);border-color:var(--danger)}
       .tg-bar-fillwrap{position:absolute;inset:0;display:flex}
       .tg-bar-fill{height:100%}
       .tg-bar-rest{height:100%;opacity:.25}
