@@ -482,6 +482,19 @@ def init_db():
             created_at  TEXT
         );
 
+        -- Fleet health for the telemetry tray agent. Deliberately NOT folded into
+        -- ai_tool_sessions: that table feeds engineer XP (browser AI minutes), so a
+        -- heartbeat pseudo-row there would inflate scores unless every reader
+        -- remembered to filter it out.
+        CREATE TABLE IF NOT EXISTS agent_heartbeats (
+            engineer_id INTEGER PRIMARY KEY,
+            last_seen   TEXT NOT NULL,
+            version     TEXT DEFAULT '',
+            rss_mb      REAL DEFAULT 0,
+            buffered    INTEGER DEFAULT 0,
+            dropped     INTEGER DEFAULT 0
+        );
+
         CREATE TABLE IF NOT EXISTS backlog_retired (
             title_key  TEXT PRIMARY KEY,
             retired_at TEXT
@@ -627,8 +640,12 @@ def seed_data():
         ("docs", "doc_updated",     "Doc updated",   15, None),
         ("docs", "no_docs_penalty", "Project without docs > 2w", -20, None),
     ]
+    # OR IGNORE, not a plain INSERT: init_db() runs before seed_data() and already
+    # inserts the ('dev','commit') rule, so on a fresh database the plain form hit
+    # the UNIQUE(stream, rule_key) constraint and aborted the whole seed — leaving
+    # a new deployment with no team members and no score rules.
     c.executemany(
-        "INSERT INTO score_rules (stream,rule_key,label,points,condition) VALUES (?,?,?,?,?)",
+        "INSERT OR IGNORE INTO score_rules (stream,rule_key,label,points,condition) VALUES (?,?,?,?,?)",
         rules,
     )
 
@@ -3862,6 +3879,59 @@ def _receive_tool_session(conn, data: ToolSessionRequest):
     """, (int(data.engineer_id), data.tool.lower().strip(), data.date, data.duration_sec))
     conn.commit()
     return {"ok": True}
+
+
+class HeartbeatRequest(BaseModel):
+    engineer_id: str
+    secret:      str
+    version:     str = ""
+    rss_mb:      float = 0
+    buffered:    int = 0
+    dropped:     int = 0
+
+
+@app.post("/api/telemetry/heartbeat")
+def receive_heartbeat(data: HeartbeatRequest):
+    """Liveness + resource report from the tray agent.
+
+    Doubles as the keep-awake ping the agent used to do with GET /api/overview.
+    """
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT value FROM config WHERE key=?", (f"secret_{data.engineer_id}",))
+    row = c.fetchone()
+    if not row or row["value"] != data.secret:
+        conn.close()
+        raise HTTPException(401, "Invalid credentials")
+
+    c.execute("""
+        INSERT OR REPLACE INTO agent_heartbeats
+            (engineer_id, last_seen, version, rss_mb, buffered, dropped)
+        VALUES (?, ?, ?, ?, ?, ?)
+    """, (int(data.engineer_id), datetime.utcnow().isoformat(),
+          data.version, data.rss_mb, data.buffered, data.dropped))
+    conn.commit()
+    conn.close()
+    return {"ok": True}
+
+
+@app.get("/api/telemetry/agents")
+def list_agent_health(password: str = ""):
+    """Fleet-wide agent memory/health, newest report first."""
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("""
+        SELECT h.engineer_id, m.name, h.last_seen, h.version,
+               h.rss_mb, h.buffered, h.dropped
+        FROM agent_heartbeats h
+        LEFT JOIN team_members m ON m.id = h.engineer_id
+        ORDER BY h.last_seen DESC
+    """)
+    agents = [dict(r) for r in c.fetchall()]
+    conn.close()
+    return {"agents": agents}
 
 
 @app.post("/api/admin/fix-tool-names")

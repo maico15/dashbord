@@ -17,6 +17,7 @@ import os
 import pathlib
 import sys
 import time
+from collections import OrderedDict, deque
 from datetime import datetime, timezone
 
 try:
@@ -25,14 +26,26 @@ except ImportError:
     print("ERROR: 'requests' not installed. Run: pip install requests")
     sys.exit(1)
 
+# One Session for the process: requests.post() builds a fresh Session, connection
+# pool and TLS context on every call, which in --daemon mode is per-cycle churn.
+_SESSION = requests.Session()
+_SESSION.headers.update({"User-Agent": "cc-telemetry"})
+_SESSION.mount("https://", requests.adapters.HTTPAdapter(
+    pool_connections=4, pool_maxsize=4, max_retries=0))
+_SESSION.mount("http://", requests.adapters.HTTPAdapter(
+    pool_connections=4, pool_maxsize=4, max_retries=0))
+
 CLAUDE_DIR      = pathlib.Path.home() / ".claude"
 CONFIG_PATH     = CLAUDE_DIR / "telemetry_config.json"
 BUFFER_PATH     = CLAUDE_DIR / "telemetry_buffer.jsonl"
+OFFSETS_PATH    = CLAUDE_DIR / ".telemetry_offsets.json"
+DROPS_PATH      = CLAUDE_DIR / ".telemetry_drops.json"
+MAX_BUFFER_EVENTS = 5_000
 SEEN_PATH       = CLAUDE_DIR / ".telemetry_seen"
 LOG_PATH        = CLAUDE_DIR / "telemetry.log"
 SESSIONS_GLOB   = "projects/**/*.jsonl"
 
-MAX_SEEN        = 1_000_000
+MAX_SEEN        = 50_000   # was 1_000_000: a full set of 64-char ids is ~64MB resident
 POLL_INTERVAL   = 30
 REQUEST_TIMEOUT = 10
 
@@ -57,31 +70,98 @@ def load_config() -> dict:
             sys.exit(1)
     return cfg
 
-def load_seen() -> set:
+def load_seen() -> "OrderedDict":
+    """Recently-seen ids, oldest first — an OrderedDict used as an ordered set.
+
+    A plain set has no order, so `list(seen)[-MAX_SEEN:]` kept an arbitrary
+    subset rather than the newest ids: old ids survived while fresh ones were
+    discarded, and already-sent events were re-sent.
+    """
     if not SEEN_PATH.exists():
-        return set()
+        return OrderedDict()
     try:
         lines = SEEN_PATH.read_text().splitlines()
-        return set(lines[-MAX_SEEN:])
+        return OrderedDict.fromkeys(ln for ln in lines[-MAX_SEEN:] if ln)
     except Exception:
-        return set()
+        return OrderedDict()
 
-def save_seen(seen: set) -> None:
+def remember_seen(seen: "OrderedDict", event_id: str) -> None:
+    if event_id in seen:
+        seen.move_to_end(event_id)
+    else:
+        seen[event_id] = None
+    while len(seen) > MAX_SEEN:
+        seen.popitem(last=False)
+
+def save_seen(seen: "OrderedDict") -> None:
     SEEN_PATH.parent.mkdir(parents=True, exist_ok=True)
-    items = list(seen)[-MAX_SEEN:]
-    SEEN_PATH.write_text("\n".join(items))
+    SEEN_PATH.write_text("\n".join(list(seen)[-MAX_SEEN:]))
+
+# The buffer is loaded more than once per cycle (run_once, then again inside the
+# append path), so a single oversized file would otherwise be billed to the drop
+# counter once per read. Key on the file's identity so each distinct on-disk state
+# is accounted exactly once per process; the counter feeds the heartbeat payload,
+# where a doubled number reads as twice the data loss that actually occurred.
+_OVERFLOW_REPORTED = set()
+
+
+def _claim_overflow_report() -> bool:
+    try:
+        st = BUFFER_PATH.stat()
+        key = (st.st_size, st.st_mtime_ns)
+    except OSError:
+        return True
+    if key in _OVERFLOW_REPORTED:
+        return False
+    _OVERFLOW_REPORTED.add(key)
+    return True
 
 def load_buffer() -> list:
+    """Tail of the retry buffer, bounded at MAX_BUFFER_EVENTS and deduped by id.
+
+    The cap used to be applied only on the write path, so a buffer that had grown
+    past it could never be recovered: read_text() on a 658 MB file (2.1M lines,
+    24 distinct events once deduped) materialised the whole thing, splitlines()
+    doubled it, then one dict per line — ~6 GB resident, and the process died
+    inside the load before append_buffer()'s trim was ever reached. Streaming into
+    a bounded deque keeps a poisoned file survivable, and deduping here means the
+    next save_buffer() writes the collapsed set back out.
+    """
     if not BUFFER_PATH.exists():
         return []
-    events = []
+
+    window = deque(maxlen=MAX_BUFFER_EVENTS)
+    scanned = 0
     try:
-        for line in BUFFER_PATH.read_text().splitlines():
-            line = line.strip()
-            if line:
-                events.append(json.loads(line))
+        with open(BUFFER_PATH, "r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:               # line at a time — never the whole file
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except Exception:
+                    continue
+                if not isinstance(record, dict):
+                    continue
+                window.append(record)
+                scanned += 1
     except Exception:
         pass
+
+    deduped = OrderedDict()
+    for record in window:
+        deduped[record.get("event_id") or id(record)] = record
+    events = list(deduped.values())
+
+    overflow = scanned - len(window)
+    if overflow > 0 and _claim_overflow_report():
+        total = _bump_drop_counter(overflow)
+        print(f"[telemetry] buffer oversized ({scanned} lines) — dropped {overflow} "
+              f"oldest event(s), {total} dropped since install")
+    collapsed = len(window) - len(events)
+    if collapsed > 0:
+        print(f"[telemetry] collapsed {collapsed} duplicate event(s) from buffer")
     return events
 
 def save_buffer(events: list) -> None:
@@ -90,11 +170,53 @@ def save_buffer(events: list) -> None:
         for ev in events:
             f.write(json.dumps(ev) + "\n")
 
+def _bump_drop_counter(n: int) -> int:
+    if n <= 0:
+        return 0
+    total = n
+    try:
+        total += int(json.loads(DROPS_PATH.read_text()).get("dropped", 0))
+    except Exception:
+        pass
+    try:
+        DROPS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        DROPS_PATH.write_text(json.dumps({"dropped": total}))
+    except Exception:
+        pass
+    return total
+
+
 def append_buffer(events: list) -> None:
-    BUFFER_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with open(BUFFER_PATH, "a") as f:
-        for ev in events:
-            f.write(json.dumps(ev) + "\n")
+    """Append to the retry buffer, capped at MAX_BUFFER_EVENTS (drop oldest).
+
+    Uncapped, an engineer who is offline or has a bad secret grows this file
+    forever and reloads all of it into memory on every cycle.
+    """
+    existing = load_buffer()
+    existing.extend(events)
+    if len(existing) > MAX_BUFFER_EVENTS:
+        dropped = len(existing) - MAX_BUFFER_EVENTS
+        existing = existing[-MAX_BUFFER_EVENTS:]
+        total = _bump_drop_counter(dropped)
+        print(f"[telemetry] buffer full ({MAX_BUFFER_EVENTS}) — dropped {dropped} "
+              f"oldest event(s), {total} dropped since install")
+    save_buffer(existing)
+
+
+def load_offsets() -> dict:
+    try:
+        data = json.loads(OFFSETS_PATH.read_text())
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def save_offsets(offsets: dict) -> None:
+    try:
+        OFFSETS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        OFFSETS_PATH.write_text(json.dumps(offsets))
+    except Exception:
+        pass
 
 def repo_from_cwd(cwd: str) -> str:
     if not cwd:
@@ -105,10 +227,40 @@ def make_event_id(session_id: str, timestamp: str, tokens_in: int, tokens_out: i
     raw = f"{session_id}|{timestamp}|{tokens_in}|{tokens_out}"
     return hashlib.sha256(raw.encode()).hexdigest()
 
-def parse_session_file(path: pathlib.Path, seen: set) -> list:
+def read_new_lines(path: pathlib.Path, offsets: dict) -> tuple:
+    """Only the bytes appended since last cycle. Returns (lines, new_offset).
+
+    Session files are append-only and reach tens of MB; re-reading every byte of
+    every file on every poll was the collector's dominant allocation.
+    """
+    key = str(path)
+    start = offsets.get(key, 0)
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return [], start
+    if size < start:
+        start = 0  # truncated or replaced
+    if size == start:
+        return [], start
+    try:
+        with open(path, "rb") as fh:
+            fh.seek(start)
+            chunk = fh.read(size - start)
+    except OSError:
+        return [], start
+    cut = chunk.rfind(b"\n")
+    if cut == -1:
+        return [], start
+    consumed = chunk[: cut + 1]
+    return consumed.decode("utf-8", errors="replace").splitlines(), start + len(consumed)
+
+
+def parse_session_file(path: pathlib.Path, seen: set, offsets: dict) -> list:
     events = []
     try:
-        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        lines, new_offset = read_new_lines(path, offsets)
+        offsets[str(path)] = new_offset
     except Exception:
         return events
 
@@ -167,15 +319,19 @@ def parse_session_file(path: pathlib.Path, seen: set) -> list:
 
     return events
 
-def collect_events(seen: set) -> list:
+def collect_events(seen: set, offsets: dict) -> list:
     if not CLAUDE_DIR.exists():
         return []
     events = []
     files = sorted(CLAUDE_DIR.glob(SESSIONS_GLOB))
     print(f"[telemetry] found {len(files)} agent file(s) under {CLAUDE_DIR / 'projects'}")
+    live = set()
     for session_file in files:
-        new = parse_session_file(session_file, seen)
-        events.extend(new)
+        live.add(str(session_file))
+        events.extend(parse_session_file(session_file, seen, offsets))
+    # Prune offsets for files that are gone so the map stays bounded.
+    for stale in [k for k in offsets if k not in live]:
+        del offsets[stale]
     return events
 
 SEND_CHUNK = 500
@@ -188,7 +344,7 @@ def _send_chunk(events: list, cfg: dict) -> bool:
         "events":      events,
     }
     try:
-        resp = requests.post(endpoint, json=payload, timeout=REQUEST_TIMEOUT)
+        resp = _SESSION.post(endpoint, json=payload, timeout=REQUEST_TIMEOUT)
         if resp.status_code == 200:
             result = resp.json()
             print(
@@ -223,29 +379,37 @@ def send_events(events: list, cfg: dict) -> bool:
 
 def run_once(cfg: dict) -> None:
     seen = load_seen()
-    new_events = collect_events(seen)
+    offsets = load_offsets()
+    new_events = collect_events(seen, offsets)
     buffered = load_buffer()
     all_events = buffered + new_events
 
     if not all_events:
         print("[telemetry] no new events")
         for ev in new_events:
-            seen.add(ev["event_id"])
+            remember_seen(seen, ev["event_id"])
         save_seen(seen)
+        save_offsets(offsets)
         return
 
     success = send_events(all_events, cfg)
 
+    # Order matters in both branches: persist buffer state BEFORE advancing
+    # offsets. Offsets are what stop a file region being read again, so dying
+    # between the two would lose events outright; this way the worst case is
+    # re-reading a region, which `seen` dedupes.
     if success:
+        save_buffer([])            # drained on success
         for ev in all_events:
-            seen.add(ev["event_id"])
+            remember_seen(seen, ev["event_id"])
         save_seen(seen)
-        save_buffer([])
+        save_offsets(offsets)
     else:
+        append_buffer(new_events)  # capped, drop-oldest
         for ev in new_events:
-            seen.add(ev["event_id"])
+            remember_seen(seen, ev["event_id"])
         save_seen(seen)
-        append_buffer(new_events)
+        save_offsets(offsets)
 
 def _redirect_to_log_if_no_console() -> None:
     """When running via pythonw.exe (no console window), redirect stdout/stderr to log file.

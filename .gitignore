@@ -1,5 +1,8 @@
 # Local run artifacts
 *.log
+.memdebug_state*/
+memdebug*.log
+baseline_counts.json
 
 # Secrets
 .env

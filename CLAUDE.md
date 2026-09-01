@@ -108,6 +108,8 @@ Key helpers:
 | POST | `/api/sync/slack-reports` | pw | Trigger Slack report sync |
 | POST | `/api/admin/verify` | — | Validate admin password |
 | POST | `/api/admin/change-password` | — | Change admin password |
+| POST | `/api/telemetry/heartbeat` | per-engineer secret | Tray-agent liveness + `rss_mb` |
+| GET | `/api/telemetry/agents` | pw | Fleet-wide agent memory/health |
 
 ### Frontend (`frontend/src/`)
 
@@ -140,6 +142,43 @@ Key helpers:
 - Maps `api_key_id` → engineer via `api_key_mapping` table; stores in `ai_usage` table
 - Test connection: `GET https://api.anthropic.com/v1/organizations/api_keys`
 - Falls back to mock data when no key configured
+
+## Telemetry Tray Agent (`cc_tray_app.py`, v3.2)
+
+Windows tray app on engineers' machines. Polls `~/.claude/projects/**/*.jsonl` for
+Claude Code token usage and posts to `/api/telemetry/events`; a second loop tracks
+browser AI-tool time and posts to `/api/telemetry/tool-sessions`.
+`cc_telemetry.py` is a standalone CLI variant of the collector (same leak fixes
+applied; the two files are **separate copies** and drift is a known maintenance risk).
+
+**State files** (all under `~/.claude/`):
+
+| File | Purpose |
+|---|---|
+| `telemetry_config.json` | endpoint, engineer_id, secret, optional `max_rss_mb` |
+| `.telemetry_seen` | recently-sent event ids, capped at `MAX_SEEN` (50k), oldest evicted first |
+| `.telemetry_offsets.json` | per-session-file byte offset — reads are incremental, never full-file |
+| `telemetry_buffer.jsonl` | retry buffer, capped at `MAX_BUFFER_EVENTS` (5k), drop-oldest |
+| `.telemetry_drops.json` | running count of events dropped from a full buffer |
+| `telemetry_tray.log` | rotating, 2 MB × 3 backups |
+
+**Heartbeat payload** (every 10 min, `POST /api/telemetry/heartbeat`):
+
+```json
+{"engineer_id": "10", "secret": "...", "version": "3.2",
+ "rss_mb": 48.2, "buffered": 0, "dropped": 0}
+```
+
+Stored in the `agent_heartbeats` table (one row per engineer, upserted).
+Deliberately **not** in `ai_tool_sessions` — that table feeds engineer XP via
+`_compute_multisource_scores`, so a heartbeat pseudo-row there would inflate
+"browser AI minutes". On a 404 the agent falls back to the legacy
+`GET /api/overview` ping so older backends still get kept awake.
+
+**Watchdog**: if RSS exceeds `max_rss_mb` (default 300) the agent logs a warning
+plus the top allocation sites and flushes state. `--memdebug` runs the collector
+headless with tracemalloc sampling — see `cc_memdebug.py` and
+`scripts/memdebug_stub_server.py`.
 
 ## Work Streams & Scoring
 

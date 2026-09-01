@@ -1,0 +1,13 @@
+# Runtime dependencies for the telemetry tray agent (cc_tray_app.py) and the
+# standalone collector (cc_telemetry.py). Install before building the exe:
+#   pip install -r requirements-agent.txt
+requests>=2.31
+pillow>=10.0
+pystray>=0.19
+packaging>=23.0
+
+# RSS readings for the memory watchdog and the heartbeat's rss_mb field.
+# cc_memdebug.rss_mb() falls back to GetProcessMemoryInfo via ctypes on Windows
+# if this is missing, so the agent still runs without it — but the frozen exe
+# should bundle it so RSS is reported on every platform the agent targets.
+psutil>=5.9
