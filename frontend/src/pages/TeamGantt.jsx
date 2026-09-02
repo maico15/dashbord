@@ -14,6 +14,10 @@ const DAY_COLS = 42; // 6 weeks
 // buildEngineerBars), so this is the only thing deciding what sits where.
 const KIND_RANK = { continuous: 0, active: 1, queued: 2, done: 3, error: 4, idle: 5 };
 const BACKLOG_COLLAPSED_KEY = "gantt-backlog-collapsed";
+const PANEL_WIDTH_KEY = "gantt-panel-width";
+const PANEL_MIN_W = 200;
+const PANEL_MAX_W = 520;
+const clampPanelWidth = (w) => Math.min(PANEL_MAX_W, Math.max(PANEL_MIN_W, Math.round(w)));
 const MONTH_SHORT = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
 
 /* ---------------- date helpers (local calendar days, no timezone math) ---------------- */
@@ -1151,7 +1155,7 @@ const PANEL_STATUSES = ["active", "queued", "continuous", "done"];
  *  keeps its last contents while it slides out, otherwise the fields would
  *  blank out mid-transition.
  */
-function TaskSidePanel({ assignment, engineers, editMode, onApply, onDelete, onClose }) {
+function TaskSidePanel({ assignment, engineers, editMode, width, onWidthChange, onApply, onDelete, onClose }) {
   const [form, setForm] = useState(null);
   const panelRef = useRef(null);
 
@@ -1198,6 +1202,45 @@ function TaskSidePanel({ assignment, engineers, editMode, onApply, onDelete, onC
     };
   }, [assignment, onClose]);
 
+  // Edge resize. Width is committed to state on every move so the board's
+  // reserved padding tracks the panel exactly; only the final value is
+  // persisted, so a drag writes localStorage once rather than per frame.
+  const resizeRef = useRef(null);
+  useEffect(() => {
+    function onMove(e) {
+      const r = resizeRef.current;
+      if (!r) return;
+      e.preventDefault();
+      onWidthChange(clampPanelWidth(r.startWidth + (r.startX - e.clientX)));
+    }
+    function onUp() {
+      if (!resizeRef.current) return;
+      resizeRef.current = null;
+      document.body.style.userSelect = "";
+      document.body.style.cursor = "";
+      try { localStorage.setItem(PANEL_WIDTH_KEY, String(widthRef.current)) } catch { /* storage unavailable */ }
+    }
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+    return () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    };
+  }, [onWidthChange]);
+
+  // Read by the mouseup listener, which is registered once and would otherwise
+  // close over a stale width.
+  const widthRef = useRef(width);
+  widthRef.current = width;
+
+  function beginResize(e) {
+    e.preventDefault();
+    e.stopPropagation();
+    resizeRef.current = { startX: e.clientX, startWidth: width };
+    document.body.style.userSelect = "none";
+    document.body.style.cursor = "col-resize";
+  }
+
   const open = !!assignment;
   const assignee = (engineers || []).find((e) => e.id === form?.engineer_id) || null;
   const assigneeColor = assignee?.avatar_color || assignee?.color || "var(--accent1)";
@@ -1232,6 +1275,15 @@ function TaskSidePanel({ assignment, engineers, editMode, onApply, onDelete, onC
       className={`tg-side-panel${open ? " open" : ""}`}
       aria-hidden={!open}
     >
+      <div
+        className="tg-sp-resize"
+        onMouseDown={beginResize}
+        title="Drag to resize the panel"
+        role="separator"
+        aria-orientation="vertical"
+      >
+        <span className="tg-sp-grip" aria-hidden="true" />
+      </div>
       {form && (
         <>
           <div className="tg-sp-head">
@@ -1386,6 +1438,18 @@ export default function TeamGantt() {
   // Collapsed by default so the board gets the height; the choice is
   // remembered per browser. Reads are wrapped because localStorage throws
   // outright in some privacy modes rather than just returning null.
+  // Panel width lives here rather than in TaskSidePanel: the board's
+  // padding-right has to reserve exactly the same number of pixels, or a
+  // widened panel sits on top of the timeline again.
+  const [panelWidth, setPanelWidth] = useState(() => {
+    try {
+      const saved = parseInt(localStorage.getItem(PANEL_WIDTH_KEY), 10);
+      return Number.isFinite(saved) ? clampPanelWidth(saved) : PANEL_MIN_W;
+    } catch {
+      return PANEL_MIN_W;
+    }
+  });
+
   const [blCollapsed, setBlCollapsed] = useState(() => {
     try {
       const saved = localStorage.getItem(BACKLOG_COLLAPSED_KEY);
@@ -2255,7 +2319,10 @@ export default function TeamGantt() {
     );
 
   return (
-    <div className={`tg-wrap${editMode && selectedId != null ? " tg-wrap-panel" : ""}`}>
+    <div
+      className={`tg-wrap${editMode && selectedId != null ? " tg-wrap-panel" : ""}`}
+      style={{ "--tg-panel-w": `${panelWidth}px` }}
+    >
       <Style />
 
       <div className="tg-head">
@@ -2897,6 +2964,8 @@ export default function TeamGantt() {
           assignment={selectedId != null ? assignmentsById[selectedId] : null}
           engineers={draft.engineers || []}
           editMode={editMode}
+          width={panelWidth}
+          onWidthChange={setPanelWidth}
           onApply={updateAssignment}
           onDelete={deleteAssignment}
           onClose={() => setSelectedId(null)}
@@ -2959,7 +3028,7 @@ function Style() {
        * top of real timeline and over the toolbar's Save button, so make room
        * for it while it's open. MUST stay after .tg-wrap — same specificity,
        * so declaring it earlier lets the padding:0 there win instead. */
-      .tg-wrap-panel{padding-right:200px}
+      .tg-wrap-panel{padding-right:var(--tg-panel-w,200px)}
       .tg-loading{padding:60px 0;text-align:center;color:var(--muted)}
       .tg-error{color:var(--danger);padding:6px 12px;font-size:12px}
 
@@ -3127,10 +3196,27 @@ function Style() {
       .tg-bar-selected{outline:1.5px solid var(--border-accent);outline-offset:1px;z-index:3}
 
       /* right-side editor panel */
-      .tg-side-panel{position:fixed;top:0;right:0;bottom:0;width:200px;z-index:60;display:flex;flex-direction:column;gap:2px;
+      .tg-side-panel{position:fixed;top:0;right:0;bottom:0;width:var(--tg-panel-w,200px);z-index:60;display:flex;flex-direction:column;gap:2px;
         padding:14px 12px;overflow-y:auto;background:var(--card);border-left:1px solid var(--border);
         box-shadow:-8px 0 24px rgba(0,0,0,.18);transform:translateX(100%);transition:transform 200ms ease}
       .tg-side-panel.open{transform:translateX(0)}
+      /* Left-edge resize grip. Sits above the panel's own content but below the
+       * modals (z 60 stacking context), and stays inside panelRef so grabbing
+       * it never trips the click-outside-to-close handler. */
+      .tg-sp-resize{position:absolute;left:0;top:0;bottom:0;width:4px;cursor:col-resize;
+        z-index:5;background:transparent;display:flex;align-items:center;justify-content:center}
+      /* 30% tint via an overlay rather than color-mix, and on ::before rather
+       * than the handle itself so the grip keeps its own opacity. */
+      .tg-sp-resize::before{content:"";position:absolute;inset:0;background:var(--border-strong);
+        opacity:0;transition:opacity 120ms ease}
+      .tg-sp-resize:hover::before{opacity:.3}
+      /* Three stacked dots: the centre one plus two box-shadow copies 5px out. */
+      .tg-sp-grip{position:relative;width:2px;height:2px;border-radius:1px;color:var(--text-muted);
+        background:currentColor;opacity:.35;transition:opacity 120ms ease;
+        box-shadow:0 -5px 0 currentColor, 0 5px 0 currentColor}
+      /* Faintly visible at rest so the edge reads as draggable at all, and
+       * brighter on hover once the pointer finds it. */
+      .tg-sp-resize:hover .tg-sp-grip{opacity:.85}
       .tg-sp-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}
       .tg-sp-title{font-size:13px;font-weight:700;color:var(--text)}
       .tg-sp-close{border:none;background:none;color:var(--muted);font-size:20px;line-height:1;cursor:pointer;padding:0 2px}
