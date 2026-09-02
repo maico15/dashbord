@@ -1677,6 +1677,14 @@ export default function TeamGantt() {
     const p = ensurePassword();
     if (!p) return;
     setSaving(true);
+    if (import.meta.env.DEV) {
+      console.log("[gantt] saving changeQueue:", JSON.stringify(changeQueue, null, 2));
+      console.table(changeQueue.map((ch, i) => ({
+        i, type: ch.type, id: ch.id, idType: typeof ch.id,
+        fieldKeys: Object.keys(ch.fields || {}).join(",") || "(EMPTY)",
+        types: Object.entries(ch.fields || {}).map(([k, v]) => `${k}:${typeof v}`).join(" "),
+      })));
+    }
     try {
       const res = await api.post("/gantt/apply-changes", { changes: changeQueue }, p);
       setSaveError(null);
