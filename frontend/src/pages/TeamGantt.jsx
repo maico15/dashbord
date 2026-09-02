@@ -1455,7 +1455,16 @@ export default function TeamGantt() {
   }
 
   function updateAssignment(id, patch) {
-    pushChange({ type: "gantt_update", id, fields: patch });
+    // Strip undefined before staging. JSON.stringify drops those keys, so a
+    // patch built from an absent value (e.g. `{ note: patch.body }` when the
+    // body wasn't edited) would reach the API as `fields: {}` and fail the
+    // whole atomic batch with "No valid fields" — taking every unrelated
+    // change in the queue down with it.
+    const fields = Object.fromEntries(
+      Object.entries(patch || {}).filter(([, v]) => v !== undefined)
+    );
+    if (Object.keys(fields).length === 0) return;
+    pushChange({ type: "gantt_update", id, fields });
   }
   function deleteAssignment(id) {
     // No confirm() here — the deletion is only staged; Undo/Discard cover it
