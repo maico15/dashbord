@@ -67,6 +67,22 @@ function workingDaysElapsed(start, today) {
   }
   return count;
 }
+/* When a task was closed. The API has no dedicated close timestamp, so
+ * updated_at stands in — for a done row the last write IS the close. Returns
+ * "" for rows without one so sorts and labels degrade quietly. */
+function closedAt(assignment) {
+  return assignment?.updated_at || "";
+}
+
+/** "2026-08-28T09:12:03" -> "28 Aug". Empty string when unknown. */
+function formatClosed(assignment) {
+  const raw = closedAt(assignment);
+  if (!raw) return "";
+  const d = parseISODate(String(raw).slice(0, 10));
+  if (!d) return "";
+  return `${d.getDate()} ${MONTH_SHORT[d.getMonth()]}`;
+}
+
 function isoWeekNum(d) {
   const date = new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()));
   const day = date.getUTCDay() || 7;
@@ -112,13 +128,16 @@ function latestActiveEnd(activeAssignments) {
   return end;
 }
 
-function buildEngineerBars(assignments, rangeStart, today) {
+function buildEngineerBars(assignments, rangeStart, today, view = "active") {
   const bars = [];
-  const continuousAssignments = assignments.filter((a) => a.status === "continuous");
-  const activeAssignments = assignments.filter((a) => a.status === "active");
-  const queuedAssignments = assignments.filter((a) => a.status === "queued");
-  const doneAssignments = assignments.filter((a) => a.status === "done");
-  const otherAssignments = assignments.filter(
+  const done = view === "done";
+  // The Done tab is a closed-work archive: only done rows, and none of the
+  // live-load scaffolding (queue anchoring, the idle placeholder) applies.
+  const continuousAssignments = done ? [] : assignments.filter((a) => a.status === "continuous");
+  const activeAssignments = done ? [] : assignments.filter((a) => a.status === "active");
+  const queuedAssignments = done ? [] : assignments.filter((a) => a.status === "queued");
+  const doneAssignments = done ? assignments.filter((a) => a.status === "done") : [];
+  const otherAssignments = done ? [] : assignments.filter(
     (a) => !["continuous", "active", "queued", "done"].includes(a.status)
   );
   // "done" never counts as an engineer's active load — only a real 'active' row
@@ -204,7 +223,7 @@ function buildEngineerBars(assignments, rangeStart, today) {
 
   // "Idle" is a placeholder, not an item — shown whenever nothing is currently
   // in progress, even if there are queued items waiting behind it.
-  if (continuousAssignments.length === 0 && activeAssignments.length === 0) {
+  if (!done && continuousAssignments.length === 0 && activeAssignments.length === 0) {
     bars.push({ kind: "idle" });
   }
 
@@ -217,6 +236,12 @@ function buildEngineerBars(assignments, rangeStart, today) {
   // dropped would jump to a different row under the cursor. Rows behave as a
   // stable list instead, which is also the sheet mental model.
   bars.sort((a, b) => {
+    // Done tab is an archive, so it reads most-recently-closed first rather
+    // than in the stable list order the live board needs.
+    if (done) {
+      const byClosed = closedAt(b.assignment).localeCompare(closedAt(a.assignment));
+      if (byClosed !== 0) return byClosed;
+    }
     const byKind = KIND_RANK[a.kind] - KIND_RANK[b.kind];
     if (byKind !== 0) return byKind;
     // ids may be `tmp-N` strings for locally-staged creates, so compare as
@@ -233,12 +258,18 @@ function buildEngineerBars(assignments, rangeStart, today) {
  * "add task" row. Row tracks are returned alongside as `rowSizes` because the
  * block is no longer a uniform run of rows and can't be synthesised with a
  * repeat()/fill(). */
-function buildLanes(engineers, rangeStart, today, { addRow = false } = {}) {
+function buildLanes(engineers, rangeStart, today, { addRow = false, view = "active" } = {}) {
   let rowCursor = 3; // rows 1-2 are the two-row timeline header
   const rowSizes = []; // parallel to rows 3..N — the exact gridTemplateRows tracks
-  const lanes = engineers.map((eng) => {
+  const lanes = [];
+  for (const eng of engineers) {
     const assignments = eng.assignments || [];
-    const { bars, height } = buildEngineerBars(assignments, rangeStart, today);
+    const { bars, height } = buildEngineerBars(assignments, rangeStart, today, view);
+
+    // An engineer with nothing closed has no place in the archive — without
+    // this they'd contribute a header plus a phantom empty row (height is
+    // floored at 1 so the live board can still show an idle lane).
+    if (view === "done" && bars.length === 0) continue;
 
     const headerRow = rowCursor;
     rowSizes.push("28px");
@@ -249,17 +280,22 @@ function buildLanes(engineers, rangeStart, today, { addRow = false } = {}) {
     rowCursor = firstBarRow + height + (addRow ? 1 : 0);
 
     if (import.meta.env.DEV) {
+      // Each tab renders a subset, so the invariant is against what the tab
+      // is meant to show, not the engineer's whole assignment list.
+      const expected = view === "done"
+        ? assignments.filter((a) => a.status === "done").length
+        : assignments.filter((a) => a.status !== "done").length;
       const renderedForItems = bars.filter((b) => b.kind !== "idle").length;
-      if (renderedForItems !== assignments.length) {
+      if (renderedForItems !== expected) {
         console.warn(
-          `[TeamGantt] ${eng.name}: API returned ${assignments.length} assignment(s) but ${renderedForItems} bar(s) were rendered`
+          `[TeamGantt] ${eng.name}: ${view} tab expected ${expected} assignment(s) but ${renderedForItems} bar(s) were rendered`
         );
       }
     }
 
     // blockEnd is exclusive — use it as the end of a `gridRow` span.
-    return { engineer: eng, headerRow, firstBarRow, addBtnRow, blockEnd: rowCursor, height, bars };
-  });
+    lanes.push({ engineer: eng, headerRow, firstBarRow, addBtnRow, blockEnd: rowCursor, height, bars });
+  }
   return { lanes, totalRows: rowCursor - 1, rowSizes };
 }
 
@@ -304,7 +340,20 @@ function computeDraftState(baseEngineers, baseBacklogItems, changeQueue) {
     switch (ch.type) {
       case "gantt_update": {
         const found = findAssignment(ch.id);
-        if (found) Object.assign(found.a, ch.fields, { __pending: true });
+        if (found) {
+          Object.assign(found.a, ch.fields, { __pending: true });
+          // Reassignment has to relocate the row, not just stamp the field:
+          // lanes are built by walking each engineer's own assignments array,
+          // so a task left in the old array would keep rendering there.
+          const target = ch.fields.engineer_id;
+          if (target != null && target !== found.eng.id) {
+            const dest = engineersById.get(target);
+            if (dest) {
+              found.eng.assignments = found.eng.assignments.filter((x) => x.id !== ch.id);
+              dest.assignments = [...dest.assignments, found.a];
+            }
+          }
+        }
         break;
       }
       case "gantt_create": {
@@ -821,7 +870,7 @@ const STATUS_LABEL = {
  *  viewer mode, select for the side panel in edit mode. */
 function TaskRow({
   bar, gridRow, editMode, selectedId, onSelect, onUpdate,
-  onOpenDetail, beginClickTracking, wasRealClick, setHoveredId,
+  onOpenDetail, beginClickTracking, wasRealClick, setHoveredId, doneView,
 }) {
   const a = bar.assignment;
 
@@ -879,7 +928,9 @@ function TaskRow({
         {a.__pending && <span className="tg-pending-dot" title="Unsaved" />}
       </span>
       <span className={`tg-pill tg-pill-${pill}`}>{STATUS_LABEL[pill] || pill}</span>
-      <span className="tg-task-pct">{showPercent ? `${a.percent}%` : ""}</span>
+      <span className="tg-task-pct">
+        {doneView ? formatClosed(a) : (showPercent ? `${a.percent}%` : "")}
+      </span>
     </div>
   );
 }
@@ -1099,13 +1150,14 @@ const PANEL_STATUSES = ["active", "queued", "continuous", "done"];
  *  keeps its last contents while it slides out, otherwise the fields would
  *  blank out mid-transition.
  */
-function TaskSidePanel({ assignment, onApply, onDelete, onClose }) {
+function TaskSidePanel({ assignment, engineers, editMode, onApply, onDelete, onClose }) {
   const [form, setForm] = useState(null);
   const panelRef = useRef(null);
 
   const seedKey = assignment
     ? [assignment.id, assignment.project, assignment.start_date,
-       assignment.est_days, assignment.percent, assignment.status].join("|")
+       assignment.est_days, assignment.percent, assignment.status,
+       assignment.engineer_id].join("|")
     : null;
 
   // Re-seed on a new selection, and also when the underlying record changes
@@ -1118,6 +1170,7 @@ function TaskSidePanel({ assignment, onApply, onDelete, onClose }) {
       est_days: assignment.est_days ?? 1,
       percent: assignment.percent ?? 0,
       status: assignment.status || "active",
+      engineer_id: assignment.engineer_id ?? null,
     });
   }, [seedKey]);
 
@@ -1144,6 +1197,8 @@ function TaskSidePanel({ assignment, onApply, onDelete, onClose }) {
   }, [assignment, onClose]);
 
   const open = !!assignment;
+  const assignee = (engineers || []).find((e) => e.id === form?.engineer_id) || null;
+  const assigneeColor = assignee?.avatar_color || assignee?.color || "var(--accent1)";
 
   function set(field, value) {
     setForm((f) => (f ? { ...f, [field]: value } : f));
@@ -1159,6 +1214,9 @@ function TaskSidePanel({ assignment, onApply, onDelete, onClose }) {
     const pct = Math.min(100, Math.max(0, Number(form.percent)));
     if (pct !== assignment.percent) patch.percent = pct;
     if (form.status !== assignment.status) patch.status = form.status;
+    if (form.engineer_id != null && form.engineer_id !== assignment.engineer_id) {
+      patch.engineer_id = form.engineer_id;
+    }
     if (Object.keys(patch).length > 0) onApply(assignment.id, patch);
     onClose();
   }
@@ -1183,6 +1241,35 @@ function TaskSidePanel({ assignment, onApply, onDelete, onClose }) {
             value={form.project}
             onChange={(e) => set("project", e.target.value)}
           />
+
+          <label className="tg-sp-label">Assignee</label>
+          {editMode ? (
+            <div className="tg-sp-assignee">
+              <span className="tg-dot" style={{ background: assigneeColor }} />
+              <select
+                className="tg-sp-input tg-sp-select"
+                value={form.engineer_id ?? ""}
+                onChange={(e) => {
+                  const next = Number(e.target.value);
+                  set("engineer_id", next);
+                  // Staged immediately rather than held until Apply: the point
+                  // of reassigning is to see the task land in the new lane, and
+                  // the change queue is what makes that optimistic move happen
+                  // (and stay undoable / saveable) without a refetch.
+                  if (next !== assignment.engineer_id) onApply(assignment.id, { engineer_id: next });
+                }}
+              >
+                {(engineers || []).map((eng) => (
+                  <option key={eng.id} value={eng.id}>{eng.name}</option>
+                ))}
+              </select>
+            </div>
+          ) : (
+            <div className="tg-sp-assignee tg-sp-assignee-ro">
+              <span className="tg-dot" style={{ background: assigneeColor }} />
+              <span>{assignee?.name || "—"}</span>
+            </div>
+          )}
 
           <label className="tg-sp-label">Start date</label>
           <input
@@ -1244,6 +1331,9 @@ export default function TeamGantt() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [editMode, setEditMode] = useState(false);
+  // "active" = the live board; "done" = a read-only archive of closed work.
+  // Purely a filter over the data already in state — switching never refetches.
+  const [view, setView] = useState("active");
   const pwRef = useRef(""); // read from stable-closure window listeners (drag) — never stale
   const [pwError, setPwError] = useState("");
   const [syncMsg, setSyncMsg] = useState("");
@@ -1956,8 +2046,8 @@ export default function TeamGantt() {
   );
 
   const { lanes, totalRows, rowSizes } = useMemo(
-    () => buildLanes(boardEngineers, rangeStart, today, { addRow: editMode }),
-    [boardEngineers, rangeStart, today, editMode]
+    () => buildLanes(boardEngineers, rangeStart, today, { addRow: editMode, view }),
+    [boardEngineers, rangeStart, today, editMode, view]
   );
 
   // Reflects the last SAVED state, not the draft — a purely-local pending
@@ -1985,9 +2075,35 @@ export default function TeamGantt() {
     return () => document.body.classList.remove("tg-viewport-lock");
   }, []);
 
+  const doneView = view === "done";
+
+  // The Done tab is read-only, so entering it leaves edit mode. Unsaved work
+  // is guarded exactly the way the Edit-mode toggle guards it — never dropped
+  // silently just because the user clicked a tab.
+  function switchView(next) {
+    if (next === view) return;
+    if (next === "done" && editMode) {
+      if (changeQueue.length > 0 && !confirm("Есть несохранённые изменения. Выйти без сохранения?")) return;
+      setChangeQueue([]);
+      setSaveError(null);
+      setEditMode(false);
+      setManageOpen(false);
+      setPendingHideId(null);
+      setLinkingFor(null);
+    }
+    setSelectedId(null);
+    setView(next);
+  }
+
+  // Counts what the current tab shows, so the status bar agrees with the board.
   const taskCount = useMemo(
-    () => (draft.engineers || []).reduce((n, e) => n + (e.assignments || []).length, 0),
-    [draft.engineers]
+    () => (draft.engineers || []).reduce(
+      (n, e) => n + (e.assignments || []).filter(
+        (a) => (a.status === "done") === doneView
+      ).length,
+      0
+    ),
+    [draft.engineers, doneView]
   );
 
   // The toolbar's "Add task" has no lane of its own to add to, so it follows
@@ -2098,6 +2214,20 @@ export default function TeamGantt() {
       <div className="tg-head">
         <Link to="/" className="tg-back" title="Back to dashboard">←</Link>
         <h1 className="tg-title">Team Gantt</h1>
+
+        <span className="tg-sep" />
+        <div className="tg-tabs" role="tablist">
+          {["active", "done"].map((v) => (
+            <button
+              key={v}
+              role="tab"
+              aria-selected={view === v}
+              className={`tg-tab${view === v ? " on" : ""}`}
+              onClick={() => switchView(v)}
+            >{v === "active" ? "Active" : "Done"}</button>
+          ))}
+        </div>
+
         <div className="tg-controls">
           <button className="tg-btn" onClick={syncFromReports}>⟳ Sync from reports</button>
           {editMode && (
@@ -2105,9 +2235,10 @@ export default function TeamGantt() {
           )}
 
           {/* Edit-only actions stay mounted in viewer mode but inert, so the
-           * toolbar doesn't reflow when the mode flips. */}
-          <span className="tg-sep" />
-          <div className={`tg-actions${editMode ? "" : " tg-actions-off"}`}>
+           * toolbar doesn't reflow when the mode flips. The Done tab is a
+           * read-only archive, so they're dropped entirely there. */}
+          {!doneView && <span className="tg-sep" />}
+          {!doneView && <div className={`tg-actions${editMode ? "" : " tg-actions-off"}`}>
             <button
               className="tg-btn"
               onClick={() => { if (selectedEngineerId != null) addAssignment(selectedEngineerId) }}
@@ -2141,10 +2272,10 @@ export default function TeamGantt() {
             >
               {saving ? "Saving…" : `Save${changeQueue.length > 0 ? ` (${changeQueue.length})` : ""}`}
             </button>
-          </div>
-          <span className="tg-sep" />
+          </div>}
+          {!doneView && <span className="tg-sep" />}
 
-          <button
+          {!doneView && <button
             className={`tg-btn${editMode ? " on" : ""}`}
             onClick={() => {
               if (editMode) {
@@ -2157,7 +2288,7 @@ export default function TeamGantt() {
             }}
           >
             {editMode ? "✓ Editing" : "✎ Edit mode"}
-          </button>
+          </button>}
           <button className="tg-icon-btn" onClick={toggleTheme} title={theme === "dark" ? "Switch to light" : "Switch to dark"}>
             {theme === "dark" ? "☀️" : "🌙"}
           </button>
@@ -2240,7 +2371,7 @@ export default function TeamGantt() {
       <div className="tg-scroll" ref={scrollRef}>
         <div
           ref={gridRef}
-          className="tg-grid"
+          className={`tg-grid${doneView ? " tg-view-done" : ""}`}
           style={{ gridTemplateColumns: `300px repeat(${DAY_COLS}, minmax(22px,1fr))`, gridTemplateRows }}
         >
           <svg className="tg-arrows" overflow="visible">
@@ -2284,7 +2415,7 @@ export default function TeamGantt() {
             <span />
             <span>Task</span>
             <span>Status</span>
-            <span className="tg-hdr-pct">%</span>
+            <span className="tg-hdr-pct">{doneView ? "Closed" : "%"}</span>
           </div>
 
           {/* header: week labels */}
@@ -2364,6 +2495,7 @@ export default function TeamGantt() {
                         beginClickTracking={beginClickTracking}
                         wasRealClick={wasRealClick}
                         setHoveredId={setHoveredId}
+                        doneView={doneView}
                       />
                       <GanttBar
                         bar={bar}
@@ -2694,6 +2826,8 @@ export default function TeamGantt() {
       {editMode && (
         <TaskSidePanel
           assignment={selectedId != null ? assignmentsById[selectedId] : null}
+          engineers={draft.engineers || []}
+          editMode={editMode}
           onApply={updateAssignment}
           onDelete={deleteAssignment}
           onClose={() => setSelectedId(null)}
@@ -2750,11 +2884,13 @@ function Style() {
        * viewport. Scoped body lock (added/removed on mount) because
        * body{min-height:100vh} is shared with every other route. */
       .tg-viewport-lock{overflow:hidden}
-      /* The side panel is position:fixed; on a full-bleed board it would sit
-       * on top of real timeline, so make room for it while it's open. */
-      .tg-wrap-panel{padding-right:200px}
       .tg-wrap{width:100%;max-width:none;margin:0;padding:0;height:100dvh;
         display:flex;flex-direction:column;overflow:hidden;background:var(--surface-0)}
+      /* The side panel is position:fixed; on a full-bleed board it would sit on
+       * top of real timeline and over the toolbar's Save button, so make room
+       * for it while it's open. MUST stay after .tg-wrap — same specificity,
+       * so declaring it earlier lets the padding:0 there win instead. */
+      .tg-wrap-panel{padding-right:200px}
       .tg-loading{padding:60px 0;text-align:center;color:var(--muted)}
       .tg-error{color:var(--danger);padding:6px 12px;font-size:12px}
 
@@ -2765,6 +2901,21 @@ function Style() {
       .tg-back:hover{color:var(--text-accent)}
       .tg-controls{display:flex;align-items:center;gap:6px;margin-left:auto;flex-wrap:wrap}
       .tg-sep{width:1px;height:18px;background:var(--border-strong);flex:none}
+      .tg-tabs{display:flex;align-items:center;gap:2px}
+      .tg-tab{height:28px;padding:4px 12px;border:1px solid transparent;border-radius:var(--radius);
+        background:none;color:var(--text-muted);font-family:inherit;font-size:11px;font-weight:500;cursor:pointer}
+      .tg-tab:hover{color:var(--text);background:var(--surface-0)}
+      .tg-tab.on{background:var(--bg-accent);color:var(--text-accent);border-color:var(--border-accent)}
+
+      /* Done tab: a read-only archive. Bars are context for when the work sat,
+       * not something to interact with, so they recede. */
+      .tg-view-done .tg-bar{opacity:.4}
+      .tg-view-done .tg-task-row{cursor:pointer}
+      /* Every row here is closed, so a strike-through on all of them is noise. */
+      .tg-view-done .tg-task-done .tg-task-name{text-decoration:none;color:var(--text)}
+      /* "28 Aug" needs more room than "100%". */
+      .tg-view-done .tg-task-row,
+      .tg-view-done .tg-name-header{grid-template-columns:28px 1fr 72px 56px}
       .tg-actions{display:flex;align-items:center;gap:6px}
       .tg-actions-off{opacity:.4;pointer-events:none}
       .tg-alerts{flex:0 0 auto;display:flex;flex-direction:column;gap:4px;padding:6px 12px}
@@ -2918,6 +3069,9 @@ function Style() {
       .tg-sp-input{width:100%;box-sizing:border-box;padding:6px 8px;border-radius:6px;border:1px solid var(--border);
         background:var(--surface-0);color:var(--text);font-size:12.5px;font-family:inherit}
       .tg-sp-range{width:100%;margin:2px 0}
+      .tg-sp-assignee{display:flex;align-items:center;gap:6px}
+      .tg-sp-assignee .tg-sp-select{flex:1;min-width:0}
+      .tg-sp-assignee-ro{font-size:12.5px;color:var(--text);padding:6px 0}
       .tg-sp-status{display:flex;flex-wrap:wrap;gap:4px}
       .tg-sp-status button{flex:1 1 auto;padding:4px 6px;border-radius:999px;border:1px solid var(--border);background:var(--surface-0);
         color:var(--muted);font-size:10.5px;font-weight:600;cursor:pointer;font-family:inherit}

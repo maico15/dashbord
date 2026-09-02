@@ -5500,7 +5500,7 @@ def delete_roadmap_task(task_id: int, password: str = ""):
     return {"ok": True}
 
 
-GANTT_FIELDS = {"project", "start_date", "est_days", "percent", "status", "queue_start", "note", "depends_on"}
+GANTT_FIELDS = {"project", "start_date", "est_days", "percent", "status", "queue_start", "note", "depends_on", "engineer_id"}
 GANTT_STATUSES = {"active", "queued", "continuous", "done"}
 
 
@@ -5561,6 +5561,14 @@ def _apply_gantt_update(conn, assignment_id, fields: dict):
         fields["percent"] = 100
 
     c = conn.cursor()
+
+    # Reassignment: the target engineer must exist, otherwise the row would be
+    # orphaned and silently vanish from the board (GET /api/gantt walks
+    # team_members, not gantt_assignments).
+    if "engineer_id" in fields:
+        c.execute("SELECT id FROM team_members WHERE id=?", (fields["engineer_id"],))
+        if not c.fetchone():
+            raise ChangeError(422, "Engineer not found")
 
     if "depends_on" in fields and fields["depends_on"] is not None:
         predecessor_id = fields["depends_on"]
