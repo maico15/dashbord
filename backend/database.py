@@ -173,17 +173,18 @@ class Cursor:
             sp = self._conn.begin_nested()
             try:
                 result = self._conn.execute(text(sql + " RETURNING id"), named)
-                row = result.fetchone()
+                # RETURNING emits one row per row actually written: none when
+                # ON CONFLICT DO NOTHING swallowed the insert, and N for a bulk
+                # INSERT ... SELECT. Both matter — `rowcount == 0` is the
+                # duplicate check for ai_events/pr_log/commit_log, and callers
+                # like the ai_usage_daily rebuild read rowcount as a row count,
+                # so taking only the first row here would report a bulk insert
+                # of N rows as 1. psycopg2 buffers the whole result set client
+                # side anyway, so fetchall costs nothing over fetchone.
+                rows = result.fetchall()
                 sp.commit()
-                self.lastrowid = row[0] if row else None
-                # RETURNING yields exactly one row when the insert happened and
-                # none when ON CONFLICT DO NOTHING swallowed it, so it is the
-                # authoritative signal on this path. Without setting rowcount
-                # here it stays at the -1 sentinel from __init__, and every
-                # `rowcount == 0` duplicate check upstream reads a conflict as a
-                # successful insert (ai_events dedup, pr_log/commit_log sync
-                # counters, score_rules seeding).
-                self.rowcount = 1 if row else 0
+                self.lastrowid = rows[0][0] if rows else None
+                self.rowcount = len(rows)
                 return self
             except Exception:
                 sp.rollback()  # fall through to a plain execute on a clean transaction
