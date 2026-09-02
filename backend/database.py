@@ -176,6 +176,14 @@ class Cursor:
                 row = result.fetchone()
                 sp.commit()
                 self.lastrowid = row[0] if row else None
+                # RETURNING yields exactly one row when the insert happened and
+                # none when ON CONFLICT DO NOTHING swallowed it, so it is the
+                # authoritative signal on this path. Without setting rowcount
+                # here it stays at the -1 sentinel from __init__, and every
+                # `rowcount == 0` duplicate check upstream reads a conflict as a
+                # successful insert (ai_events dedup, pr_log/commit_log sync
+                # counters, score_rules seeding).
+                self.rowcount = 1 if row else 0
                 return self
             except Exception:
                 sp.rollback()  # fall through to a plain execute on a clean transaction

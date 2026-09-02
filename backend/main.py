@@ -3781,6 +3781,15 @@ def ingest_telemetry(payload: TelemetryPayload):
     conn = get_db()
     try:
         return _ingest_telemetry(conn, payload)
+    except Exception:
+        # Return the connection to the pool clean. Without this the transaction
+        # is still open (or aborted) at checkin, holding row and index locks
+        # until idle_in_transaction_session_timeout reaps it.
+        try:
+            conn.rollback()
+        except Exception:
+            pass  # never mask the original error
+        raise
     finally:
         # The tray agents call this constantly, so a leak here drains the pool
         # fastest and takes the whole dashboard down with it.
@@ -3816,8 +3825,12 @@ def _ingest_telemetry(conn, payload: TelemetryPayload):
              ev.tokens_cache_read, ev.tokens_cache_write, ev.repo),
         )
         inserted = getattr(c, "rowcount", -1)
-        # rowcount == 0 means IGNORE fired (duplicate)
-        if inserted == 0:
+        # rowcount == 0 means the dedup key already existed: SQLite reports it
+        # from INSERT OR IGNORE, Postgres from the RETURNING row count the shim
+        # adds (see Cursor.execute in database.py). lastrowid is the backstop
+        # for the -1 sentinel, so a dialect that leaves rowcount unset can never
+        # silently inflate `accepted` the way this did before.
+        if inserted == 0 or (inserted < 0 and getattr(c, "lastrowid", None) is None):
             duplicate += 1
             continue
         accepted += 1
@@ -3858,6 +3871,12 @@ def receive_tool_session(data: ToolSessionRequest):
     conn = get_db()
     try:
         return _receive_tool_session(conn, data)
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass  # never mask the original error
+        raise
     finally:
         # Agent-driven endpoint: a leaked connection here drains the pool too.
         conn.close()
