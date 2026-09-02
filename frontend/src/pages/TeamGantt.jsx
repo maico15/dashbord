@@ -13,6 +13,7 @@ const DAY_COLS = 42; // 6 weeks
 // Vertical order of a lane's rows. Every bar gets its own row (see
 // buildEngineerBars), so this is the only thing deciding what sits where.
 const KIND_RANK = { continuous: 0, active: 1, queued: 2, done: 3, error: 4, idle: 5 };
+const BACKLOG_COLLAPSED_KEY = "gantt-backlog-collapsed";
 const MONTH_SHORT = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
 
 /* ---------------- date helpers (local calendar days, no timezone math) ---------------- */
@@ -1369,7 +1370,17 @@ export default function TeamGantt() {
 
   const [detailTarget, setDetailTarget] = useState(null); // {type:"backlog"|"gantt", id} shown in the shared task-detail modal, or null
   const [selectedId, setSelectedId] = useState(null); // assignment shown in the right-side edit panel (edit mode only)
-  const [blCollapsed, setBlCollapsed] = useState(false); // dock the backlog to give the board full height
+  // Collapsed by default so the board gets the height; the choice is
+  // remembered per browser. Reads are wrapped because localStorage throws
+  // outright in some privacy modes rather than just returning null.
+  const [blCollapsed, setBlCollapsed] = useState(() => {
+    try {
+      const saved = localStorage.getItem(BACKLOG_COLLAPSED_KEY);
+      return saved === null ? true : saved === "true";
+    } catch {
+      return true;
+    }
+  });
   const [blSearch, setBlSearch] = useState("");
   const [blSearchDebounced, setBlSearchDebounced] = useState("");
   const [blPriorityFilter, setBlPriorityFilter] = useState([]); // selected priority chip values; [] = all
@@ -2075,6 +2086,20 @@ export default function TeamGantt() {
     return () => document.body.classList.remove("tg-viewport-lock");
   }, []);
 
+  // Persist the dock state. Writes are guarded for the same reason reads are.
+  useEffect(() => {
+    try { localStorage.setItem(BACKLOG_COLLAPSED_KEY, String(blCollapsed)) } catch { /* storage unavailable */ }
+  }, [blCollapsed]);
+
+  const toggleBacklog = () => setBlCollapsed((v) => !v);
+
+  // The header doubles as the expand target, but it also hosts the filters,
+  // "+ item" and Sync — so a click that landed on any control is left alone.
+  function handleBacklogHeaderClick(e) {
+    if (e.target.closest("input, select, button, a")) return;
+    toggleBacklog();
+  }
+
   const doneView = view === "done";
 
   // The Done tab is read-only, so entering it leaves edit mode. Unsaved work
@@ -2535,12 +2560,19 @@ export default function TeamGantt() {
       </div>
 
       <div className={`bl-section${blCollapsed ? " bl-collapsed" : ""}`}>
-        <div className="bl-head-row">
+        <div
+          className="bl-head-row"
+          onClick={handleBacklogHeaderClick}
+          title={blCollapsed ? "Show backlog" : "Hide backlog"}
+        >
           <button
             className="bl-collapse-btn"
-            onClick={() => setBlCollapsed((v) => !v)}
-            title={blCollapsed ? "Show backlog" : "Hide backlog"}
-          >{blCollapsed ? "▸" : "▾"}</button>
+            aria-expanded={!blCollapsed}
+            aria-label={blCollapsed ? "Show backlog" : "Hide backlog"}
+            onClick={toggleBacklog}
+          >
+            <span className={`bl-chevron${blCollapsed ? "" : " on"}`}>▸</span>
+          </button>
           <h2 className="bl-title">Backlog</h2>
           <span className="bl-count">
             {hasActiveBacklogFilter
@@ -2548,6 +2580,14 @@ export default function TeamGantt() {
               : `${draft.backlogItems.length} item${draft.backlogItems.length === 1 ? "" : "s"}`}
           </span>
 
+          {blCollapsed ? (
+            <button
+              className="bl-collapse-btn bl-collapse-end"
+              aria-label="Show backlog"
+              onClick={toggleBacklog}
+            >▴</button>
+          ) : (
+          <>
           <div className="bl-filters">
             <input
               className="bl-filter-search"
@@ -2596,13 +2636,20 @@ export default function TeamGantt() {
           >
             {backlogSyncing ? "⟳ Syncing…" : "⟳ Sync from Sheet"}
           </button>
+          <button
+            className="bl-collapse-btn bl-collapse-end"
+            aria-label="Hide backlog"
+            onClick={toggleBacklog}
+          >▾</button>
+          </>
+          )}
         </div>
 
-        {editMode && hasActiveBacklogFilter && (
+        {!blCollapsed && editMode && hasActiveBacklogFilter && (
           <div className="bl-filter-hint">сбросьте фильтр, чтобы менять порядок</div>
         )}
 
-        <div className="bl-source-row">
+        {!blCollapsed && <div className="bl-source-row">
           <span>источник: Google Sheet</span>
           {editMode && (
             editingSheetUrl ? (
@@ -2633,10 +2680,10 @@ export default function TeamGantt() {
           {backlogLastSync && (
             <span className="bl-last-sync">· последний синк {backlogLastSync.slice(0, 16).replace("T", " ")} UTC</span>
           )}
-        </div>
+        </div>}
 
-        {backlogToast && <div className="tg-toast">{backlogToast}</div>}
-        {backlogError && <div className="card tg-error">{backlogError}</div>}
+        {!blCollapsed && backlogToast && <div className="tg-toast">{backlogToast}</div>}
+        {!blCollapsed && backlogError && <div className="card tg-error">{backlogError}</div>}
 
         {!blCollapsed && <div className="bl-table-scroll">
           <table className="bl-table">
@@ -3130,11 +3177,23 @@ function Style() {
 
       /* Bottom dock: fixed share of the shell, with its own inner scrollport so
    * the board above keeps the rest of the height. */
+      /* flex:0 0 auto against the board's flex:1 — whatever the dock gives up
+       * when it collapses is taken by the timeline automatically. */
       .bl-section{flex:0 0 auto;display:flex;flex-direction:column;max-height:38vh;min-height:0;
-        border-top:1px solid var(--border-strong);background:var(--surface-1);padding:6px 12px 0}
-      .bl-section.bl-collapsed{max-height:none}
+        border-top:0.5px solid var(--border-strong);background:var(--surface-1);padding:6px 12px 0}
+      /* Collapsed: the header IS the dock — a fixed 36px strip at the bottom. */
+      .bl-section.bl-collapsed{height:36px;max-height:36px;padding:0 12px;overflow:hidden}
+      .bl-section.bl-collapsed .bl-head-row{height:36px;margin:0;flex-wrap:nowrap;cursor:pointer}
+      .bl-section.bl-collapsed .bl-head-row:hover .bl-title,
+      .bl-section.bl-collapsed .bl-head-row:hover .bl-chevron{color:var(--text-accent)}
       .bl-head-row{flex:0 0 auto;display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:6px}
       .bl-collapse-btn{background:none;border:none;color:var(--text-muted);font-size:11px;cursor:pointer;padding:0 2px;font-family:inherit;line-height:1}
+      .bl-collapse-btn:hover{color:var(--text-accent)}
+      .bl-collapse-end{margin-left:auto}
+      /* One glyph for both states — rotating it reads as the section opening,
+       * rather than swapping to a different arrow. */
+      .bl-chevron{display:inline-block;transition:transform 140ms ease}
+      .bl-chevron.on{transform:rotate(90deg)}
       .bl-title{font-size:12px;font-weight:600;margin:0;letter-spacing:-.01em}
       .bl-count{font-size:10px;color:var(--text-muted);white-space:nowrap}
       .bl-filters{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-left:auto}
