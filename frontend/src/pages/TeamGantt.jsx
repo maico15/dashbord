@@ -1158,7 +1158,7 @@ function TaskSidePanel({ assignment, engineers, editMode, onApply, onDelete, onC
   const seedKey = assignment
     ? [assignment.id, assignment.project, assignment.start_date,
        assignment.est_days, assignment.percent, assignment.status,
-       assignment.engineer_id].join("|")
+       assignment.engineer_id, assignment.note].join("|")
     : null;
 
   // Re-seed on a new selection, and also when the underlying record changes
@@ -1172,6 +1172,7 @@ function TaskSidePanel({ assignment, engineers, editMode, onApply, onDelete, onC
       percent: assignment.percent ?? 0,
       status: assignment.status || "active",
       engineer_id: assignment.engineer_id ?? null,
+      note: assignment.note || "",
     });
   }, [seedKey]);
 
@@ -1215,6 +1216,9 @@ function TaskSidePanel({ assignment, engineers, editMode, onApply, onDelete, onC
     const pct = Math.min(100, Math.max(0, Number(form.percent)));
     if (pct !== assignment.percent) patch.percent = pct;
     if (form.status !== assignment.status) patch.status = form.status;
+    // Compare against the same "" fallback the form seeds with, so a null note
+    // left untouched doesn't look like an edit.
+    if (form.note !== (assignment.note || "")) patch.note = form.note;
     if (form.engineer_id != null && form.engineer_id !== assignment.engineer_id) {
       patch.engineer_id = form.engineer_id;
     }
@@ -1309,6 +1313,15 @@ function TaskSidePanel({ assignment, engineers, editMode, onApply, onDelete, onC
               >{s}</button>
             ))}
           </div>
+
+          <label className="tg-sp-label">Description</label>
+          <textarea
+            className="tg-sp-textarea"
+            rows={4}
+            placeholder="Add description… / Добавить описание…"
+            value={form.note}
+            onChange={(e) => set("note", e.target.value)}
+          />
 
           <div className="tg-sp-actions">
             <button className="tg-btn tg-sp-apply" onClick={apply}>Apply</button>
@@ -3125,6 +3138,14 @@ function Style() {
       .tg-sp-input{width:100%;box-sizing:border-box;padding:6px 8px;border-radius:6px;border:1px solid var(--border);
         background:var(--surface-0);color:var(--text);font-size:12.5px;font-family:inherit}
       .tg-sp-range{width:100%;margin:2px 0}
+      /* var(--text) is this project's primary text token — there is no
+       * --text-primary defined anywhere, so naming one would render the
+       * textarea with an inherited colour. */
+      .tg-sp-textarea{width:100%;box-sizing:border-box;font-family:inherit;font-size:11px;
+        line-height:1.45;padding:6px 8px;border:0.5px solid var(--border-strong);
+        border-radius:var(--radius);background:var(--surface-1);color:var(--text);
+        resize:vertical;min-height:60px}
+      .tg-sp-textarea::placeholder{color:var(--text-muted)}
       .tg-sp-assignee{display:flex;align-items:center;gap:6px}
       .tg-sp-assignee .tg-sp-select{flex:1;min-width:0}
       .tg-sp-assignee-ro{font-size:12.5px;color:var(--text);padding:6px 0}
