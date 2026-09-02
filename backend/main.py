@@ -5569,9 +5569,19 @@ def _apply_gantt_create(conn, fields: dict) -> int:
 def _apply_gantt_update(conn, assignment_id, fields: dict):
     if assignment_id is None:
         raise ChangeError(422, "Missing id")
-    fields = {k: v for k, v in (fields or {}).items() if k in GANTT_FIELDS}
+    incoming = dict(fields or {})
+    fields = {k: v for k, v in incoming.items() if k in GANTT_FIELDS}
+    unknown = sorted(set(incoming) - GANTT_FIELDS)
     if not fields:
-        raise ChangeError(422, "No valid fields")
+        # Name the rejected keys. The usual cause is a frontend newer than this
+        # backend sending a field this version doesn't know yet — the two are
+        # separate services and deploy independently — and a bare "No valid
+        # fields" gives nobody a way to work that out.
+        raise ChangeError(422, "No valid fields" + (f" (unrecognised: {', '.join(unknown)})" if unknown else ""))
+    if unknown:
+        # Partial skew: some fields applied, some silently vanished. Don't fail
+        # the batch over it, but don't let the loss go unrecorded either.
+        print(f"[gantt] assignment {assignment_id}: ignored unrecognised field(s): {', '.join(unknown)}")
     if "status" in fields and fields["status"] not in GANTT_STATUSES:
         raise ChangeError(422, "Invalid status")
     if "percent" in fields:
