@@ -1,4 +1,4 @@
-import { useState, useEffect, useLayoutEffect, useMemo, useRef } from "react";
+import { Fragment, useState, useEffect, useLayoutEffect, useMemo, useRef } from "react";
 import { Link } from "react-router-dom";
 import { useTheme, toggleTheme } from "../hooks/useTheme";
 import { api } from "../api/client";
@@ -9,6 +9,10 @@ import { api } from "../api/client";
  */
 
 const DAY_COLS = 42; // 6 weeks
+
+// Vertical order of a lane's rows. Every bar gets its own row (see
+// buildEngineerBars), so this is the only thing deciding what sits where.
+const KIND_RANK = { continuous: 0, active: 1, queued: 2, done: 3, error: 4, idle: 5 };
 const MONTH_SHORT = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
 
 /* ---------------- date helpers (local calendar days, no timezone math) ---------------- */
@@ -94,8 +98,8 @@ function colToDate(col, rangeStart) {
  * Every assignment gets its own bar — an engineer can have any number of
  * active/queued/continuous rows at once (e.g. two concurrent active tasks,
  * several queued). Bars are never dropped: unparseable ones fall back to a
- * small warning chip instead of vanishing. Overlapping bars (in day-column
- * space) are stacked into sub-rows via greedy interval partitioning. */
+ * small warning chip instead of vanishing. Each bar occupies its own sub-row,
+ * kept 1:1 with the task rows rendered in the left pane. */
 
 function latestActiveEnd(activeAssignments) {
   let end = null;
@@ -204,40 +208,45 @@ function buildEngineerBars(assignments, rangeStart, today) {
     bars.push({ kind: "idle" });
   }
 
-  // Greedy interval partitioning: sort by start column, place each bar in the
-  // first sub-row whose last bar already ended, else open a new sub-row.
-  // Full-width bars (continuous/idle) always claim a sub-row alone.
-  const stackable = bars.filter((b) => b.kind !== "error");
-  const errored = bars.filter((b) => b.kind === "error");
-  stackable.sort((a, b) => (a.colStart ?? 0) - (b.colStart ?? 0));
-  const subRowEnds = [];
-  for (const b of stackable) {
-    const colStart = b.colStart ?? 0;
-    const colEnd = b.colEnd ?? DAY_COLS;
-    const rowIdx = subRowEnds.findIndex((end) => colStart >= end);
-    if (rowIdx === -1) {
-      b.subRow = subRowEnds.length;
-      subRowEnds.push(colEnd);
-    } else {
-      b.subRow = rowIdx;
-      subRowEnds[rowIdx] = colEnd;
-    }
-  }
-  for (const b of errored) {
-    b.subRow = subRowEnds.length;
-    subRowEnds.push(1);
-  }
+  // Every bar owns exactly one row. The left pane renders one task row per bar,
+  // so packing non-overlapping bars onto a shared sub-row (as this used to do)
+  // would break that 1:1 correspondence.
+  //
+  // The tiebreak is the assignment id, NOT colStart: sorting by start column
+  // would reorder rows the instant a move-drag commits, so the bar you just
+  // dropped would jump to a different row under the cursor. Rows behave as a
+  // stable list instead, which is also the sheet mental model.
+  bars.sort((a, b) => {
+    const byKind = KIND_RANK[a.kind] - KIND_RANK[b.kind];
+    if (byKind !== 0) return byKind;
+    // ids may be `tmp-N` strings for locally-staged creates, so compare as
+    // strings — numeric subtraction would yield NaN and corrupt the sort.
+    return String(a.assignment?.id ?? "").localeCompare(String(b.assignment?.id ?? ""));
+  });
+  bars.forEach((b, i) => { b.subRow = i });
 
-  return { bars: [...stackable, ...errored], height: Math.max(1, subRowEnds.length) };
+  return { bars, height: Math.max(1, bars.length) };
 }
 
-function buildLanes(engineers, rangeStart, today) {
-  let rowCursor = 3; // rows 1-2 are the header
+/* Lays every engineer out as a block of grid rows: a group-header row carrying
+ * the engineer's name, one row per task, and — in edit mode — a trailing
+ * "add task" row. Row tracks are returned alongside as `rowSizes` because the
+ * block is no longer a uniform run of rows and can't be synthesised with a
+ * repeat()/fill(). */
+function buildLanes(engineers, rangeStart, today, { addRow = false } = {}) {
+  let rowCursor = 3; // rows 1-2 are the two-row timeline header
+  const rowSizes = []; // parallel to rows 3..N — the exact gridTemplateRows tracks
   const lanes = engineers.map((eng) => {
     const assignments = eng.assignments || [];
     const { bars, height } = buildEngineerBars(assignments, rangeStart, today);
-    const primaryRow = rowCursor;
-    rowCursor += height;
+
+    const headerRow = rowCursor;
+    rowSizes.push("28px");
+    const firstBarRow = headerRow + 1;
+    for (let i = 0; i < height; i++) rowSizes.push("minmax(28px,auto)");
+    const addBtnRow = addRow ? firstBarRow + height : null;
+    if (addRow) rowSizes.push("26px");
+    rowCursor = firstBarRow + height + (addRow ? 1 : 0);
 
     if (import.meta.env.DEV) {
       const renderedForItems = bars.filter((b) => b.kind !== "idle").length;
@@ -248,9 +257,10 @@ function buildLanes(engineers, rangeStart, today) {
       }
     }
 
-    return { engineer: eng, primaryRow, height, bars };
+    // blockEnd is exclusive — use it as the end of a `gridRow` span.
+    return { engineer: eng, headerRow, firstBarRow, addBtnRow, blockEnd: rowCursor, height, bars };
   });
-  return { lanes, totalRows: rowCursor - 1 };
+  return { lanes, totalRows: rowCursor - 1, rowSizes };
 }
 
 /* ---------------- draft layer ----------------
@@ -781,6 +791,99 @@ function AssignmentEditor({ a, hidePercentEst, onChange, onDelete, predecessorLa
   );
 }
 
+/** Sheet-style checkmark. Inlined rather than pulled from an icon pack —
+ *  the project ships no icon library and this is the only glyph needed. */
+function CheckGlyph() {
+  return (
+    <svg viewBox="0 0 12 12" width="9" height="9" aria-hidden="true">
+      <path
+        d="M1.5 6.2 L4.4 9 L10.5 2.8"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+const STATUS_LABEL = {
+  active: "active", queued: "queued", done: "done",
+  continuous: "ongoing", error: "?", idle: "idle",
+};
+
+/** Left-pane row for a single bar — checkbox / name / status pill / percent.
+ *  Sits in the SAME grid row as its GanttBar, which is what keeps the task list
+ *  and the timeline aligned without any measurement code.
+ *
+ *  Click semantics deliberately mirror the bar's: open the detail modal in
+ *  viewer mode, select for the side panel in edit mode. */
+function TaskRow({
+  bar, gridRow, editMode, selectedId, onSelect, onUpdate,
+  onOpenDetail, beginClickTracking, wasRealClick, setHoveredId,
+}) {
+  const a = bar.assignment;
+
+  // The idle placeholder isn't a task — no id, nothing to check off or open.
+  if (!a) {
+    return (
+      <div className="tg-task-row tg-task-idle" style={{ gridColumn: 1, gridRow }}>
+        <span />
+        <span className="tg-task-name">No active project</span>
+        <span />
+        <span />
+      </div>
+    );
+  }
+
+  const status = bar.kind === "error" ? "error" : a.status;
+  const done = a.status === "done";
+  const selected = selectedId === a.id;
+  const showPercent = a.status === "active" || a.status === "done";
+  // `overdue` is derived per-bar (past due and not finished), not a stored
+  // status, so the pill has to check it before falling back to the status.
+  const pill = bar.overdue ? "overdue" : status;
+
+  function toggleDone(ev) {
+    ev.stopPropagation();
+    if (!editMode) return;
+    onUpdate(a.id, done ? { status: "active" } : { status: "done", percent: 100 });
+  }
+
+  return (
+    <div
+      className={
+        `tg-task-row${selected ? " tg-task-selected" : ""}${done ? " tg-task-done" : ""}`
+      }
+      style={{ gridColumn: 1, gridRow }}
+      onMouseEnter={() => setHoveredId(a.id)}
+      onMouseLeave={() => setHoveredId(null)}
+      onMouseDown={beginClickTracking}
+      onClick={(ev) => {
+        if (!wasRealClick(ev)) return;
+        if (editMode) onSelect(a.id);
+        else onOpenDetail(a.id);
+      }}
+    >
+      <span
+        className={`tg-check${done ? " on" : ""}${editMode ? " tg-check-live" : ""}`}
+        role={editMode ? "button" : undefined}
+        title={editMode ? (done ? "Mark as active" : "Mark as done") : undefined}
+        onClick={toggleDone}
+      >
+        {done && <CheckGlyph />}
+      </span>
+      <span className="tg-task-name" title={a.project}>
+        {bar.kind === "error" && "⚠ "}{a.project}
+        {a.__pending && <span className="tg-pending-dot" title="Unsaved" />}
+      </span>
+      <span className={`tg-pill tg-pill-${pill}`}>{STATUS_LABEL[pill] || pill}</span>
+      <span className="tg-task-pct">{showPercent ? `${a.percent}%` : ""}</span>
+    </div>
+  );
+}
+
 /** One bar within an engineer's lane. Handles every kind buildEngineerBars can
  *  produce — idle placeholder, warning chip for unpositionable items, the
  *  full-width continuous bar, and active/queued (which share drag, dependency
@@ -879,6 +982,11 @@ function GanttBar({
         : { colStart: bar.colStart, colEnd: Math.max(bar.colStart + 1, bar.colEnd + drag.deltaCols) }
     : { colStart: bar.colStart, colEnd: bar.colEnd };
   const baseStartDate = isQueued ? bar.startLabel : bar.startDate;
+  // The inline editor expands the bar well beyond a sheet row, so it's scoped
+  // to the selected bar ("click a bar to edit") rather than shown on all of
+  // them at once. Nothing becomes unreachable — selecting a bar still exposes
+  // every control, dependency-linking included.
+  const expanded = editMode && selectedId === bar.assignment.id;
   const warn = dependencyWarning(bar.assignment, assignmentsById, baseStartDate);
   const predLabel = bar.assignment.depends_on
     ? assignmentsById[bar.assignment.depends_on]?.project || null
@@ -889,8 +997,8 @@ function GanttBar({
       ref={setBarRef(bar.assignment.id)}
       className={
         (isQueued
-          ? `tg-bar tg-queued${editMode ? " tg-editing tg-draggable" : ""}${drag ? " tg-dragging" : ""}`
-          : `tg-bar tg-active${bar.overdue ? " tg-overdue" : ""}${editMode ? " tg-editing tg-draggable" : ""}${drag ? " tg-dragging" : ""}`
+          ? `tg-bar tg-queued${editMode ? " tg-draggable" : ""}${expanded ? " tg-editing" : ""}${drag ? " tg-dragging" : ""}`
+          : `tg-bar tg-active${bar.overdue ? " tg-overdue" : ""}${editMode ? " tg-draggable" : ""}${expanded ? " tg-editing" : ""}${drag ? " tg-dragging" : ""}`
         ) + (bar.assignment.__pending ? " tg-bar-pending" : "")
           + (editMode && selectedId === bar.assignment.id ? " tg-bar-selected" : "")
       }
@@ -921,10 +1029,13 @@ function GanttBar({
       onMouseLeave={() => setHoveredId((h) => (h === bar.assignment.id ? null : h))}
     >
       {!isQueued && (
-        <div className="tg-bar-fillwrap">
-          <div className="tg-bar-fill" style={{ width: `${bar.assignment.percent}%`, background: color }} />
-          <div className="tg-bar-rest" style={{ width: `${100 - bar.assignment.percent}%`, background: color }} />
-        </div>
+        <>
+          <div className="tg-bar-fillwrap">
+            <div className="tg-bar-fill" style={{ width: `${bar.assignment.percent}%`, background: color }} />
+            <div className="tg-bar-rest" style={{ width: `${100 - bar.assignment.percent}%`, background: color }} />
+          </div>
+          <div className="tg-bar-progress" style={{ width: `${bar.assignment.percent}%` }} />
+        </>
       )}
       <span className="tg-bar-label">
         {isQueued
@@ -952,7 +1063,7 @@ function GanttBar({
           onMouseDown={(e) => onBeginDrag(e, "resize", bar.assignment, isQueued, bar.colStart, bar.colEnd, baseStartDate)}
         />
       )}
-      {editMode && (
+      {expanded && (
         <AssignmentEditor
           a={bar.assignment}
           onChange={(patch) => onUpdate(bar.assignment.id, patch)}
@@ -1162,11 +1273,13 @@ export default function TeamGantt() {
   const [newItemPriority, setNewItemPriority] = useState("P2");
   const [newItemHours, setNewItemHours] = useState("");
   const [confirmDeleteId, setConfirmDeleteId] = useState(null); // backlog item.id awaiting delete confirm
-  const autoScrollRef = useRef(null); // { speed, rafId } while a drag is near a viewport edge
+  const scrollRef = useRef(null); // the board scrollport — the only scrolling region
+  const autoScrollRef = useRef(null); // { speed, rafId } while a drag is near a scrollport edge
   const clickPointerDownRef = useRef(null); // {x,y} on mousedown, to tell a click from a completed drag (backlog rows + gantt bars)
 
   const [detailTarget, setDetailTarget] = useState(null); // {type:"backlog"|"gantt", id} shown in the shared task-detail modal, or null
   const [selectedId, setSelectedId] = useState(null); // assignment shown in the right-side edit panel (edit mode only)
+  const [blCollapsed, setBlCollapsed] = useState(false); // dock the backlog to give the board full height
   const [blSearch, setBlSearch] = useState("");
   const [blSearchDebounced, setBlSearchDebounced] = useState("");
   const [blPriorityFilter, setBlPriorityFilter] = useState([]); // selected priority chip values; [] = all
@@ -1401,12 +1514,17 @@ export default function TeamGantt() {
   const AUTOSCROLL_MAX_SPEED = 20;
 
   function updateAutoScroll(clientY) {
-    const vh = window.innerHeight;
+    // Edges come from the board scrollport, not the window: the shell is
+    // height-locked with overflow:hidden, so the window never scrolls and
+    // window.innerHeight / window.scrollBy would both be inert here.
+    const el = scrollRef.current;
+    if (!el) return;
+    const { top, bottom } = el.getBoundingClientRect();
     let speed = 0;
-    if (clientY < AUTOSCROLL_EDGE) {
-      speed = -Math.ceil(((AUTOSCROLL_EDGE - clientY) / AUTOSCROLL_EDGE) * AUTOSCROLL_MAX_SPEED);
-    } else if (clientY > vh - AUTOSCROLL_EDGE) {
-      speed = Math.ceil(((clientY - (vh - AUTOSCROLL_EDGE)) / AUTOSCROLL_EDGE) * AUTOSCROLL_MAX_SPEED);
+    if (clientY < top + AUTOSCROLL_EDGE) {
+      speed = -Math.ceil(((top + AUTOSCROLL_EDGE - clientY) / AUTOSCROLL_EDGE) * AUTOSCROLL_MAX_SPEED);
+    } else if (clientY > bottom - AUTOSCROLL_EDGE) {
+      speed = Math.ceil(((clientY - (bottom - AUTOSCROLL_EDGE)) / AUTOSCROLL_EDGE) * AUTOSCROLL_MAX_SPEED);
     }
     if (speed === 0) {
       stopAutoScroll();
@@ -1419,7 +1537,7 @@ export default function TeamGantt() {
     const state = { speed, rafId: null };
     const tick = () => {
       if (autoScrollRef.current !== state) return;
-      window.scrollBy(0, state.speed);
+      scrollRef.current?.scrollBy(0, state.speed);
       state.rafId = requestAnimationFrame(tick);
     };
     autoScrollRef.current = state;
@@ -1837,9 +1955,9 @@ export default function TeamGantt() {
     [sortedEngineers, editMode]
   );
 
-  const { lanes, totalRows } = useMemo(
-    () => buildLanes(boardEngineers, rangeStart, today),
-    [boardEngineers, rangeStart, today]
+  const { lanes, totalRows, rowSizes } = useMemo(
+    () => buildLanes(boardEngineers, rangeStart, today, { addRow: editMode }),
+    [boardEngineers, rangeStart, today, editMode]
   );
 
   // Reflects the last SAVED state, not the draft — a purely-local pending
@@ -1858,6 +1976,28 @@ export default function TeamGantt() {
       for (const a of e.assignments || []) m[a.id] = a;
     return m;
   }, [draft.engineers]);
+
+  // The shell is viewport-height, so the document itself must not scroll —
+  // otherwise the sticky timeline header pins to the browser viewport and
+  // slides over the toolbar. Reverted on unmount so other routes are untouched.
+  useEffect(() => {
+    document.body.classList.add("tg-viewport-lock");
+    return () => document.body.classList.remove("tg-viewport-lock");
+  }, []);
+
+  const taskCount = useMemo(
+    () => (draft.engineers || []).reduce((n, e) => n + (e.assignments || []).length, 0),
+    [draft.engineers]
+  );
+
+  // The toolbar's "Add task" has no lane of its own to add to, so it follows
+  // the selection: whichever engineer owns the currently selected task.
+  const selectedEngineerId = useMemo(() => {
+    if (selectedId == null) return null;
+    for (const e of draft.engineers || [])
+      if ((e.assignments || []).some((a) => a.id === selectedId)) return e.id;
+    return null;
+  }, [draft.engineers, selectedId]);
 
   // Index of every rendered bar by assignment id, for the Gantt task-detail
   // modal's meta grid — reuses the exact dayX/estY/startDate the visible bar
@@ -1924,14 +2064,20 @@ export default function TeamGantt() {
     setArrows(next);
   }
 
-  useLayoutEffect(() => { recomputeArrows() }, [data, dragVisual, editMode]);
+  // Keyed on `lanes`, not `data`: `data` is the last server fetch, so a staged
+  // draft change (create, delete, status flip, backlog assign) moved bars
+  // without ever redrawing the arrows. `lanes` changes identity on every draft
+  // edit, and now also whenever row indices shift.
+  useLayoutEffect(() => { recomputeArrows() }, [lanes, dragVisual, editMode]);
   useEffect(() => {
     function onResize() { recomputeArrows() }
     window.addEventListener("resize", onResize);
     return () => window.removeEventListener("resize", onResize);
-  }, [data]);
+  }, [lanes]);
 
-  const gridTemplateRows = `28px 24px ${Array(Math.max(0, totalRows - 2)).fill("minmax(40px,auto)").join(" ")}`;
+  // Rows 1-2 are the sticky week/day header; the rest come straight from
+  // buildLanes, which mixes fixed group-header/add-row tracks with auto task rows.
+  const gridTemplateRows = `22px 22px ${rowSizes.join(" ")}`;
 
   const setBarRef = (id) => (el) => {
     if (el) barRefs.current[id] = el;
@@ -1946,51 +2092,58 @@ export default function TeamGantt() {
     );
 
   return (
-    <div className="tg-wrap">
+    <div className={`tg-wrap${editMode && selectedId != null ? " tg-wrap-panel" : ""}`}>
       <Style />
 
       <div className="tg-head">
-        <div>
-          <div className="tg-eyebrow">Standing team load</div>
-          <h1 className="tg-title">Team Gantt — engineering load</h1>
-          <div className="tg-subtitle">
-            {lastUpdated ? `Last updated ${lastUpdated.slice(0, 16).replace("T", " ")} UTC` : "No assignments yet"}
-          </div>
-          <Link to="/" className="tg-back">← Dashboard</Link>
-        </div>
+        <Link to="/" className="tg-back" title="Back to dashboard">←</Link>
+        <h1 className="tg-title">Team Gantt</h1>
         <div className="tg-controls">
           <button className="tg-btn" onClick={syncFromReports}>⟳ Sync from reports</button>
           {editMode && (
             <button className="tg-btn" onClick={() => setManageOpen(true)}>👥 Manage engineers</button>
           )}
-          {editMode && (
-            <>
-              <button
-                className="tg-btn"
-                onClick={undoChange}
-                disabled={changeQueue.length === 0}
-                title="Undo last change (Ctrl+Z)"
-              >↶ Undo</button>
-              <button
-                className="tg-btn tg-btn-discard"
-                onClick={discardChanges}
-                disabled={changeQueue.length === 0}
-              >Отменить всё</button>
-              <button
-                className="tg-btn"
-                onClick={() => { if (selectedId != null) { deleteAssignment(selectedId); setSelectedId(null) } }}
-                disabled={selectedId == null}
-                title={selectedId == null ? "Select a bar first" : "Delete the selected task"}
-              >🗑 Delete selected</button>
-              <button
-                className={`tg-btn tg-btn-save${changeQueue.length > 0 ? " on" : ""}`}
-                onClick={saveChanges}
-                disabled={changeQueue.length === 0 || saving}
-              >
-                {saving ? "Saving…" : `Save (${changeQueue.length})`}
-              </button>
-            </>
-          )}
+
+          {/* Edit-only actions stay mounted in viewer mode but inert, so the
+           * toolbar doesn't reflow when the mode flips. */}
+          <span className="tg-sep" />
+          <div className={`tg-actions${editMode ? "" : " tg-actions-off"}`}>
+            <button
+              className="tg-btn"
+              onClick={() => { if (selectedEngineerId != null) addAssignment(selectedEngineerId) }}
+              disabled={selectedEngineerId == null}
+              title={selectedEngineerId == null
+                ? "Select a task first — the new task is added to its engineer"
+                : "Add a task for the selected task's engineer"}
+            >+ Add task</button>
+            <button
+              className="tg-btn"
+              onClick={() => { if (selectedId != null) { deleteAssignment(selectedId); setSelectedId(null) } }}
+              disabled={selectedId == null}
+              title={selectedId == null ? "Select a bar first" : "Delete the selected task"}
+            >🗑 Delete selected</button>
+            <span className="tg-sep" />
+            <button
+              className="tg-btn"
+              onClick={undoChange}
+              disabled={changeQueue.length === 0}
+              title="Undo last change (Ctrl+Z)"
+            >↶ Undo</button>
+            <button
+              className="tg-btn tg-btn-discard"
+              onClick={discardChanges}
+              disabled={changeQueue.length === 0}
+            >Отменить всё</button>
+            <button
+              className={`tg-btn tg-btn-save${changeQueue.length > 0 ? " on" : ""}`}
+              onClick={saveChanges}
+              disabled={changeQueue.length === 0 || saving}
+            >
+              {saving ? "Saving…" : `Save${changeQueue.length > 0 ? ` (${changeQueue.length})` : ""}`}
+            </button>
+          </div>
+          <span className="tg-sep" />
+
           <button
             className={`tg-btn${editMode ? " on" : ""}`}
             onClick={() => {
@@ -2011,21 +2164,18 @@ export default function TeamGantt() {
         </div>
       </div>
 
-      {syncMsg && <div className="tg-toast">{syncMsg}</div>}
-      {(error || pwError) && <div className="card tg-error">{error || pwError}</div>}
-      {saveError && <div className="card tg-error">{saveError}</div>}
-
-      <div className="tg-legend">
-        <span><i className="sw solid" /> active (fill = % done)</span>
-        <span><i className="sw dash" /> queued (next in line)</span>
-        <span><i className="sw red" /> IDLE — no active project</span>
-        <span><i className="sw amber" /> overdue</span>
-        <span><i className="sw done" /> ✓ done</span>
-      </div>
-
-      {linkingFor != null && (
-        <div className="tg-toast tg-toast-link">
-          🔗 Click the predecessor bar… (Escape to cancel)
+      {/* Alerts sit in their own non-scrolling strip so they never push the
+       * board out of the viewport-height shell. */}
+      {(syncMsg || error || pwError || saveError || linkingFor != null) && (
+        <div className="tg-alerts">
+          {syncMsg && <div className="tg-toast">{syncMsg}</div>}
+          {(error || pwError) && <div className="card tg-error">{error || pwError}</div>}
+          {saveError && <div className="card tg-error">{saveError}</div>}
+          {linkingFor != null && (
+            <div className="tg-toast tg-toast-link">
+              🔗 Click the predecessor bar… (Escape to cancel)
+            </div>
+          )}
         </div>
       )}
 
@@ -2087,11 +2237,11 @@ export default function TeamGantt() {
         </div>
       )}
 
-      <div className="tg-scroll">
+      <div className="tg-scroll" ref={scrollRef}>
         <div
           ref={gridRef}
           className="tg-grid"
-          style={{ gridTemplateColumns: `200px repeat(${DAY_COLS}, minmax(28px,1fr))`, gridTemplateRows }}
+          style={{ gridTemplateColumns: `300px repeat(${DAY_COLS}, minmax(22px,1fr))`, gridTemplateRows }}
         >
           <svg className="tg-arrows" overflow="visible">
             <defs>
@@ -2130,7 +2280,12 @@ export default function TeamGantt() {
           )}
 
           {/* header: name spacer */}
-          <div className="tg-name-header" style={{ gridColumn: 1, gridRow: "1 / 3" }}>Engineer</div>
+          <div className="tg-name-header" style={{ gridColumn: 1, gridRow: "1 / 3" }}>
+            <span />
+            <span>Task</span>
+            <span>Status</span>
+            <span className="tg-hdr-pct">%</span>
+          </div>
 
           {/* header: week labels */}
           {weeks.map((monday, i) => (
@@ -2141,44 +2296,51 @@ export default function TeamGantt() {
 
           {/* header: day numbers */}
           {days.map((d, i) => (
-            <div key={`d-${i}`} className={`tg-day-cell${isWeekend(d) ? " weekend" : ""}`} style={{ gridColumn: i + 2, gridRow: 2 }}>
+            <div
+              key={`d-${i}`}
+              className={`tg-day-cell${isWeekend(d) ? " weekend" : ""}${i === todayIdx ? " today" : ""}`}
+              style={{ gridColumn: i + 2, gridRow: 2 }}
+            >
               {d.getDate()}
             </div>
           ))}
 
           {/* lanes */}
-          {lanes.map(({ engineer: e, primaryRow, height, bars }) => {
+          {lanes.map(({ engineer: e, headerRow, firstBarRow, addBtnRow, blockEnd, bars }) => {
             const color = e.avatar_color || e.color || "var(--accent1)";
-            const laneRowSpan = `${primaryRow} / ${primaryRow + height}`;
+            const blockSpan = `${headerRow} / ${blockEnd}`;
 
             return (
               <div key={e.id} style={{ display: "contents" }}>
-                {/* Full-width row separator: the sticky name cell already draws
-                 * its own border-bottom (opaque background, so it must paint its
-                 * own line rather than reveal one underneath); this covers the
+                {/* Full-width row separator: the sticky left pane draws its own
+                 * border-bottom (opaque background, so it must paint its own
+                 * line rather than reveal one underneath); this covers the
                  * rest — the entire scrollable timeline — with the identical
                  * border style so the two segments read as one continuous line.
                  * A plain grid item stretches across its whole column/row span
                  * regardless of scroll position, so it isn't clipped to the
-                 * viewport. One per engineer, drawn below their whole
-                 * stacked-bar block — never between their own sub-rows — since
-                 * it spans the same laneRowSpan as the bars. */}
+                 * viewport. One per engineer, drawn below their whole block. */}
                 <div
                   className="tg-row-divider"
-                  style={{ gridColumn: `2 / ${DAY_COLS + 2}`, gridRow: laneRowSpan }}
+                  style={{ gridColumn: `2 / ${DAY_COLS + 2}`, gridRow: blockSpan }}
                 />
-                <div className="tg-name-row" style={{ gridColumn: 1, gridRow: laneRowSpan }}>
+
+                {/* group header — engineer name (left pane) + a band across the
+                 * timeline so the row reads as one unit at any scroll offset */}
+                <div className="tg-group-name" style={{ gridColumn: 1, gridRow: headerRow }}>
                   <span className="tg-dot" style={{ background: color }} />
                   <span className="tg-eng-name">{e.name}</span>
-                  {editMode && (
-                    <button className="tg-add-btn" onClick={() => addAssignment(e.id)}>+ assignment</button>
-                  )}
+                  <span className="tg-eng-count">{bars.filter((b) => b.assignment).length}</span>
                 </div>
+                <div
+                  className="tg-group-band"
+                  style={{ gridColumn: `2 / ${DAY_COLS + 2}`, gridRow: headerRow }}
+                />
 
                 {editMode && backlogDragId != null && (
                   <div
                     className={`tg-lane-drop${backlogOverEngineer === e.id ? " tg-lane-drop-over" : ""}`}
-                    style={{ gridColumn: `2 / ${DAY_COLS + 2}`, gridRow: laneRowSpan }}
+                    style={{ gridColumn: `2 / ${DAY_COLS + 2}`, gridRow: blockSpan }}
                     onDragEnter={(ev) => { ev.preventDefault(); setBacklogOverEngineer(e.id) }}
                     onDragOver={(ev) => { ev.preventDefault(); ev.dataTransfer.dropEffect = "move"; updateAutoScroll(ev.clientY) }}
                     onDragLeave={() => setBacklogOverEngineer((cur) => (cur === e.id ? null : cur))}
@@ -2186,37 +2348,67 @@ export default function TeamGantt() {
                   />
                 )}
 
-                {bars.map((bar) => (
-                  <GanttBar
-                    key={bar.assignment ? bar.assignment.id : "idle"}
-                    bar={bar}
-                    color={color}
-                    gridRow={primaryRow + bar.subRow}
-                    editMode={editMode}
-                    dragVisual={dragVisual}
-                    linkingFor={linkingFor}
-                    assignmentsById={assignmentsById}
-                    onBeginDrag={beginDrag}
-                    onUpdate={updateAssignment}
-                    onDelete={deleteAssignment}
-                    setLinkingFor={setLinkingFor}
-                    setHoveredId={setHoveredId}
-                    setBarRef={setBarRef}
-                    onOpenDetail={openGanttDetail}
-                    beginClickTracking={beginClickTracking}
-                    wasRealClick={wasRealClick}
-                    selectedId={selectedId}
-                    onSelect={setSelectedId}
-                  />
-                ))}
+                {bars.map((bar) => {
+                  const row = firstBarRow + bar.subRow;
+                  const key = bar.assignment ? bar.assignment.id : "idle";
+                  return (
+                    <Fragment key={key}>
+                      <TaskRow
+                        bar={bar}
+                        gridRow={row}
+                        editMode={editMode}
+                        selectedId={selectedId}
+                        onSelect={setSelectedId}
+                        onUpdate={updateAssignment}
+                        onOpenDetail={openGanttDetail}
+                        beginClickTracking={beginClickTracking}
+                        wasRealClick={wasRealClick}
+                        setHoveredId={setHoveredId}
+                      />
+                      <GanttBar
+                        bar={bar}
+                        color={color}
+                        gridRow={row}
+                        editMode={editMode}
+                        dragVisual={dragVisual}
+                        linkingFor={linkingFor}
+                        assignmentsById={assignmentsById}
+                        onBeginDrag={beginDrag}
+                        onUpdate={updateAssignment}
+                        onDelete={deleteAssignment}
+                        setLinkingFor={setLinkingFor}
+                        setHoveredId={setHoveredId}
+                        setBarRef={setBarRef}
+                        onOpenDetail={openGanttDetail}
+                        beginClickTracking={beginClickTracking}
+                        wasRealClick={wasRealClick}
+                        selectedId={selectedId}
+                        onSelect={setSelectedId}
+                      />
+                    </Fragment>
+                  );
+                })}
+
+                {addBtnRow != null && (
+                  <button
+                    className="tg-add-row"
+                    style={{ gridColumn: 1, gridRow: addBtnRow }}
+                    onClick={() => addAssignment(e.id)}
+                  >+ Add task for {e.name}</button>
+                )}
               </div>
             );
           })}
         </div>
       </div>
 
-      <div className="bl-section">
+      <div className={`bl-section${blCollapsed ? " bl-collapsed" : ""}`}>
         <div className="bl-head-row">
+          <button
+            className="bl-collapse-btn"
+            onClick={() => setBlCollapsed((v) => !v)}
+            title={blCollapsed ? "Show backlog" : "Hide backlog"}
+          >{blCollapsed ? "▸" : "▾"}</button>
           <h2 className="bl-title">Backlog</h2>
           <span className="bl-count">
             {hasActiveBacklogFilter
@@ -2314,7 +2506,7 @@ export default function TeamGantt() {
         {backlogToast && <div className="tg-toast">{backlogToast}</div>}
         {backlogError && <div className="card tg-error">{backlogError}</div>}
 
-        <div className="bl-table-scroll">
+        {!blCollapsed && <div className="bl-table-scroll">
           <table className="bl-table">
             <thead>
               <tr>
@@ -2469,7 +2661,34 @@ export default function TeamGantt() {
               ))}
             </tbody>
           </table>
+        </div>}
+      </div>
+
+      {editMode && (
+        <div className="tg-hintbar">
+          Drag bars to move · Drag edges to resize · Click a bar or row to edit
         </div>
+      )}
+
+      <div className="tg-statusbar">
+        <span>{taskCount} task{taskCount === 1 ? "" : "s"} · {lanes.length} engineer{lanes.length === 1 ? "" : "s"}</span>
+        <span className="tg-legend">
+          <span><i className="sw solid" /> active</span>
+          <span><i className="sw dash" /> queued</span>
+          <span><i className="sw red" /> idle</span>
+          <span><i className="sw amber" /> overdue</span>
+          <span><i className="sw done" /> done</span>
+        </span>
+        <span className="tg-status-right">
+          {lastUpdated && (
+            <span>Updated {lastUpdated.slice(0, 16).replace("T", " ")} UTC</span>
+          )}
+          <span>
+            {editMode
+              ? (changeQueue.length > 0 ? `Edit mode — ${changeQueue.length} unsaved change${changeQueue.length === 1 ? "" : "s"}` : "Edit mode")
+              : "View mode"}
+          </span>
+        </span>
       </div>
 
       {editMode && (
@@ -2526,27 +2745,48 @@ export default function TeamGantt() {
 function Style() {
   return (
     <style>{`
-      .tg-wrap{max-width:1500px;margin:0 auto;padding:8px 24px 64px}
+      /* Viewport-filling shell: the board owns the only scrollport, so the
+       * sticky timeline header pins to the board rather than to the browser
+       * viewport. Scoped body lock (added/removed on mount) because
+       * body{min-height:100vh} is shared with every other route. */
+      .tg-viewport-lock{overflow:hidden}
+      /* The side panel is position:fixed; on a full-bleed board it would sit
+       * on top of real timeline, so make room for it while it's open. */
+      .tg-wrap-panel{padding-right:200px}
+      .tg-wrap{width:100%;max-width:none;margin:0;padding:0;height:100dvh;
+        display:flex;flex-direction:column;overflow:hidden;background:var(--surface-0)}
       .tg-loading{padding:60px 0;text-align:center;color:var(--muted)}
-      .tg-error{color:var(--danger);margin-bottom:14px;padding:10px 14px}
+      .tg-error{color:var(--danger);padding:6px 12px;font-size:12px}
 
-      .tg-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;flex-wrap:wrap;margin-top:16px}
-      .tg-eyebrow{font-size:11px;letter-spacing:.18em;text-transform:uppercase;color:var(--muted)}
-      .tg-title{font-size:28px;font-weight:800;margin:6px 0 0;letter-spacing:-.01em}
-      .tg-subtitle{font-size:12px;color:var(--muted);margin-top:6px}
-      .tg-back{display:inline-block;margin-top:10px;font-size:12px;color:var(--muted);text-decoration:none}
-      .tg-back:hover{color:var(--accent1)}
-      .tg-controls{display:flex;align-items:center;gap:8px}
-      .tg-btn{padding:7px 14px;border-radius:8px;border:1px solid var(--border);background:var(--card);color:var(--text);font-size:12.5px;font-weight:600;cursor:pointer;font-family:inherit}
-      .tg-btn.on{background:var(--accent1);color:#06091a;border-color:var(--accent1)}
+      .tg-head{flex:0 0 auto;display:flex;align-items:center;gap:10px;
+        padding:6px 12px;border-bottom:1px solid var(--border);background:var(--surface-1)}
+      .tg-title{font-size:13px;font-weight:600;margin:0;letter-spacing:-.01em;white-space:nowrap}
+      .tg-back{font-size:15px;color:var(--text-muted);text-decoration:none;padding:0 4px;line-height:1}
+      .tg-back:hover{color:var(--text-accent)}
+      .tg-controls{display:flex;align-items:center;gap:6px;margin-left:auto;flex-wrap:wrap}
+      .tg-sep{width:1px;height:18px;background:var(--border-strong);flex:none}
+      .tg-actions{display:flex;align-items:center;gap:6px}
+      .tg-actions-off{opacity:.4;pointer-events:none}
+      .tg-alerts{flex:0 0 auto;display:flex;flex-direction:column;gap:4px;padding:6px 12px}
+
+      .tg-hintbar{flex:0 0 auto;font-size:10px;color:var(--text-muted);background:var(--bg-accent);
+        border-top:1px solid var(--border-accent);padding:4px 12px}
+      .tg-statusbar{flex:0 0 auto;font-size:10px;color:var(--text-muted);background:var(--surface-1);
+        border-top:1px solid var(--border);padding:4px 12px;display:flex;gap:16px;align-items:center;flex-wrap:wrap}
+      .tg-status-right{margin-left:auto;display:flex;gap:16px;align-items:center}
+
+      .tg-btn{height:28px;padding:4px 10px;border-radius:var(--radius);border:1px solid var(--border-strong);
+        background:var(--surface-0);color:var(--text);font-size:11px;font-weight:500;cursor:pointer;
+        font-family:inherit;display:flex;align-items:center;gap:4px;white-space:nowrap}
+      .tg-btn.on{background:var(--accent1);color:var(--on-accent);border-color:var(--accent1)}
       .tg-btn:disabled{opacity:.4;cursor:not-allowed}
-      .tg-btn-save.on{background:var(--success);border-color:var(--success);color:#06091a}
+      .tg-btn-save.on{background:var(--fill-accent);border-color:var(--fill-accent);color:var(--on-accent)}
       .tg-btn-discard:not(:disabled){color:var(--danger);border-color:var(--danger)}
       .tg-icon-btn{width:32px;height:32px;border-radius:8px;border:1px solid var(--border);background:var(--card);color:var(--muted);cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:15px}
       .tg-toast{margin-top:12px;padding:8px 14px;border-radius:8px;background:rgba(34,197,94,.12);color:var(--success);font-size:12.5px;font-weight:600}
       .tg-toast-link{background:rgba(0,207,255,.12);color:var(--accent1)}
 
-      .tg-legend{display:flex;gap:20px;flex-wrap:wrap;margin:18px 0;font-size:11px;color:var(--muted)}
+      .tg-legend{display:flex;gap:12px;flex-wrap:wrap;font-size:10px;color:var(--text-muted);align-items:center}
       .tg-legend span{display:flex;align-items:center;gap:6px}
       .tg-legend .sw{width:20px;height:10px;border-radius:3px;display:inline-block}
       .tg-legend .sw.solid{background:var(--accent1)}
@@ -2570,35 +2810,101 @@ function Style() {
       .tg-modal-warning{font-size:11px;color:var(--warning);flex:1 1 100%}
       .tg-modal-hint{font-size:11px;color:var(--muted);padding:14px 20px;border-top:1px solid var(--border)}
 
-      .tg-scroll{overflow-x:auto;padding-bottom:8px}
-      .tg-grid{display:grid;position:relative;min-width:1100px}
+      /* Stacking order for the board. Sticky cells must outrank everything
+       * that scrolls under them, and the corner must outrank both sticky axes:
+       *   0  weekend columns, day cells
+       *   1  today line, row dividers, group band
+       *   2  bars (5 while inline-editing)
+       *   6  dependency arrows
+       *   8  backlog lane-drop overlay
+       *   10 sticky timeline header (rows 1-2)
+       *   20 sticky left pane (column 1)
+       *   30 sticky corner (.tg-name-header)
+       * .tg-bar-resize (11) and .tg-editor (10) live inside .tg-bar's own
+       * stacking context, so they can't escape above the sticky pane. */
+      .tg-scroll{flex:1 1 auto;min-height:0;overflow:auto}
+      .tg-grid{display:grid;position:relative;min-width:1224px}
       .tg-arrows{position:absolute;inset:0;width:100%;height:100%;pointer-events:none;z-index:6;overflow:visible}
 
-      .tg-name-header{position:sticky;left:0;background:var(--bg);z-index:3;display:flex;align-items:flex-end;padding:4px 8px 4px 0;font-size:10px;color:var(--muted);letter-spacing:.08em;text-transform:uppercase}
-      .tg-week-cell{font-size:11px;font-weight:600;color:var(--muted);padding:4px 6px;border-bottom:1px solid var(--border);display:flex;align-items:center}
-      .tg-day-cell{position:relative;z-index:0;font-size:10px;color:var(--muted);text-align:center;padding:3px 0;border-bottom:1px solid var(--border);pointer-events:none}
-      .tg-day-cell.weekend{color:var(--text);opacity:.5}
-      .tg-weekend-col{position:relative;background:rgba(120,120,140,.08);pointer-events:none;z-index:0}
+      /* corner: sticky on BOTH axes, so it holds the top-left while either
+       * scrollbar moves. Same 4-col template as the task rows below it. */
+      .tg-name-header{position:sticky;left:0;top:0;z-index:30;background:var(--surface-1);
+        display:grid;grid-template-columns:28px 1fr 72px 40px;align-items:end;gap:0;
+        padding:0 0 4px;border-bottom:1px solid var(--border);border-right:2px solid var(--border-strong)}
+      .tg-name-header span{font-size:10px;font-weight:500;color:var(--text-muted);
+        text-transform:uppercase;letter-spacing:.06em;padding:4px 6px}
+      .tg-hdr-pct{text-align:right}
+
+      .tg-week-cell{position:sticky;top:0;z-index:10;background:var(--surface-1);
+        font-size:10px;font-weight:500;color:var(--text-secondary);padding:0 6px;
+        border-bottom:1px solid var(--border);border-right:1px solid var(--border-strong);
+        display:flex;align-items:center;white-space:nowrap;overflow:hidden}
+      .tg-day-cell{position:sticky;top:22px;z-index:10;background:var(--surface-1);
+        font-size:10px;color:var(--text-muted);text-align:center;
+        border-bottom:1px solid var(--border);pointer-events:none;
+        display:flex;align-items:center;justify-content:center}
+      .tg-day-cell.weekend{opacity:.4}
+      .tg-day-cell.today{color:var(--text-accent);font-weight:500;background:var(--bg-accent)}
+      .tg-weekend-col{position:relative;background:var(--surface-1);opacity:.6;pointer-events:none;z-index:0}
       .tg-today-col{position:relative;pointer-events:none;z-index:1}
-      .tg-today-line{position:absolute;left:50%;top:0;bottom:0;width:2px;background:var(--success);transform:translateX(-50%);pointer-events:none;z-index:1}
-
-      .tg-name-row{position:sticky;left:0;background:var(--bg);z-index:3;display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:6px 8px 6px 0;border-bottom:1px solid var(--border)}
+      .tg-today-line{position:absolute;left:50%;top:0;bottom:0;width:1.5px;background:var(--border-accent);transform:translateX(-50%);pointer-events:none}
       .tg-row-divider{position:relative;pointer-events:none;z-index:1;border-bottom:1px solid var(--border)}
-      .tg-dot{width:9px;height:9px;border-radius:50%;flex:none}
-      .tg-eng-name{font-size:13px;font-weight:600;white-space:nowrap}
-      .tg-add-btn{margin-left:auto;font-size:10.5px;font-weight:600;color:var(--accent1);background:none;border:1px solid var(--border);border-radius:7px;padding:2px 8px;cursor:pointer;font-family:inherit;position:relative;z-index:2}
 
-      .tg-bar{position:relative;z-index:2;align-self:center;min-height:26px;border-radius:6px;display:flex;align-items:center;padding:0 8px;font-size:11px;font-weight:600;overflow:hidden;border:1px solid transparent}
+      /* ---- left pane ---- */
+      .tg-group-name{position:sticky;left:0;z-index:20;background:var(--surface-1);
+        display:flex;align-items:center;gap:8px;padding:0 8px;
+        border-bottom:1px solid var(--border);border-right:2px solid var(--border-strong)}
+      .tg-group-band{background:var(--surface-1);border-bottom:1px solid var(--border);position:relative;z-index:1}
+      .tg-dot{width:8px;height:8px;border-radius:50%;flex:none}
+      .tg-eng-name{font-size:12px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+      .tg-eng-count{margin-left:auto;font-size:10px;color:var(--text-muted);font-variant-numeric:tabular-nums}
+
+      .tg-task-row{position:sticky;left:0;z-index:20;background:var(--surface-0);
+        display:grid;grid-template-columns:28px 1fr 72px 40px;align-items:center;
+        border-bottom:1px solid var(--border);border-right:2px solid var(--border-strong);cursor:pointer}
+      .tg-task-row:hover{background:var(--surface-1)}
+      .tg-task-selected,.tg-task-selected:hover{background:var(--bg-accent)}
+      .tg-task-idle{cursor:default;opacity:.55}
+      .tg-task-idle:hover{background:var(--surface-0)}
+      .tg-task-name{font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;padding:0 6px}
+      .tg-task-done .tg-task-name{color:var(--text-muted);text-decoration:line-through}
+      .tg-task-pct{font-size:11px;color:var(--text-muted);text-align:right;padding-right:6px;font-variant-numeric:tabular-nums}
+      .tg-pending-dot{display:inline-block;width:5px;height:5px;border-radius:50%;background:var(--fill-accent);margin-left:5px;vertical-align:middle}
+
+      .tg-check{width:13px;height:13px;border:1px solid var(--border-strong);border-radius:3px;
+        margin:0 auto;display:flex;align-items:center;justify-content:center;color:var(--text-success)}
+      .tg-check.on{background:var(--bg-success);border-color:var(--text-success)}
+      .tg-check-live{cursor:pointer}
+
+      .tg-pill{font-size:9px;padding:1px 5px;border-radius:20px;justify-self:start;
+        white-space:nowrap;border:1px solid transparent}
+      .tg-pill-active{background:var(--bg-accent);color:var(--text-accent)}
+      .tg-pill-queued{background:transparent;color:var(--text-muted);border-color:var(--border-strong)}
+      .tg-pill-done{background:var(--bg-success);color:var(--text-success)}
+      .tg-pill-continuous{background:var(--bg-success);color:var(--text-success)}
+      .tg-pill-overdue{background:#faeeda;color:#633806;border-color:#e8a838}
+      .tg-pill-error{background:transparent;color:var(--danger);border-color:var(--danger)}
+
+      .tg-add-row{position:sticky;left:0;z-index:20;background:var(--surface-0);
+        border:none;border-bottom:1px solid var(--border);border-right:2px solid var(--border-strong);
+        font-family:inherit;font-size:11px;color:var(--text-muted);text-align:left;
+        padding:3px 6px 3px 34px;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+      .tg-add-row:hover{background:var(--surface-1);color:var(--text-accent)}
+
+      .tg-bar{position:relative;z-index:2;align-self:center;min-height:16px;border-radius:3px;display:flex;align-items:center;padding:0 6px 0 8px;font-size:9px;font-weight:500;overflow:hidden;border:1px solid transparent;cursor:default}
       .tg-bar.tg-editing{position:relative;z-index:5;flex-direction:column;align-items:flex-start;padding:6px 8px;overflow:visible;min-height:auto}
       .tg-bar.tg-draggable{cursor:grab}
       .tg-bar.tg-draggable.tg-dragging{cursor:grabbing}
+      /* Outline only in edit mode — in viewer mode a bar isn't a drag target,
+       * so hover shouldn't advertise one. */
+      .tg-bar.tg-draggable:hover{outline:1.5px solid var(--border-accent);outline-offset:1px;z-index:3}
       /* 6px grab strips, only rendered in edit mode; revealed on bar hover. */
       .tg-bar-resize{position:absolute;top:0;bottom:0;width:6px;cursor:col-resize;z-index:11;opacity:0;background:var(--text);transition:opacity 120ms ease}
       .tg-bar:hover .tg-bar-resize{opacity:.3}
       .tg-bar-resize:hover{opacity:.6}
-      .tg-bar-resize-left{left:0;border-radius:6px 0 0 6px}
-      .tg-bar-resize-right{right:0;border-radius:0 6px 6px 0}
-      .tg-bar-selected{outline:2px solid var(--text);outline-offset:1px}
+      .tg-bar-resize-left{left:0;border-radius:3px 0 0 3px}
+      .tg-bar-resize-right{right:0;border-radius:0 3px 3px 0}
+      .tg-bar-selected{outline:1.5px solid var(--border-accent);outline-offset:1px;z-index:3}
 
       /* right-side editor panel */
       .tg-side-panel{position:fixed;top:0;right:0;bottom:0;width:200px;z-index:60;display:flex;flex-direction:column;gap:2px;
@@ -2610,10 +2916,10 @@ function Style() {
       .tg-sp-close{border:none;background:none;color:var(--muted);font-size:20px;line-height:1;cursor:pointer;padding:0 2px}
       .tg-sp-label{font-size:11px;font-weight:600;color:var(--muted);margin-top:10px;margin-bottom:4px}
       .tg-sp-input{width:100%;box-sizing:border-box;padding:6px 8px;border-radius:6px;border:1px solid var(--border);
-        background:var(--bg);color:var(--text);font-size:12.5px;font-family:inherit}
+        background:var(--surface-0);color:var(--text);font-size:12.5px;font-family:inherit}
       .tg-sp-range{width:100%;margin:2px 0}
       .tg-sp-status{display:flex;flex-wrap:wrap;gap:4px}
-      .tg-sp-status button{flex:1 1 auto;padding:4px 6px;border-radius:999px;border:1px solid var(--border);background:var(--bg);
+      .tg-sp-status button{flex:1 1 auto;padding:4px 6px;border-radius:999px;border:1px solid var(--border);background:var(--surface-0);
         color:var(--muted);font-size:10.5px;font-weight:600;cursor:pointer;font-family:inherit}
       .tg-sp-status button.on{background:var(--text);color:var(--card);border-color:var(--text)}
       .tg-sp-actions{display:flex;gap:6px;margin-top:16px}
@@ -2622,23 +2928,26 @@ function Style() {
       .tg-bar-fillwrap{position:absolute;inset:0;display:flex}
       .tg-bar-fill{height:100%}
       .tg-bar-rest{height:100%;opacity:.25}
-      .tg-bar-label{position:relative;z-index:1;color:#06091a;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-      .tg-active .tg-bar-label{color:#06091a}
-      .tg-active.tg-overdue{outline:2px solid var(--warning);outline-offset:1px}
-      .tg-overdue-tag{position:relative;z-index:1;margin-left:8px;font-size:9.5px;background:var(--warning);color:#06091a;border-radius:8px;padding:1px 7px}
-      .tg-dep-warn{position:relative;z-index:1;margin-left:6px;font-size:11px;color:var(--warning)}
+      /* Thin progress strip along the bottom edge, on top of the engineer-colour
+       * fill — reads as progress even when the bar is only a few columns wide. */
+      .tg-bar-progress{position:absolute;bottom:0;left:0;height:2px;background:rgba(255,255,255,.35);border-radius:0 0 0 3px;z-index:1;pointer-events:none}
+      .tg-bar-label{position:relative;z-index:1;color:var(--on-accent);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+      .tg-active .tg-bar-label{color:var(--on-accent)}
+      .tg-active.tg-overdue{outline:1.5px solid #e8a838;outline-offset:1px}
+      .tg-overdue-tag{position:relative;z-index:1;margin-left:6px;font-size:9px;background:#e8a838;color:#4a2800;border-radius:20px;padding:0 6px}
+      .tg-dep-warn{position:relative;z-index:1;margin-left:6px;font-size:10px;color:var(--warning)}
       .tg-continuous{border:1px solid var(--border)}
       .tg-continuous .tg-bar-label{color:var(--text)}
       .tg-done{border:1px solid var(--border)}
-      .tg-done .tg-bar-label{color:var(--text)}
-      .tg-idle{background:rgba(239,68,68,.08);border:1.5px dashed var(--danger);color:var(--danger)}
+      .tg-done .tg-bar-label{color:var(--text-muted)}
+      .tg-idle{background:transparent;border:1px dashed var(--danger);color:var(--danger)}
       .tg-idle .tg-bar-label{color:var(--danger)}
-      .tg-queued{background:transparent;border:1.5px dashed var(--muted)}
-      .tg-queued .tg-bar-label{color:inherit}
+      .tg-queued{background:transparent;border:1px dashed var(--border-strong)}
+      .tg-queued .tg-bar-label{color:var(--text-secondary)}
       .tg-bar-error{background:rgba(245,158,11,.12);border:1.5px solid var(--warning);color:var(--warning);cursor:help;max-width:220px}
       .tg-bar-error .tg-bar-label{color:var(--warning)}
       .tg-bar-pending{outline:2px dashed var(--accent1);outline-offset:1px}
-      .tg-pending-badge{position:relative;z-index:1;margin-left:8px;font-size:9px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;background:var(--accent1);color:#06091a;border-radius:8px;padding:1px 6px;white-space:nowrap}
+      .tg-pending-badge{position:relative;z-index:1;margin-left:8px;font-size:9px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;background:var(--accent1);color:var(--on-accent);border-radius:8px;padding:1px 6px;white-space:nowrap}
 
       .tg-editor{position:relative;z-index:10;display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-top:6px}
       .tg-editor input,.tg-editor button{position:relative;z-index:10}
@@ -2650,7 +2959,7 @@ function Style() {
       .tg-e-percent button{width:18px;height:18px;border-radius:5px;border:1px solid var(--border);background:var(--card);color:var(--text);cursor:pointer;font-size:11px;line-height:1}
       .tg-e-status{display:flex;gap:2px}
       .tg-e-status button{width:20px;height:20px;border-radius:5px;border:1px solid var(--border);background:var(--card);color:var(--muted);cursor:pointer;font-size:10px;font-weight:700}
-      .tg-e-status button.on{background:var(--accent1);color:#06091a;border-color:var(--accent1)}
+      .tg-e-status button.on{background:var(--accent1);color:var(--on-accent);border-color:var(--accent1)}
       .tg-e-del{width:20px;height:20px;border-radius:5px;border:1px solid var(--danger);background:none;color:var(--danger);cursor:pointer;font-size:10px}
       .tg-e-detail{width:20px;height:20px;border-radius:5px;border:1px solid var(--border);background:var(--card);color:var(--accent1);cursor:pointer;font-size:11px;line-height:1}
 
@@ -2660,15 +2969,20 @@ function Style() {
       .tg-e-depends button{background:none;border:1px solid var(--border);border-radius:6px;color:var(--accent1);font-size:11px;padding:2px 8px;cursor:pointer;font-family:inherit}
       .tg-e-depends-hint{color:var(--accent1);font-style:italic}
       .tg-e-snap-warn{display:flex;align-items:center;gap:8px;flex-wrap:wrap;width:100%;font-size:11px;color:var(--warning);background:rgba(245,158,11,.1);border-radius:6px;padding:4px 8px}
-      .tg-e-snap-warn button{background:var(--warning);border:none;border-radius:6px;color:#06091a;font-size:10.5px;font-weight:600;padding:3px 9px;cursor:pointer;font-family:inherit}
+      .tg-e-snap-warn button{background:var(--warning);border:none;border-radius:6px;color:var(--on-accent);font-size:10.5px;font-weight:600;padding:3px 9px;cursor:pointer;font-family:inherit}
 
       .tg-lane-drop{position:relative;z-index:8;border-radius:6px}
       .tg-lane-drop-over{background:rgba(0,207,255,.14);outline:2px dashed var(--accent1);outline-offset:-2px}
 
-      .bl-section{margin-top:36px}
-      .bl-head-row{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:8px}
-      .bl-title{font-size:16px;font-weight:800;margin:0;letter-spacing:-.01em}
-      .bl-count{font-size:11.5px;color:var(--muted);white-space:nowrap}
+      /* Bottom dock: fixed share of the shell, with its own inner scrollport so
+   * the board above keeps the rest of the height. */
+      .bl-section{flex:0 0 auto;display:flex;flex-direction:column;max-height:38vh;min-height:0;
+        border-top:1px solid var(--border-strong);background:var(--surface-1);padding:6px 12px 0}
+      .bl-section.bl-collapsed{max-height:none}
+      .bl-head-row{flex:0 0 auto;display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:6px}
+      .bl-collapse-btn{background:none;border:none;color:var(--text-muted);font-size:11px;cursor:pointer;padding:0 2px;font-family:inherit;line-height:1}
+      .bl-title{font-size:12px;font-weight:600;margin:0;letter-spacing:-.01em}
+      .bl-count{font-size:10px;color:var(--text-muted);white-space:nowrap}
       .bl-filters{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-left:auto}
       .bl-filter-search{font-family:inherit;font-size:11.5px;border-radius:6px;border:1px solid var(--border);background:var(--card);color:var(--text);padding:4px 8px;width:140px}
       .bl-filter-priorities{display:flex;gap:4px}
@@ -2685,9 +2999,10 @@ function Style() {
       .bl-url-btn{background:none;border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:11px;padding:2px 8px;cursor:pointer;font-family:inherit}
       .bl-last-sync{white-space:nowrap}
 
-      .bl-table-scroll{overflow-x:auto;max-height:520px;border:1px solid var(--border);border-radius:10px}
-      .bl-table{width:100%;border-collapse:collapse;font-size:12.5px;min-width:820px}
-      .bl-table thead th{position:sticky;top:0;background:var(--card);z-index:2;text-align:left;font-size:10px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);padding:8px 10px;border-bottom:1px solid var(--border);white-space:nowrap}
+      .bl-table-scroll{flex:1 1 auto;min-height:0;overflow:auto;border:1px solid var(--border);
+        border-radius:var(--radius) var(--radius) 0 0;background:var(--surface-0)}
+      .bl-table{width:100%;border-collapse:collapse;font-size:11px;min-width:820px}
+      .bl-table thead th{position:sticky;top:0;background:var(--surface-1);z-index:2;text-align:left;font-size:10px;font-weight:500;text-transform:uppercase;letter-spacing:.06em;color:var(--text-muted);padding:5px 10px;border-bottom:1px solid var(--border);white-space:nowrap}
       .bl-table td{padding:8px 10px;border-bottom:1px solid var(--border);vertical-align:top}
       .bl-table tbody tr:last-child td{border-bottom:none}
       .bl-th-grip,.bl-td-grip{width:20px;padding-right:0}

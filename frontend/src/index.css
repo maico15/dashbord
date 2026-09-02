@@ -17,6 +17,27 @@
   --success-bg: rgba(0,160,96,0.1);
   --spinner-track: rgba(0,0,0,0.12);
   --row-hover: rgba(0,0,0,0.025);
+
+  /* Sheet-style surface//text scale — added for the TeamGantt board, but
+   * intentionally generic so other dense tabular views can adopt it. */
+  --surface-0: #ffffff;
+  --surface-1: #f3f6ff;
+  --border-strong: #b7c2dc;
+  --bg-accent: rgba(0,153,204,0.08);
+  --border-accent: rgba(0,153,204,0.25);
+  --text-accent: #0099cc;
+  --fill-accent: #0099cc;
+  --on-accent: #ffffff;
+  --text-secondary: #3a4568;
+  --text-muted: #5a6a8a;
+  --bg-success: rgba(0,160,96,0.10);
+  --text-success: #00a060;
+  --radius: 6px;
+
+  /* --bg was referenced by TeamGantt/MonthlyReview/TrendsTab but never
+   * defined, so those sticky columns and inputs rendered transparent.
+   * Aliased rather than find-replaced so all three pages are fixed at once. */
+  --bg: var(--surface-0);
 }
 
 /* ── Dark theme override ─────────────────────────────── */
@@ -38,6 +59,21 @@
   --success-bg: rgba(0,255,157,0.12);
   --spinner-track: rgba(255,255,255,0.2);
   --row-hover: rgba(255,255,255,0.02);
+
+  --surface-0: #0d1117;
+  --surface-1: #111c38;
+  --border-strong: #243063;
+  --bg-accent: rgba(0,207,255,0.08);
+  --border-accent: rgba(0,207,255,0.20);
+  --text-accent: #00cfff;
+  --fill-accent: #00cfff;
+  --on-accent: #06091a;
+  --text-secondary: #a7b3cc;
+  --text-muted: #6b7a99;
+  --bg-success: rgba(0,255,157,0.12);
+  --text-success: #00ff9d;
+  --radius: 6px;
+  --bg: var(--surface-0);
 }
 
 /* ── Smooth theme transitions ────────────────────────── */
