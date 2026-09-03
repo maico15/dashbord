@@ -3808,11 +3808,18 @@ def _ingest_telemetry(conn, payload: TelemetryPayload):
         raise HTTPException(401, "Invalid telemetry secret")
     accepted = 0
     duplicate = 0
+    daily_failed = 0
+    skipped = 0
     for ev in payload.events:
         # Parse date from timestamp (YYYY-MM-DD)
         try:
             date = ev.timestamp[:10]
         except Exception:
+            # Counted, not silently dropped: the collector reconciles
+            # accepted + duplicate + skipped against the batch it sent and
+            # re-buffers anything unaccounted for, so an event that vanished
+            # here without a tally would be retried forever.
+            skipped += 1
             continue
         # INSERT OR IGNORE — event_id is the dedup key
         c.execute(
@@ -3834,28 +3841,54 @@ def _ingest_telemetry(conn, payload: TelemetryPayload):
             duplicate += 1
             continue
         accepted += 1
-        # Upsert daily aggregate — increment on conflict
+        # Upsert daily aggregate — increment on conflict.
+        #
+        # ai_usage_daily is a derived rollup; ai_events is the source of truth and
+        # can be rebuilt from it (POST /api/telemetry/reprocess). So a failure here
+        # must never cost us the ai_events row we just wrote. It used to: the
+        # handler called conn.rollback(), discarding every ai_events INSERT made
+        # earlier in this request, and still returned 200 with the pre-rollback
+        # `accepted` count — so the collector marked those events seen and deleted
+        # them locally. Silent, permanent loss of every event in the batch.
+        #
+        # The SAVEPOINT confines the blast radius to this one statement: on failure
+        # the outer transaction is still clean and still holds the ai_events rows,
+        # which are committed below.
+        #
+        # The RHS columns must be table-qualified. Inside ON CONFLICT DO UPDATE
+        # Postgres has both the target table and `excluded` in scope, so a bare
+        # `tokens_input` is "column reference ... is ambiguous" — this upsert failed
+        # on every single event after the SQLite→Postgres cutover. SQLite accepts
+        # the qualified form too, so one statement works on both.
+        sp = conn.savepoint()
         try:
             c.execute(
                 "INSERT INTO ai_usage_daily "
                 "(engineer_id, date, tokens_input, tokens_output, sessions_count) "
                 "VALUES (?, ?, ?, ?, 1) "
                 "ON CONFLICT(engineer_id, date) DO UPDATE SET "
-                "tokens_input = tokens_input + excluded.tokens_input, "
-                "tokens_output = tokens_output + excluded.tokens_output, "
-                "sessions_count = sessions_count + 1",
+                "tokens_input   = ai_usage_daily.tokens_input   + excluded.tokens_input, "
+                "tokens_output  = ai_usage_daily.tokens_output  + excluded.tokens_output, "
+                "sessions_count = ai_usage_daily.sessions_count + 1",
                 (payload.engineer_id, date, ev.tokens_input, ev.tokens_output),
             )
+            sp.commit()
         except Exception as ex:
-            # A failed statement puts the whole Postgres transaction in the
-            # aborted state: without this rollback every later statement on this
-            # connection fails with "current transaction is aborted", the error
-            # escapes the endpoint, conn.close() below is never reached, and the
-            # connection leaks from the pool still holding its locks.
-            conn.rollback()
-            print(f"[telemetry] ai_usage_daily upsert failed: {ex}")
+            sp.rollback()
+            daily_failed += 1
+            # Full exception type + text: the bare `{ex}` this used to log made an
+            # AmbiguousColumn error look like an unremarkable blip in the logs.
+            print(
+                f"[telemetry] ai_usage_daily upsert failed "
+                f"eng={payload.engineer_id} date={date}: {type(ex).__name__}: {ex}"
+            )
     conn.commit()
-    return {"accepted": accepted, "duplicate": duplicate}
+    return {
+        "accepted": accepted,
+        "duplicate": duplicate,
+        "daily_failed": daily_failed,
+        "skipped": skipped,
+    }
 
 
 class ToolSessionRequest(BaseModel):
@@ -3893,8 +3926,8 @@ def _receive_tool_session(conn, data: ToolSessionRequest):
         INSERT INTO ai_tool_sessions (engineer_id, tool, date, duration_sec, session_count)
         VALUES (?, ?, ?, ?, 1)
         ON CONFLICT(engineer_id, tool, date) DO UPDATE SET
-            duration_sec  = duration_sec  + excluded.duration_sec,
-            session_count = session_count + 1
+            duration_sec  = ai_tool_sessions.duration_sec  + excluded.duration_sec,
+            session_count = ai_tool_sessions.session_count + 1
     """, (int(data.engineer_id), data.tool.lower().strip(), data.date, data.duration_sec))
     conn.commit()
     return {"ok": True}
