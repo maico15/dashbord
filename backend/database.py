@@ -186,8 +186,23 @@ class Cursor:
                 self.lastrowid = rows[0][0] if rows else None
                 self.rowcount = len(rows)
                 return self
-            except Exception:
-                sp.rollback()  # fall through to a plain execute on a clean transaction
+            except Exception as ex:
+                sp.rollback()
+                # Only ONE failure mode justifies retrying this statement without
+                # RETURNING: the table genuinely has no `id` column (a stale
+                # _ID_COLUMN_CACHE entry, or an information_schema hit on a
+                # same-named table in another schema). Every other failure — a real
+                # constraint violation, a type mismatch, an ambiguous column
+                # reference — belongs to the caller and must propagate.
+                #
+                # Falling through unconditionally re-ran the *same* SQL with no
+                # savepoint around it, so a genuine error aborted the caller's
+                # outer transaction and every later statement on that connection
+                # failed with "current transaction is aborted" — turning one bad
+                # row into a whole-request failure.
+                if 'column "id" does not exist' not in str(ex):
+                    raise
+                _ID_COLUMN_CACHE[m.group(1)] = False  # don't pay for this probe again
 
         self._result = self._conn.execute(text(sql), named)
         self.rowcount = self._result.rowcount
@@ -285,6 +300,22 @@ class DBWrapper:
         except Exception as ex:
             self.rollback()
             print(f"[init] {label}: skipped/rolled back: {ex}")
+
+    def savepoint(self):
+        """A nested transaction (SAVEPOINT) for isolating one statement that is
+        allowed to fail. On failure roll back *only* the savepoint: the outer
+        transaction stays usable, so work already done in this request survives
+        instead of being discarded by a blanket conn.rollback(). Supported by
+        both PostgreSQL and SQLite.
+
+            sp = conn.savepoint()
+            try:
+                c.execute(...)   # risky
+                sp.commit()
+            except Exception:
+                sp.rollback()    # everything before this survives
+        """
+        return self._conn.begin_nested()
 
     def commit(self):
         self._conn.commit()

@@ -1,13 +1,14 @@
 """
 Claude Code telemetry collector.
 Reads local Claude Code session files and ships token-usage metadata to the dashboard.
-Never reads or transmits prompt text, response content, or code — only numeric token
+Never reads or transmits prompt text, response content, or code - only numeric token
 counts, model name, session ID, timestamp, and repo name.
 
 Usage:
   python cc_telemetry.py          # run once and exit
   python cc_telemetry.py --once   # same as above (explicit)
   python cc_telemetry.py --daemon # poll every 30 seconds indefinitely
+  python cc_telemetry.py --reset  # forget local dedup/retry state, then run once
 """
 
 import argparse
@@ -25,6 +26,18 @@ except ImportError:
     print("ERROR: 'requests' not installed. Run: pip install requests")
     sys.exit(1)
 
+# On Windows, stdout defaults to the console code page (cp1251/cp1252/cp866,
+# depending on locale), none of which can encode characters like U+2192. A print
+# containing one raises UnicodeEncodeError, which the broad `except Exception` in
+# the send path then caught and reported as a *send* failure -- so a machine whose
+# only fault was its console locale buffered every event and shipped nothing.
+# Messages below are ASCII-only; this makes any future slip harmless too.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(errors="replace")   # Python 3.7+
+    except Exception:
+        pass
+
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
@@ -41,6 +54,15 @@ SEEN_PATH       = CLAUDE_DIR / ".telemetry_seen"
 SESSIONS_GLOB   = "projects/**/*.jsonl"
 
 MAX_SEEN        = 10_000
+# The retry buffer is now also where a *partially* accounted batch is parked, so
+# it can grow across consecutive bad responses. Cap it drop-oldest, the way the
+# tray agent does, rather than letting a long server-side outage fill the disk.
+MAX_BUFFER_EVENTS = 5_000
+# Events per POST. `--reset` replays every session file on disk, which is tens of
+# thousands of events on a long-lived machine -- one request that size blows past
+# REQUEST_TIMEOUT and the whole replay fails. Re-sending is idempotent (the server
+# dedups on event_id), so chunking costs nothing.
+MAX_BATCH       = 500
 POLL_INTERVAL   = 30   # seconds
 REQUEST_TIMEOUT = 10   # seconds
 
@@ -108,16 +130,39 @@ def load_buffer() -> list:
 
 def save_buffer(events: list) -> None:
     BUFFER_PATH.parent.mkdir(parents=True, exist_ok=True)
+    dropped = len(events) - MAX_BUFFER_EVENTS
+    if dropped > 0:
+        # Drop oldest: the newest events are the ones still worth reconciling.
+        print(f"[telemetry] buffer over {MAX_BUFFER_EVENTS} - dropping {dropped} oldest event(s)")
+        events = events[-MAX_BUFFER_EVENTS:]
     with open(BUFFER_PATH, "w") as f:
         for ev in events:
             f.write(json.dumps(ev) + "\n")
 
 
 def append_buffer(events: list) -> None:
-    BUFFER_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with open(BUFFER_PATH, "a") as f:
-        for ev in events:
-            f.write(json.dumps(ev) + "\n")
+    # Read-modify-write rather than a bare append, so the cap is actually enforced.
+    save_buffer(load_buffer() + list(events))
+
+
+def reset_state() -> None:
+    """Delete the local dedup and retry state.
+
+    Needed after a server-side failure that returned 200 while storing nothing:
+    those events are recorded in .telemetry_seen, so the collector would never
+    offer them again and the data would be lost locally too. Clearing the file
+    makes the next run re-read every session file from scratch. Replaying is
+    safe -- the server dedups on event_id and reports repeats as `duplicate`.
+    """
+    for path in (SEEN_PATH, BUFFER_PATH):
+        try:
+            if path.exists():
+                path.unlink()
+                print(f"[telemetry] reset: removed {path}")
+            else:
+                print(f"[telemetry] reset: {path} not present, nothing to remove")
+        except Exception as e:
+            print(f"[telemetry] reset: could not remove {path}: {e}")
 
 # ---------------------------------------------------------------------------
 # Repo detection — derived from the cwd field embedded in each record
@@ -144,7 +189,7 @@ def make_event_id(session_id: str, timestamp: str, tokens_in: int, tokens_out: i
 def parse_session_file(path: pathlib.Path, seen: set) -> list:
     """
     Parse a Claude Code agent JSONL file.
-    Only processes records where type=="assistant" — those are the only ones
+    Only processes records where type=="assistant" - those are the only ones
     that carry message.usage token counts.
     Returns a list of telemetry event dicts (metadata only, no content).
     """
@@ -233,12 +278,17 @@ def collect_events(seen: set) -> list:
 # Send events to backend
 # ---------------------------------------------------------------------------
 
-def send_events(events: list, cfg: dict) -> bool:
+def _send_batch(events: list, cfg: dict) -> bool:
+    """POST one batch. Returns True only if the server both answered 200 *and*
+    accounted for every event in the batch.
+
+    A 200 is not on its own proof of storage. The server reports what it did with
+    the batch -- `accepted` (stored), `duplicate` (already had it) and `skipped`
+    (rejected outright) -- and those must add up to what we sent. When they do
+    not, the difference was dropped somewhere on the server, so we treat the
+    batch as unsent and keep it buffered. Retrying is harmless: the server dedups
+    on event_id, so anything that did land comes back as `duplicate`.
     """
-    Returns True if the request succeeded, False on network/server error.
-    """
-    if not events:
-        return True
     endpoint = cfg["endpoint"].rstrip("/") + "/api/telemetry/events"
     payload = {
         "engineer_id": cfg["engineer_id"],
@@ -249,27 +299,66 @@ def send_events(events: list, cfg: dict) -> bool:
         resp = requests.post(endpoint, json=payload, timeout=REQUEST_TIMEOUT)
         if resp.status_code == 200:
             result = resp.json()
+            accepted     = result.get("accepted")
+            duplicate    = result.get("duplicate")
+            skipped      = result.get("skipped", 0)
+            daily_failed = result.get("daily_failed", 0)
             print(
-                f"[telemetry] sent {len(events)} event(s) → "
-                f"accepted={result.get('accepted', '?')} "
-                f"duplicate={result.get('duplicate', '?')}"
+                f"[telemetry] sent {len(events)} event(s) -> "
+                f"accepted={accepted if accepted is not None else '?'} "
+                f"duplicate={duplicate if duplicate is not None else '?'} "
+                f"skipped={skipped} daily_failed={daily_failed}"
             )
+            if daily_failed:
+                # The ai_events rows are stored (they are the source of truth), but
+                # the daily rollup is behind and needs a server-side reprocess.
+                print(
+                    f"[telemetry] WARNING: server failed {daily_failed} daily-aggregate "
+                    "upsert(s) -- events are stored, the rollup needs reprocessing"
+                )
+            if not isinstance(accepted, int) or not isinstance(duplicate, int):
+                # Older backend that does not report counts -- nothing to verify.
+                return True
+            if not isinstance(skipped, int):
+                skipped = 0
+            accounted = accepted + duplicate + skipped
+            if accounted < len(events):
+                print(
+                    f"[telemetry] PARTIAL FAILURE: server accounted for only "
+                    f"{accounted}/{len(events)} event(s) -- keeping the batch buffered"
+                )
+                return False
             return True
         elif resp.status_code == 401:
-            print(f"[telemetry] ERROR 401: wrong secret — check {CONFIG_PATH}")
+            print(f"[telemetry] ERROR 401: wrong secret - check {CONFIG_PATH}")
             return False
         else:
             print(f"[telemetry] server error {resp.status_code}: {resp.text[:200]}")
             return False
     except requests.exceptions.ConnectionError:
-        print("[telemetry] connection failed — buffering events")
+        print("[telemetry] connection failed - buffering events")
         return False
     except requests.exceptions.Timeout:
-        print("[telemetry] request timed out — buffering events")
+        print("[telemetry] request timed out - buffering events")
         return False
     except Exception as e:
         print(f"[telemetry] unexpected error: {e}")
         return False
+
+
+def send_events(events: list, cfg: dict) -> bool:
+    """Send every event in MAX_BATCH-sized chunks.
+
+    Returns True only if every chunk was fully accounted for. On the first bad
+    chunk we stop: the whole set stays buffered and is retried next cycle, where
+    the chunks that did land are reported back as `duplicate`.
+    """
+    if not events:
+        return True
+    for i in range(0, len(events), MAX_BATCH):
+        if not _send_batch(events[i:i + MAX_BATCH], cfg):
+            return False
+    return True
 
 # ---------------------------------------------------------------------------
 # One collection + send cycle
@@ -324,13 +413,25 @@ def main():
         "--once", action="store_true",
         help="Run one collection cycle and exit (default behaviour)",
     )
+    parser.add_argument(
+        "--reset", action="store_true",
+        help="Delete .telemetry_seen and telemetry_buffer.jsonl, then run once. "
+             "Use this to re-send events the server acknowledged but never stored.",
+    )
     args = parser.parse_args()
 
     cfg = load_config()
     print(f"[telemetry] engineer_id={cfg['engineer_id']} endpoint={cfg['endpoint']}")
 
+    if args.reset:
+        # Reset, then fall through to the normal once/daemon flow: `--reset` alone
+        # runs a single cycle (the default), and `--reset --daemon` replays
+        # everything and then keeps polling, rather than silently ignoring
+        # --daemon.
+        reset_state()
+
     if args.daemon:
-        print(f"[telemetry] daemon mode — polling every {POLL_INTERVAL}s")
+        print(f"[telemetry] daemon mode - polling every {POLL_INTERVAL}s")
         while True:
             try:
                 run_once(cfg)
@@ -354,6 +455,11 @@ if __name__ == "__main__":
 #      "secret": "TELEMETRY_SECRET_FROM_ENV"
 #    }
 # 3. Test once: python cc_telemetry.py --once
+# 3b. Re-send everything (after a server-side data-loss incident):
+#     python cc_telemetry.py --reset
+#     Clears ~/.claude/.telemetry_seen and ~/.claude/telemetry_buffer.jsonl,
+#     then re-reads every session file. Safe to repeat -- the server dedups
+#     on event_id, so replayed events come back as `duplicate`.
 # 4. Add to crontab (runs every minute):
 #    * * * * * /usr/bin/python3 /path/to/cc_telemetry.py >> ~/.claude/telemetry.log 2>&1
 # 5. Or run as daemon:

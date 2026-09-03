@@ -162,6 +162,36 @@ applied; the two files are **separate copies** and drift is a known maintenance 
 | `.telemetry_drops.json` | running count of events dropped from a full buffer |
 | `telemetry_tray.log` | rotating, 2 MB × 3 backups |
 
+**Re-sending after acknowledged-but-unstored events** (`cc_telemetry.py --reset`):
+
+```bash
+python cc_telemetry.py --reset   # rm .telemetry_seen + telemetry_buffer.jsonl, then run once
+```
+
+`.telemetry_seen` is the collector's only record of what it has already shipped,
+so an event the server acknowledged with a 200 but never stored is unrecoverable
+without clearing that file. `--reset` does exactly that and then replays every
+session file. It is safe to repeat: `ai_events.event_id` is unique, so replays
+come back counted as `duplicate`. Events are POSTed in `MAX_BATCH` (500) chunks
+so a full replay cannot exceed `REQUEST_TIMEOUT`.
+
+`POST /api/telemetry/events` answers with
+`{"accepted", "duplicate", "daily_failed", "skipped"}`. The collector requires
+`accepted + duplicate + skipped == len(events)` and re-buffers the batch when it
+does not add up — a 200 alone is not treated as proof of storage.
+`daily_failed > 0` means the `ai_events` rows landed but the `ai_usage_daily`
+rollup is behind; rebuild it with `POST /api/telemetry/reprocess`.
+
+> **Upserts must table-qualify the right-hand side.** Inside
+> `ON CONFLICT ... DO UPDATE SET`, PostgreSQL has both the target table and
+> `excluded` in scope, so `tokens_input = tokens_input + excluded.tokens_input`
+> fails with `column reference "tokens_input" is ambiguous`. Write
+> `tokens_input = ai_usage_daily.tokens_input + excluded.tokens_input`. SQLite
+> accepts the qualified form too. This bug silently dropped **all** telemetry
+> between the Postgres cutover and 2026-09-03 (`ai_events` and
+> `ai_tool_sessions`), because the handler answered 200 after rolling the rows
+> back. Grep for `DO UPDATE SET` before adding a new counter upsert.
+
 **Heartbeat payload** (every 10 min, `POST /api/telemetry/heartbeat`):
 
 ```json
