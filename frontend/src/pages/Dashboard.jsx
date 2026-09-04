@@ -368,6 +368,9 @@ export default function Dashboard() {
           <Link to="/releases" className="dashboard-footer-link">
             ⚡ CC Telemetry — Release History
           </Link>
+          <Link to="/review/august-2026" className="dashboard-footer-link">
+            📊 August 2026 Review
+          </Link>
           <Link to="/review/june-2026" className="dashboard-footer-link">
             📊 June 2026 Review
           </Link>
