@@ -5,6 +5,7 @@ import EngineerProfile from './pages/EngineerProfile'
 import Reports from './pages/Reports'
 import Releases from './pages/Releases'
 import MonthlyReview from './pages/MonthlyReview'
+import MonthlyReviewAugust from './pages/MonthlyReviewAugust'
 import MonthlyReviewLive from './pages/MonthlyReviewLive'
 import TeamGantt from './pages/TeamGantt'
 import TeamPlan from './pages/TeamPlan'
@@ -20,6 +21,7 @@ export default function App() {
       <Route path="/engineer/:id" element={<EngineerProfile />} />
       <Route path="/reports" element={<Reports />} />
       <Route path="/releases" element={<Releases />} />
+      <Route path="/review/august-2026" element={<MonthlyReviewAugust />} />
       <Route path="/review/june-2026" element={<MonthlyReview />} />
       <Route path="/monthly-review" element={<MonthlyReviewLive />} />
       <Route path="/team-gantt" element={<TeamGantt />} />

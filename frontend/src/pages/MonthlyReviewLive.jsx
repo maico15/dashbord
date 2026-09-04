@@ -15,6 +15,7 @@ const T = {
   en: {
     eyebrow: "Monthly Review — Live",
     archive: "June 2026 — curated review",
+    archiveAug: "August 2026 — curated review",
     monthInProgress: (d) => `Month in progress — data through ${d} · numbers will grow`,
     metricsSection: (p, c) => `01 · Key metrics — ${p} vs ${c}`,
     engineersSection: (c) => `02 · Key delivery by engineer — ${c}`,
@@ -40,6 +41,7 @@ const T = {
   ru: {
     eyebrow: "Месячный обзор — Live",
     archive: "Июнь 2026 — куратор. обзор",
+    archiveAug: "Август 2026 — куратор. обзор",
     monthInProgress: (d) => `Месяц ещё идёт — данные по ${d} · цифры будут расти`,
     metricsSection: (p, c) => `01 · Ключевые метрики — ${p} vs ${c}`,
     engineersSection: (c) => `02 · Что сделано по инженерам — ${c}`,
@@ -507,6 +509,9 @@ export default function MonthlyReviewLive() {
             <span className="mr-arrow">→</span>
             <span className="mr-cur">{MONTHS[lang][sel.m]} {sel.y}</span>
           </h1>
+          <Link to="/review/august-2026" className="mr-archive">
+            🗂 {t.archiveAug}
+          </Link>
           <Link to="/review/june-2026" className="mr-archive">
             🗂 {t.archive}
           </Link>
@@ -662,6 +667,7 @@ function Style() {
       .mr-title .mr-arrow{color:var(--muted);margin:0 10px;font-weight:400}
       .mr-title .mr-cur{color:var(--success)}
       .mr-archive{display:inline-block;margin-top:12px;font-size:12px;color:var(--muted);text-decoration:none;border:1px solid var(--border);border-radius:16px;padding:5px 12px}
+      .mr-archive+.mr-archive{margin-left:8px}
       .mr-archive:hover{color:var(--accent1);border-color:var(--accent1)}
       .mr-controls{display:flex;align-items:center;gap:8px}
       .mr-controls select{background:var(--card);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:8px 12px;font-family:inherit;font-size:13px}
