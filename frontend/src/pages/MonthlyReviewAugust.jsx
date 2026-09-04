@@ -3,7 +3,7 @@ import { Link } from 'react-router-dom'
 import { useTheme, toggleTheme } from '../hooks/useTheme'
 import { api } from '../api/client'
 import {
-  PERIOD, ASSUMPTIONS, SUMMARY, SUMMARY_TONES, ENGINEERS,
+  PERIOD, LABELS, ASSUMPTIONS, SUMMARY, SUMMARY_TONES, ENGINEERS,
   ENGINEER_IDS, SCORE_WEEK, SCORE_YEAR,
 } from '../data/august2026'
 
@@ -34,10 +34,7 @@ const T = {
     sectionMethod: 'How these numbers were derived',
     sectionEngineers: 'Work by Engineer — August 2026',
     method: 'Method',
-    goal: 'Goal',
-    effect: 'Result',
     score: 'Score',
-    tasks: 'tasks',
     footer: 'Engineering Dashboard · Sources: EOD/EOW reports, #devs-and-product, #devs-apollo',
     nextReview: 'Next review: October 1, 2026 →',
     conf: {
@@ -62,10 +59,7 @@ const T = {
     sectionMethod: 'Как получены эти цифры',
     sectionEngineers: 'Работа по инженерам — Август 2026',
     method: 'Методика',
-    goal: 'Задача',
-    effect: 'Результат',
     score: 'Оценка',
-    tasks: 'задач',
     footer: 'Engineering Dashboard · Источники: EOD/EOW репорты, #devs-and-product, #devs-apollo',
     nextReview: 'Следующий обзор: 1 октября 2026 →',
     conf: {
@@ -154,23 +148,34 @@ function ScoreInput({ engId, color, scores, saveScore, savedId, failedId, t }) {
 }
 
 // ── Task row ──────────────────────────────────────────────────────────────────
+/** Shared style for the small uppercase TASK / GOAL / BENEFIT / AMOUNT label,
+ *  so the four rows of a card line up as one block. */
+const ROW_LABEL = {
+  fontWeight: 600, letterSpacing: '.04em', textTransform: 'uppercase',
+  fontSize: 10, color: 'var(--muted)',
+}
+
+function Line({ label, text, muted }) {
+  return (
+    <div style={{ fontSize: muted ? 12 : 13, color: muted ? 'var(--muted)' : 'var(--text)', lineHeight: 1.5, marginBottom: 5 }}>
+      <span style={ROW_LABEL}>{label}</span>{'  '}{text}
+    </div>
+  )
+}
+
 function TaskRow({ task, lang, t, last }) {
   const color = confColor(task.value.confidence)
+  const L = LABELS[lang]
   return (
     <div style={{ padding: '12px 0', borderBottom: last ? 'none' : '1px solid var(--border)' }}>
-      <div style={{ fontSize: 13, fontWeight: 600, lineHeight: 1.4, marginBottom: 6 }}>{task.title[lang]}</div>
+      <div style={{ fontSize: 13, fontWeight: 600, lineHeight: 1.4, marginBottom: 7 }}>{task.title[lang]}</div>
 
-      <div style={{ fontSize: 12, color: 'var(--muted)', lineHeight: 1.5, marginBottom: 5 }}>
-        <span style={{ fontWeight: 600, letterSpacing: '.04em', textTransform: 'uppercase', fontSize: 10 }}>{t.goal}</span>
-        {'  '}{task.goal[lang]}
-      </div>
+      <Line label={L.task}    text={task.task[lang]}    muted />
+      <Line label={L.goal}    text={task.goal[lang]}    muted />
+      <Line label={L.benefit} text={task.benefit[lang]} />
 
-      <div style={{ fontSize: 13, color: 'var(--text)', lineHeight: 1.5, marginBottom: 8 }}>
-        <span style={{ fontWeight: 600, letterSpacing: '.04em', textTransform: 'uppercase', fontSize: 10, color: 'var(--muted)' }}>{t.effect}</span>
-        {'  '}{task.effect[lang]}
-      </div>
-
-      <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap' }}>
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap', marginTop: 8 }}>
+        <span style={ROW_LABEL}>{L.amount}</span>
         <span style={{ fontSize: 15, fontWeight: 700, letterSpacing: '-.01em', color }}>{task.value.amount}</span>
         <ConfidenceBadge level={task.value.confidence} t={t} />
         <span style={{ fontSize: 11, color: 'var(--muted)', lineHeight: 1.5, flex: 1, minWidth: 160 }}>{task.value.note[lang]}</span>
@@ -301,7 +306,7 @@ export default function MonthlyReviewAugust() {
 
         {/* ── ENGINEERS ── */}
         <div style={{ marginBottom: 52 }}>
-          <SectionLabel>{t.sectionEngineers} · {totalTasks} {t.tasks}</SectionLabel>
+          <SectionLabel>{t.sectionEngineers} · {totalTasks} {LABELS[lang].tasks}</SectionLabel>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 12, alignItems: 'start' }}>
             {ENGINEERS.map(eng => (
               <div key={eng.id} style={{ background: 'var(--card)', border: '1px solid var(--border)', borderRadius: 12, padding: '20px 24px' }}>

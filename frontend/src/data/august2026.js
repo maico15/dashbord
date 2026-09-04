@@ -1,35 +1,34 @@
-// Monthly review — August 2026 (Aug 3 – Aug 31)
-// Source: team EOD/EOW reports in #devs-and-product, #devs-apollo, DMs. Numbers are taken
-// verbatim from reports. confidence: 'confirmed' = figure stated in a report or by a third
-// party; 'estimate' = derived with the stated assumption; 'needs_data' = driver measured,
-// $ requires a business input (avg ticket, ARPU, cost per call).
+// Monthly review — August 2026 (Aug 3 – Aug 31). Business-language version for the founder.
+// Fields per task: title · task (business problem) · goal (what we set out to achieve) ·
+// benefit (what changed for the business, measured) · value { amount, note, confidence }.
+// confidence: 'confirmed' — stated in a report or by a third party; 'estimate' — derived with a
+// stated assumption; 'needs_data' — result measured, $ needs a business input; 'none' — not a cash item.
 
 export const PERIOD = { month: 8, year: 2026, label: { en: 'August 2026', ru: 'Август 2026' } };
 
+export const LABELS = {
+  en: { task: 'Task', goal: 'Goal', benefit: 'Benefit', amount: 'Amount', tasks: 'tasks' },
+  ru: { task: 'Задача', goal: 'Цель', benefit: 'Выгода', amount: 'Сумма', tasks: 'задач' },
+};
+
 export const ASSUMPTIONS = {
-  en: 'Estimates use $40/h for analyst and manager time and $50/h for engineer time. Average ticket, Passport ARPU and AI cost per call are not in the reports — where value depends on them, the driver is shown and the input is named.',
-  ru: 'Оценки используют $40/ч для времени аналитика и менеджера и $50/ч для инженера. Средний чек, ARPU Passport и стоимость AI-обработки звонка в репортах отсутствуют — где выгода зависит от них, показан драйвер и названо недостающее число.',
+  en: 'Estimates use $40 per hour for manager and analyst time. Where a figure needs a business input we do not have — average ticket, Passport revenue per member, cost of processing one call — the measured result is shown and the missing input is named.',
+  ru: 'Оценки считают час менеджера или аналитика по $40. Где для суммы нужны данные бизнеса, которых у нас нет — средний чек, доход с одного участника Passport, стоимость обработки одного звонка — показан измеренный результат и названо недостающее число.',
 };
 
 export const SUMMARY = {
   en: [
-    { label: 'Confirmed savings', value: '$157K', sub: 'ezMCP pilot avoided $150K + Workspace $6.85K/yr' },
-    { label: 'Leaks stopped', value: '3', sub: 'reward minted ×3, double charge path, brand-less payment SMS' },
-    { label: 'Awaiting business input for $', value: '3', sub: 'average ticket · Passport ARPU · AI cost per call' },
+    { label: 'Confirmed savings', value: '$157K', sub: 'unneeded pilot $150K + unused licences $6.85K a year' },
+    { label: 'Money leaks stopped', value: '3', sub: 'triple bonus payout, double charge risk, payment texts without our brand' },
+    { label: 'Results awaiting a business figure', value: '4', sub: 'average ticket · revenue per member · cost per call · call volume' },
   ],
   ru: [
-    { label: 'Подтверждённая экономия', value: '$157K', sub: 'ezMCP pilot $150K + Workspace $6.85K/год' },
-    { label: 'Утечек остановлено', value: '3', sub: 'rewards ×3, двойное списание, SMS без бренда' },
-    { label: 'Нужны данные для $', value: '3', sub: 'средний чек · ARPU Passport · $/звонок' },
+    { label: 'Подтверждённая экономия', value: '$157K', sub: 'ненужный пилот $150K + неиспользуемые лицензии $6.85K в год' },
+    { label: 'Остановлено утечек денег', value: '3', sub: 'тройная выплата бонуса, риск двойного списания, платёжные SMS без нашего бренда' },
+    { label: 'Результатов ждут цифру от бизнеса', value: '4', sub: 'средний чек · доход с участника · стоимость звонка · объём звонков' },
   ],
 };
 
-// One tone per SUMMARY card, in card order, on the same scale as the task
-// confidence pills. Kept beside SUMMARY (not in the page, and not per-language)
-// so adding or dropping a card cannot silently shift every card's colour.
-export const SUMMARY_TONES = ['confirmed', 'confirmed', 'needs_data'];
-
-// confidence: 'confirmed' | 'estimate' | 'needs_data' | 'none'
 export const ENGINEERS = [
   {
     id: 'pogrebnyak', initials: 'AP', color: '#ff6b6b',
@@ -37,22 +36,25 @@ export const ENGINEERS = [
     role: { en: 'Full-stack', ru: 'Full-stack' },
     tasks: [
       {
-        title: { en: 'Passport 2 — notifications and data accuracy', ru: 'Passport 2 — уведомления и точность данных' },
-        goal: { en: 'Members were not receiving SMS confirmations and 133 of 202 saw the wrong tier — trust and renewals at risk.', ru: 'Участники не получали SMS-подтверждения, 133 из 202 видели неверный тариф — под риском доверие и продления.' },
-        effect: { en: 'Root cause of zero SMS: 3,895 profiles had sms_urgent_only but no phone captured from Calendly — fixed. Tier display fixed. Document recognition 17% → 65%. 44 zero-home members restored. Expert sessions admin table shipped.', ru: 'Root cause нулевых SMS: 3,895 профилей с sms_urgent_only, номер не захватывался из Calendly — исправлено. Тир исправлен. Распознавание документов 17% → 65%. 44 участника восстановлены.' },
-        value: { amount: '3,895', note: { en: 'members regained notifications. $ = retention × ARPU', ru: 'клиентов вернули канал уведомлений. $ = retention × ARPU' }, confidence: 'needs_data' },
+        title: { en: 'Passport — members were not getting confirmations', ru: 'Passport — участники не получали подтверждения' },
+        task: { en: 'Almost 4,000 Passport members had asked for text confirmations and were receiving none. Two thirds of paying members saw a cheaper plan than the one they paid for.', ru: 'Почти 4,000 участников Passport просили SMS-подтверждения и не получали ни одного. Две трети платящих видели в приложении более дешёвый план, чем оплатили.' },
+        goal: { en: 'Make every member see the right plan and receive every confirmation — so they renew instead of cancelling.', ru: 'Чтобы каждый участник видел свой план и получал каждое подтверждение — и продлевал, а не отменял.' },
+        benefit: { en: 'Confirmations now reach all 3,895 members. Plan display fixed for 133 of 202 paying members. Uploaded receipts are recognised 4 times more often (17% → 65%). 44 members who had lost their home address were restored.', ru: 'Подтверждения доходят всем 3,895 участникам. План показывается верно у 133 из 202 платящих. Загруженные чеки распознаются в 4 раза чаще (17% → 65%). 44 участника, потерявшие адрес дома, восстановлены.' },
+        value: { amount: '3,895 members', note: { en: 'kept informed. Money value = members retained × revenue per member', ru: 'снова получают уведомления. Сумма = удержанные участники × доход с участника' }, confidence: 'needs_data' },
       },
       {
-        title: { en: 'Missed calls — spam-attack containment', ru: 'Missed calls — защита от спам-атак' },
-        goal: { en: 'Spam calls occupied agent lines; real customers could not get through.', ru: 'Спам-звонки занимали линии агентов, реальные клиенты не дозванивались.' },
-        effect: { en: 'Interventions #28–#42. Peak 19,146 attacks/day, 0 leaks to agents. False-positive cost measured: 3.6% of mobile blocks. Two systemic data bugs fixed: reservations backfill 41K → 321K rows, CRM mirror sync cursor.', ru: 'Интервенции #28–#42. Пик 19,146 атак/день, 0 утечек к агентам. Ложные срабатывания 3.6%. Исправлены 2 системных бага: reservations backfill 41K → 321K строк, CRM mirror sync.' },
-        value: { amount: '1,326 / week', note: { en: 'calls previously missed, 82% new customers. $ = × average ticket', ru: 'пропущенных звонков до фильтра, 82% новые клиенты. $ = × средний чек' }, confidence: 'needs_data' },
+        title: { en: 'Call centre — spam calls blocking real customers', ru: 'Колл-центр — спам-звонки не давали дозвониться клиентам' },
+        task: { en: 'Automated spam was flooding the lines — up to 19,000 fake calls a day. Agents were busy with robots while real customers hung up.', ru: 'Автоматический спам заваливал линии — до 19,000 ложных звонков в день. Агенты были заняты роботами, а живые клиенты не дозванивались.' },
+        goal: { en: 'Block the spam without blocking a single real caller.', ru: 'Отсечь спам, не заблокировав ни одного живого клиента.' },
+        benefit: { en: 'On the worst day 19,146 spam calls were stopped and none reached an agent. Only 3.6% of blocked mobile numbers turned out to be real callers. Before the fix the company was missing about 1,300 calls a week, 82% of them from new customers.', ru: 'В худший день остановлено 19,146 спам-звонков, ни один не дошёл до агента. Только 3.6% заблокированных мобильных оказались живыми людьми. До фикса компания теряла около 1,300 звонков в неделю, 82% — от новых клиентов.' },
+        value: { amount: '1,300 calls a week', note: { en: 'no longer lost. Money value = × average ticket', ru: 'больше не теряются. Сумма = × средний чек' }, confidence: 'needs_data' },
       },
       {
-        title: { en: 'TechApp — CRM login and production readiness', ru: 'TechApp — вход через CRM и готовность к проду' },
-        goal: { en: 'Technicians need one login and a stable release path before the app reaches 217 people.', ru: 'Техникам нужен один вход и стабильный релизный путь до выхода приложения на 217 человек.' },
-        effect: { en: 'CRM email/password login end-to-end, 881 tests. NPS and Growth pages on live data. Drone CI root cause found: queue worker had not redeployed for months → 3 prod bugs. Apollo DB index: 10,293 ms → 267 ms.', ru: 'Вход по CRM email/паролю end-to-end, 881 тест. NPS и Growth на живых данных. Root cause Drone CI: worker не редеплоился месяцами → 3 бага в проде. Индекс Apollo: 10,293 мс → 267 мс.' },
-        value: { amount: '39×', note: { en: 'faster CRM queries; fewer agent timeouts. Strategic — ROI after rollout', ru: 'быстрее запросы CRM; меньше таймаутов у агентов. Стратегически — ROI после rollout' }, confidence: 'estimate' },
+        title: { en: 'Technician app — one login and a stable release process', ru: 'Приложение техников — один вход и стабильные релизы' },
+        task: { en: 'Technicians needed a second password to enter the app. Releases were failing because an update process had silently stopped months ago and produced three production bugs.', ru: 'Техникам нужен был второй пароль для входа. Релизы ломались: процесс обновления молча остановился месяцы назад и породил три бага в продакшене.' },
+        goal: { en: 'Technicians log in with the password they already have; every release reaches production correctly.', ru: 'Техники входят с тем паролем, который у них уже есть; каждый релиз доходит до продакшена корректно.' },
+        benefit: { en: 'Single login shipped. Release process repaired. Customer database queries became 39 times faster, so agents wait less on screen.', ru: 'Единый вход выпущен. Процесс релизов починен. Запросы к базе клиентов стали быстрее в 39 раз — агенты меньше ждут на экране.' },
+        value: { amount: '39× faster', note: { en: 'agent screens. Money value comes with rollout to 217 technicians', ru: 'экраны агентов. Сумма появится после выхода на 217 техников' }, confidence: 'estimate' },
       },
     ],
   },
@@ -62,16 +64,18 @@ export const ENGINEERS = [
     role: { en: 'Platform', ru: 'Platform' },
     tasks: [
       {
-        title: { en: 'TechApp messenger — SMS bridge for technicians', ru: 'TechApp messenger — SMS-бридж для техников' },
-        goal: { en: 'Dispatcher–technician SMS lived outside any system; nobody could see or search it.', ru: 'SMS между диспетчером и техником жили вне систем — их нельзя было увидеть или найти.' },
-        effect: { en: 'Bridge in production: a technician SMS creates a thread in the app from the first message. 23 technicians, 145 numbers; top-4 numbers carry 47% of volume. Webhook auth taken observe → enforce on live traffic. Phone directory synced: 2,794 rows, 217 technicians queued for onboarding.', ru: 'Бридж в проде: SMS техника создаёт тред в приложении с первого сообщения. 23 техника, 145 номеров; top-4 дают 47% объёма. Webhook-аутентификация observe → enforce на живом трафике. Справочник: 2,794 строки, очередь 217 техников.' },
-        value: { amount: '47%', note: { en: 'of dispatcher SMS traffic now in-app. $ = dispatcher minutes saved × volume', ru: 'SMS-трафика диспетчеров теперь в приложении. $ = минуты диспетчера × объём' }, confidence: 'needs_data' },
+        title: { en: 'Technician texts inside the company system', ru: 'Переписка с техниками внутри системы компании' },
+        task: { en: 'Dispatchers and technicians texted on personal phones. Nobody could see, search or hand over those conversations.', ru: 'Диспетчеры и техники переписывались с личных телефонов. Эту переписку нельзя было увидеть, найти или передать другому.' },
+        goal: { en: 'Every technician text lands in the company app the moment it is sent.', ru: 'Каждое SMS техника попадает в приложение компании в момент отправки.' },
+        benefit: { en: 'Live in production: 23 technicians and 145 numbers connected; the four busiest numbers alone carry 47% of all dispatcher texting. Directory of 217 technicians prepared for the next wave.', ru: 'Работает в продакшене: подключены 23 техника и 145 номеров; четыре самых активных дают 47% всей переписки диспетчеров. Подготовлен список из 217 техников для следующей волны.' },
+        value: { amount: '47%', note: { en: 'of dispatcher texting now traceable. Money value = dispatcher minutes saved × volume', ru: 'переписки диспетчеров теперь под контролем. Сумма = минуты диспетчера × объём' }, confidence: 'needs_data' },
       },
       {
-        title: { en: 'HA ID — single sign-on for new users and CRM password parity', ru: 'HA ID — единый вход для новых пользователей и паритет с CRM' },
-        goal: { en: 'New users got wrong permission levels automatically; employees had to remember two passwords.', ru: 'Новые пользователи автоматически получали неверный уровень прав; сотрудникам нужно было помнить два пароля.' },
-        effect: { en: 'Over-privileged support role (~13 people) fixed. 5 Star Plumbing partner admin set up. CRM password parity in production; 13 defects found in two independent reviews and closed, including brute-force protection.', ru: 'Исправлены избыточные права support-роли (~13 человек). Настроен партнёр-админ для 5 Star Plumbing. Паритет паролей с CRM в проде; 13 дефектов найдены на двух ревью и закрыты, включая защиту от brute-force.' },
-        value: { amount: 'Security', note: { en: 'access surface reduced; fewer IT tickets (Kudlaev handles ~4/week)', ru: 'поверхность доступа сокращена; меньше IT-тикетов (Kudlaev ~4/нед)' }, confidence: 'estimate' },
+        title: { en: 'Company login — wrong access rights and duplicate passwords', ru: 'Единый вход — лишние права и дублирующиеся пароли' },
+        task: { en: 'New employees were automatically given more access than their role needed — about 13 support staff could see what they should not. Staff kept two passwords for two systems.', ru: 'Новые сотрудники автоматически получали больше доступа, чем нужно роли — около 13 человек поддержки видели лишнее. Сотрудники держали два пароля для двух систем.' },
+        goal: { en: 'Each person sees only what their role allows; one password opens everything.', ru: 'Каждый видит только то, что положено роли; один пароль открывает всё.' },
+        benefit: { en: 'Excess access removed. One password for CRM and internal tools is in production. 13 security gaps found in review and closed, including protection against password guessing.', ru: 'Лишний доступ убран. Один пароль для CRM и внутренних инструментов в продакшене. На ревью найдено и закрыто 13 дыр безопасности, включая защиту от перебора паролей.' },
+        value: { amount: 'Security', note: { en: 'lower breach risk; fewer access tickets to IT (about 4 a week today)', ru: 'ниже риск утечки; меньше заявок в IT на доступы (сейчас ~4 в неделю)' }, confidence: 'estimate' },
       },
     ],
   },
@@ -81,34 +85,39 @@ export const ENGINEERS = [
     role: { en: 'AI / Automation · until Aug 31', ru: 'AI / Automation · до 31 авг' },
     tasks: [
       {
-        title: { en: 'Google Workspace licence audit', ru: 'Аудит лицензий Google Workspace' },
-        goal: { en: 'The company was paying for accounts of former and inactive staff in HousePros and HA.', ru: 'Компания платила за аккаунты уволенных и неактивных сотрудников в HousePros и HA.' },
-        effect: { en: 'HousePros: 68 accounts removed. HA: 184 accounts sorted into 3 buckets and handed to Kateryna for sign-off.', ru: 'HousePros: 68 аккаунтов удалено. HA: 184 аккаунта разобраны по 3 группам и переданы Kateryna на решение.' },
-        value: { amount: '$6,854 / yr', note: { en: '$571/mo HousePros, confirmed by Sergi and Kateryna. HA part up to ~$3.7K/yr pending', ru: '$571/мес HousePros, подтверждено Sergi и Kateryna. HA-часть до ~$3.7K/год ждёт sign-off' }, confidence: 'confirmed' },
+        title: { en: 'Paying for email accounts nobody uses', ru: 'Оплата почтовых аккаунтов, которыми никто не пользуется' },
+        task: { en: 'The company kept paying Google for mailboxes of people who had left or never used them.', ru: 'Компания продолжала платить Google за ящики уволенных и тех, кто ими не пользовался.' },
+        goal: { en: 'Stop paying for what nobody uses.', ru: 'Перестать платить за то, чем никто не пользуется.' },
+        benefit: { en: 'HousePros: 68 accounts removed. HA: 184 accounts sorted and handed to Kateryna for the final decision.', ru: 'HousePros: 68 аккаунтов удалено. HA: 184 аккаунта разобраны и переданы Kateryna на решение.' },
+        value: { amount: '$6,854 a year', note: { en: 'HousePros, confirmed by Sergi and Kateryna. HA share up to ~$3,700 a year pending sign-off', ru: 'HousePros, подтверждено Sergi и Kateryna. Доля HA до ~$3,700 в год ждёт решения' }, confidence: 'confirmed' },
       },
       {
-        title: { en: 'GA4 and Search Console connectors for marketing', ru: 'Коннекторы GA4 и Search Console для маркетинга' },
-        goal: { en: 'Marketing spent up to 2 hours per site on manual analytics — 21 sites, every month.', ru: 'Маркетинг тратил до 2 часов на ручной анализ каждого сайта — 21 сайт, каждый месяц.' },
-        effect: { en: '21 properties connected (12 appliance + 9 electrical). Sona: analysis that took up to 2 hours per site is now instant.', ru: '21 property подключена (12 appliance + 9 electrical). Sona: анализ, занимавший до 2 часов на сайт, теперь мгновенный.' },
-        value: { amount: '≈ $1,680 / mo', note: { en: '2 h × 21 sites × $40/h, one analysis per site per month', ru: '2 ч × 21 сайт × $40/ч, один анализ на сайт в месяц' }, confidence: 'estimate' },
+        title: { en: 'Marketing analytics without manual work', ru: 'Аналитика маркетинга без ручной работы' },
+        task: { en: 'Marketing spent up to 2 hours per website pulling traffic and search data by hand — 21 websites, every month.', ru: 'Маркетинг тратил до 2 часов на каждый сайт, вручную собирая данные о трафике и поиске — 21 сайт, каждый месяц.' },
+        goal: { en: 'Answers about any website in seconds, not hours.', ru: 'Ответы по любому сайту за секунды, а не часы.' },
+        benefit: { en: 'All 21 websites connected. Sona: an analysis that took up to 2 hours is now instant.', ru: 'Подключён 21 сайт. Sona: анализ, занимавший до 2 часов, теперь мгновенный.' },
+        value: { amount: '≈ $1,680 a month', note: { en: '2 hours × 21 sites × $40, one analysis per site a month', ru: '2 ч × 21 сайт × $40, один анализ на сайт в месяц' }, confidence: 'estimate' },
       },
       {
-        title: { en: 'Corporate email on all 65 GMB domains', ru: 'Корпоративная почта на 65 доменах GMB' },
-        goal: { en: 'Business domains had no working corporate mail; deliverability and spoofing protection were inconsistent.', ru: 'У бизнес-доменов не было рабочей корпоративной почты; deliverability и защита от спуфинга были неравномерны.' },
-        effect: { en: '65/65 domains on Google Workspace with MX, DKIM, SPF and DMARC. DNS watchdog checks 64 domains every 6 hours.', ru: '65/65 доменов на Google Workspace с MX, DKIM, SPF и DMARC. DNS watchdog проверяет 64 домена каждые 6 часов.' },
-        value: { amount: 'Infrastructure', note: { en: 'deliverability and anti-spoofing; not a cash item', ru: 'deliverability и защита от спуфинга; не денежная статья' }, confidence: 'none' },
+        title: { en: 'Working company email on all 65 business domains', ru: 'Рабочая почта на всех 65 бизнес-доменах' },
+        task: { en: 'Many of our 65 business websites had no working company email; letters bounced or landed in spam, and the domains could be impersonated.', ru: 'У многих из 65 бизнес-сайтов не было рабочей корпоративной почты; письма терялись или уходили в спам, домены можно было подделать.' },
+        goal: { en: 'Every domain sends and receives mail reliably and cannot be spoofed.', ru: 'Каждый домен надёжно отправляет и получает почту и защищён от подделки.' },
+        benefit: { en: '65 of 65 domains configured. Automatic check every 6 hours catches a broken domain before customers do.', ru: '65 из 65 доменов настроены. Автопроверка каждые 6 часов замечает сломанный домен раньше клиентов.' },
+        value: { amount: 'Reliability', note: { en: 'not a cash item', ru: 'не денежная статья' }, confidence: 'none' },
       },
       {
-        title: { en: 'Same-Day missed-agent automation', ru: 'Автоматизация Same-Day missed-agent' },
-        goal: { en: "George's team was restoring missed Same-Day requests by hand every day.", ru: 'Команда George вручную восстанавливала пропущенные заявки Same-Day каждый день.' },
-        effect: { en: '212 requests per day processed, 94.3% acknowledged. Manual recovery replaced.', ru: '212 заявок в день, 94.3% подтверждено. Ручное восстановление заменено.' },
-        value: { amount: '≈ $600–1,200 / mo', note: { en: '30–60 min/day of manual work × $40/h', ru: '30–60 мин/день ручной работы × $40/ч' }, confidence: 'estimate' },
+        title: { en: 'Same-Day requests restored by hand every day', ru: 'Заявки Same-Day восстанавливали вручную каждый день' },
+        task: { en: "George's team spent time every day recovering Same-Day requests the system had missed.", ru: 'Команда George каждый день тратила время на восстановление заявок Same-Day, которые система пропустила.' },
+        goal: { en: 'The system catches its own misses; people stop doing it.', ru: 'Система сама подхватывает пропуски; люди перестают это делать.' },
+        benefit: { en: '212 requests a day handled automatically, 94.3% acknowledged without human help.', ru: '212 заявок в день обрабатываются автоматически, 94.3% подтверждаются без участия человека.' },
+        value: { amount: '≈ $600–1,200 a month', note: { en: '30–60 minutes a day of manual work × $40', ru: '30–60 минут в день ручной работы × $40' }, confidence: 'estimate' },
       },
       {
-        title: { en: 'Electrical leads — 13-month report for Amanda', ru: 'Electrical leads — отчёт за 13 месяцев для Amanda' },
-        goal: { en: 'Nobody knew how many electrical web requests were real leads; marketing budget was set blind.', ru: 'Никто не знал, сколько заявок с электрических сайтов — реальные лиды; бюджет маркетинга ставился вслепую.' },
-        effect: { en: '30,927 requests across 92 sites: 1,190 leads, 346 booked, 89.6% spam. Dedup methodology proposed (per domain + per customer column).', ru: '30,927 заявок с 92 сайтов: 1,190 лидов, 346 booked, 89.6% спам. Предложена методика дедупликации (по домену + колонка по клиенту).' },
-        value: { amount: '89.6% spam', note: { en: 'baseline for marketing spend decisions on 92 sites', ru: 'база для решений по маркетинговому бюджету на 92 сайта' }, confidence: 'confirmed' },
+        title: { en: 'How many electrical web requests are real customers', ru: 'Сколько заявок с электрических сайтов — реальные клиенты' },
+        task: { en: 'Nobody knew what share of requests from 92 electrical websites were real. Marketing budget was set blind.', ru: 'Никто не знал, какая доля заявок с 92 электрических сайтов настоящая. Бюджет маркетинга ставился вслепую.' },
+        goal: { en: 'A clear number: how much of the request flow is worth paying for.', ru: 'Ясное число: какая часть потока заявок стоит денег.' },
+        benefit: { en: '13 months analysed: 30,927 requests, of which 1,190 were real leads and 346 became bookings. 89.6% was spam.', ru: 'Проанализировано 13 месяцев: 30,927 заявок, из них 1,190 реальных лидов и 346 бронирований. 89.6% — спам.' },
+        value: { amount: '89.6% spam', note: { en: 'a baseline for deciding marketing spend on 92 sites', ru: 'база для решения о маркетинговом бюджете на 92 сайта' }, confidence: 'confirmed' },
       },
     ],
   },
@@ -118,34 +127,39 @@ export const ENGINEERS = [
     role: { en: 'No-code / Automation', ru: 'No-code / Automation' },
     tasks: [
       {
-        title: { en: 'Founder OS — data-loss fix and noise filter', ru: 'Founder OS — устранение потери данных и фильтр шума' },
-        goal: { en: 'For 5 weeks 4 of 10 users, including the founder, could not save tasks and goals from calls; AI processed every call regardless of relevance.', ru: '5 недель 4 из 10 пользователей, включая founder, не могли сохранять задачи и цели из звонков; AI обрабатывал каждый звонок без разбора.' },
-        effect: { en: 'One account had lost 385 tasks and 452 goals — restored. 94% of non-target calls cut before AI processing.', ru: 'Один аккаунт потерял 385 задач и 452 цели — восстановлены. 94% нецелевых звонков отрезаны до AI-обработки.' },
-        value: { amount: '−94%', note: { en: 'AI processing volume. $ = × cost per processed call', ru: 'объёма AI-обработки. $ = × стоимость обработки звонка' }, confidence: 'needs_data' },
+        title: { en: 'Founder OS — tasks from calls were being lost', ru: 'Founder OS — задачи из звонков терялись' },
+        task: { en: 'For 5 weeks 4 of 10 users, including the founder, could not save tasks and goals from their calls. One account lost 385 tasks and 452 goals. The AI also processed every call, relevant or not.', ru: '5 недель 4 из 10 пользователей, включая founder, не могли сохранить задачи и цели из звонков. Один аккаунт потерял 385 задач и 452 цели. AI при этом обрабатывал каждый звонок, нужный или нет.' },
+        goal: { en: 'Nothing said on a call is lost; the AI only works on calls that matter.', ru: 'Ничто сказанное на звонке не теряется; AI работает только с нужными звонками.' },
+        benefit: { en: 'All lost tasks and goals restored. 94% of irrelevant calls are now filtered out before the AI touches them.', ru: 'Все потерянные задачи и цели восстановлены. 94% нецелевых звонков отсекаются до AI-обработки.' },
+        value: { amount: '−94%', note: { en: 'AI processing volume. Money value = × cost of processing one call', ru: 'объёма AI-обработки. Сумма = × стоимость обработки одного звонка' }, confidence: 'needs_data' },
       },
       {
-        title: { en: 'Passport — reward over-minting stopped', ru: 'Passport — остановлено тройное начисление rewards' },
-        goal: { en: 'A $30 reward was minted three times per event — direct overpayment to members.', ru: '$30 reward начислялся трижды за событие — прямая переплата участникам.' },
-        effect: { en: 'Triple mint fixed; white screens on /rewards and /referrals, Protection Center documents and scroll reset fixed.', ru: 'Тройное начисление исправлено; белые экраны /rewards и /referrals, документы Protection Center, сброс скролла исправлены.' },
-        value: { amount: '$60 per event', note: { en: 'overpayment stopped; total depends on event count', ru: 'переплата остановлена; сумма зависит от числа событий' }, confidence: 'confirmed' },
+        title: { en: 'Passport — a $30 bonus was paid three times', ru: 'Passport — бонус $30 выплачивался трижды' },
+        task: { en: 'Every time a member earned a $30 reward the system credited it three times.', ru: 'Каждый раз, когда участник зарабатывал бонус $30, система начисляла его трижды.' },
+        goal: { en: 'Pay exactly what was earned.', ru: 'Платить ровно столько, сколько заработано.' },
+        benefit: { en: 'Triple payout stopped. Four visible bugs fixed along the way: blank reward and referral pages, missing documents, page jumping.', ru: 'Тройная выплата остановлена. Попутно исправлены 4 видимых бага: пустые страницы наград и рефералов, пропавшие документы, скачки страницы.' },
+        value: { amount: '$60 per reward', note: { en: 'overpayment stopped; total depends on how many rewards were issued', ru: 'переплата остановлена; итог зависит от числа начислений' }, confidence: 'confirmed' },
       },
       {
-        title: { en: 'completerepairwa.com — page speed', ru: 'completerepairwa.com — скорость сайта' },
-        goal: { en: 'A slow mobile site loses visitors before they see the phone number.', ru: 'Медленный мобильный сайт теряет посетителей до того, как они увидят номер телефона.' },
-        effect: { en: 'Mobile performance 40 → 76; page weight 4.7 MB → 1.3 MB.', ru: 'Mobile performance 40 → 76; вес страницы 4.7 MB → 1.3 MB.' },
-        value: { amount: '+conversion', note: { en: 'industry rule: −1 s load ≈ +5–10% conversion. Needs site traffic', ru: 'ориентир: −1 с загрузки ≈ +5–10% конверсии. Нужен трафик сайта' }, confidence: 'needs_data' },
+        title: { en: 'A slow website was losing visitors', ru: 'Медленный сайт терял посетителей' },
+        task: { en: 'completerepairwa.com took too long to open on phones — visitors left before seeing the phone number.', ru: 'completerepairwa.com слишком долго открывался на телефонах — посетители уходили, не увидев номер.' },
+        goal: { en: 'The site opens fast enough to keep the visitor.', ru: 'Сайт открывается так быстро, что посетитель остаётся.' },
+        benefit: { en: 'Mobile speed score 40 → 76; page size cut from 4.7 MB to 1.3 MB.', ru: 'Оценка скорости на мобильных 40 → 76; размер страницы с 4.7 MB до 1.3 MB.' },
+        value: { amount: 'More calls', note: { en: 'industry rule: each second saved ≈ +5–10% conversions. Needs site traffic to price', ru: 'ориентир: каждая сэкономленная секунда ≈ +5–10% конверсии. Нужен трафик сайта для суммы' }, confidence: 'needs_data' },
       },
       {
-        title: { en: 'Self-service web forms → Slack for house cleaning', ru: 'Самообслуживание форм → Slack для house cleaning' },
-        goal: { en: 'Every new site needed an engineer to wire its form to Slack.', ru: 'Каждый новый сайт требовал инженера, чтобы подключить форму к Slack.' },
-        effect: { en: 'Vivian connects sites herself; firstcallkyplumbing forms fixed (reCAPTCHA → Turnstile), leads flowing again.', ru: 'Vivian подключает сайты сама; формы firstcallkyplumbing исправлены (reCAPTCHA → Turnstile), лиды снова идут.' },
-        value: { amount: '0 h / site', note: { en: 'engineer time per new site (was 1–2 h × $50)', ru: 'инженерного времени на новый сайт (было 1–2 ч × $50)' }, confidence: 'estimate' },
+        title: { en: 'New websites no longer need an engineer', ru: 'Новые сайты больше не требуют инженера' },
+        task: { en: 'Every new cleaning website needed an engineer to connect its contact form to Slack. One plumbing site was silently not sending requests at all.', ru: 'Каждый новый сайт клининга требовал инженера, чтобы подключить форму заявок к Slack. Один сантехнический сайт молча не отправлял заявки вообще.' },
+        goal: { en: 'The marketing team connects sites themselves; no request is lost.', ru: 'Маркетинг подключает сайты сам; ни одна заявка не теряется.' },
+        benefit: { en: 'Vivian connects sites without engineering. The plumbing site sends requests again.', ru: 'Vivian подключает сайты без инженеров. Сантехнический сайт снова отправляет заявки.' },
+        value: { amount: '0 engineer hours', note: { en: 'per new site (was 1–2 hours each)', ru: 'на новый сайт (было 1–2 часа на каждый)' }, confidence: 'estimate' },
       },
       {
-        title: { en: 'TechApp QA before rollout', ru: 'QA TechApp перед rollout' },
-        goal: { en: 'Catch defects before 217 technicians see them.', ru: 'Поймать дефекты до того, как их увидят 217 техников.' },
-        effect: { en: '214 test cases, 27 defects found (10 P1) before production.', ru: '214 тест-кейсов, 27 дефектов найдено (10 P1) до прода.' },
-        value: { amount: '10 P1', note: { en: 'blocked from reaching 217 users', ru: 'не дошли до 217 пользователей' }, confidence: 'confirmed' },
+        title: { en: 'Technician app tested before 217 people see it', ru: 'Приложение техников проверено до выхода на 217 человек' },
+        task: { en: 'The app was about to go to 217 technicians with unknown defects.', ru: 'Приложение готовилось к выходу на 217 техников с неизвестным числом дефектов.' },
+        goal: { en: 'Find problems in testing, not in the field.', ru: 'Найти проблемы в тестировании, а не в поле.' },
+        benefit: { en: '214 scenarios checked; 27 defects found, 10 of them critical, all before release.', ru: 'Проверено 214 сценариев; найдено 27 дефектов, 10 критических, все до релиза.' },
+        value: { amount: '10 critical bugs', note: { en: 'never reached technicians', ru: 'не дошли до техников' }, confidence: 'confirmed' },
       },
     ],
   },
@@ -155,16 +169,18 @@ export const ENGINEERS = [
     role: { en: 'Web / Automation', ru: 'Web / Automation' },
     tasks: [
       {
-        title: { en: 'Mailgun on 137 sites and CAPTCHA on 22', ru: 'Mailgun на 137 сайтах и CAPTCHA на 22' },
-        goal: { en: 'Form emails from GMB sites were unreliable and 93% of submissions were spam landing on CSRs.', ru: 'Письма с форм GMB-сайтов приходили ненадёжно, а 93% заявок были спамом, попадавшим на CSR.' },
-        effect: { en: '137 sites on Mailgun, 600 routes verified. Cloudflare CAPTCHA on 22 sites.', ru: '137 сайтов на Mailgun, 600 routes проверены. Cloudflare CAPTCHA на 22 сайтах.' },
-        value: { amount: 'CSR time', note: { en: 'less spam triage; volume per site not in reports', ru: 'меньше разбора спама; объём по сайту не в репортах' }, confidence: 'needs_data' },
+        title: { en: 'Request emails from 137 websites and spam on 22', ru: 'Письма с заявками со 137 сайтов и спам на 22' },
+        task: { en: 'Request emails from 137 local websites arrived unreliably, and 9 of 10 submissions were spam that call-centre staff had to read.', ru: 'Письма с заявками со 137 локальных сайтов приходили ненадёжно, а 9 из 10 заявок были спамом, который читали сотрудники колл-центра.' },
+        goal: { en: 'Every real request arrives; spam does not.', ru: 'Каждая настоящая заявка приходит; спам — нет.' },
+        benefit: { en: '137 sites moved to a reliable mail service, 600 routes verified. Spam protection added to the 22 worst-hit sites.', ru: '137 сайтов переведены на надёжный почтовый сервис, проверено 600 маршрутов. На 22 самых атакуемых сайтах поставлена защита от спама.' },
+        value: { amount: 'Call-centre time', note: { en: 'less spam to read; volume per site not in reports', ru: 'меньше спама на разбор; объём по сайту не в репортах' }, confidence: 'needs_data' },
       },
       {
-        title: { en: 'WordPress 7.1 × WP Rocket outage on 26 sites', ru: 'Падение 26 сайтов после WordPress 7.1 × WP Rocket' },
-        goal: { en: 'A plugin conflict after the WordPress update took 26 lead-generating sites down.', ru: 'Конфликт плагина после обновления WordPress положил 26 сайтов, приносящих лиды.' },
-        effect: { en: 'All 26 restored; safe update order documented for Chris and Aldrin.', ru: 'Все 26 восстановлены; безопасный порядок обновлений задокументирован для Chris и Aldrin.' },
-        value: { amount: '26 sites', note: { en: 'lead flow restored; downtime length not in reports', ru: 'поток лидов восстановлен; длительность даунтайма не в репортах' }, confidence: 'needs_data' },
+        title: { en: '26 websites went down after a platform update', ru: '26 сайтов упали после обновления платформы' },
+        task: { en: 'A software update broke 26 lead-generating websites at once.', ru: 'Обновление платформы одновременно положило 26 сайтов, приносящих лиды.' },
+        goal: { en: 'Bring the sites back and make sure it cannot repeat.', ru: 'Вернуть сайты и исключить повтор.' },
+        benefit: { en: 'All 26 restored. A safe update procedure written for Chris and Aldrin.', ru: 'Все 26 восстановлены. Для Chris и Aldrin написана безопасная процедура обновления.' },
+        value: { amount: '26 sites', note: { en: 'back to generating leads; downtime length not in reports', ru: 'снова приносят лиды; длительность простоя не в репортах' }, confidence: 'needs_data' },
       },
     ],
   },
@@ -174,22 +190,25 @@ export const ENGINEERS = [
     role: { en: 'AI / Automation', ru: 'AI / Automation' },
     tasks: [
       {
-        title: { en: 'Electrical web forms outage', ru: 'Падение веб-форм электрического департамента' },
-        goal: { en: 'All electrical sites stopped delivering leads over a weekend — zero potentials Aug 22–24.', ru: 'Все electrical сайты перестали отдавать лиды на выходных — ноль заявок 22–24 авг.' },
-        effect: { en: 'Fixed Aug 24 as top priority; root cause in n8n routing after the DB move.', ru: 'Исправлено 24 авг как задача нулевого приоритета; root cause в маршрутизации n8n после переезда БД.' },
-        value: { amount: '≈ 30–35 leads', note: { en: 'lost over the weekend at ~500 legit leads/month; further loss stopped', ru: 'потеряно за выходные при ~500 лидов/мес; дальнейшая потеря остановлена' }, confidence: 'estimate' },
+        title: { en: 'Electrical websites stopped sending requests over a weekend', ru: 'Электрические сайты не отправляли заявки все выходные' },
+        task: { en: 'From Friday to Monday not a single request came through from any electrical website.', ru: 'С пятницы до понедельника ни одна заявка не пришла ни с одного электрического сайта.' },
+        goal: { en: 'Restore the flow the same day it is reported.', ru: 'Восстановить поток в тот же день, как о нём сообщили.' },
+        benefit: { en: 'Fixed Monday as top priority. Root cause found and closed.', ru: 'Исправлено в понедельник как задача первого приоритета. Причина найдена и закрыта.' },
+        value: { amount: '≈ 30–35 leads', note: { en: 'lost over that weekend (at ~500 real leads a month); further loss stopped', ru: 'потеряно за те выходные (при ~500 настоящих лидов в месяц); дальнейшая потеря остановлена' }, confidence: 'estimate' },
       },
       {
-        title: { en: 'Zapier → n8n migration and n8n stability', ru: 'Миграция Zapier → n8n и стабильность n8n' },
-        goal: { en: 'Remove the Zapier subscription and stop workflows freezing until a manual restart.', ru: 'Убрать подписку Zapier и прекратить зависание воркфлоу до ручного рестарта.' },
-        effect: { en: "Dean's flows migrated; hanging-jobs fix shipped; two missing Mailgun domains found for Yevhenii.", ru: 'Флоу Dean перенесены; фикс зависающих jobs; найдены 2 пропущенных домена Mailgun для Евгения.' },
-        value: { amount: 'Zapier fee', note: { en: 'subscription eliminated; amount not in reports', ru: 'подписка устранена; сумма не в репортах' }, confidence: 'needs_data' },
+        title: { en: 'Replacing a paid automation tool and stopping freezes', ru: 'Замена платного инструмента автоматизации и остановка зависаний' },
+        task: { en: 'The company paid for Zapier while our own automation platform could do the same. That platform also froze and needed manual restarts.', ru: 'Компания платила за Zapier, хотя наша платформа автоматизации умела то же самое. Сама платформа при этом зависала и требовала ручного перезапуска.' },
+        goal: { en: 'One automation platform, no subscription, no freezes.', ru: 'Одна платформа автоматизации, без подписки, без зависаний.' },
+        benefit: { en: "Dean's automations moved off Zapier. Freezing fixed. Two missing domains found for the email project.", ru: 'Автоматизации Dean перенесены с Zapier. Зависания исправлены. Найдены 2 пропущенных домена для почтового проекта.' },
+        value: { amount: 'Zapier subscription', note: { en: 'cancelled; amount not in reports', ru: 'отменена; сумма не в репортах' }, confidence: 'needs_data' },
       },
       {
-        title: { en: 'Call-scoring weekly sheet', ru: 'Еженедельный скоринг звонков' },
-        goal: { en: 'Sales calls were not scored consistently; Anastasia needed a weekly view per salesperson.', ru: 'Звонки сейлзов не оценивались единообразно; Anastasia нужен еженедельный срез по сейлзам.' },
-        effect: { en: 'Weekly_Summary sheet on the 6-criteria / 1-3-5 rubric; transcript pipeline fixed (calls under 180 s were excluded, 975 calls recovered).', ru: 'Weekly_Summary по rubric 6 критериев / 1-3-5; исправлен пайплайн транскриптов (звонки <180 с не попадали, 975 звонков восстановлены).' },
-        value: { amount: '975 calls', note: { en: 'now scorable; coaching value not quantified', ru: 'теперь оцениваются; эффект коучинга не измерен' }, confidence: 'none' },
+        title: { en: 'Weekly quality score for every sales call', ru: 'Еженедельная оценка качества каждого продажного звонка' },
+        task: { en: 'Sales calls were not scored consistently; Anastasia had no weekly view of who sells how.', ru: 'Продажные звонки не оценивались единообразно; у Anastasia не было еженедельного среза, кто как продаёт.' },
+        goal: { en: 'Every call scored the same way; a weekly table per salesperson.', ru: 'Каждый звонок оценён по одной шкале; еженедельная таблица по каждому сейлзу.' },
+        benefit: { en: 'Weekly scoring on 6 criteria is live. A data gap that hid 95% of calls from scoring was found and fixed — 975 calls now count.', ru: 'Еженедельный скоринг по 6 критериям работает. Найден и закрыт пробел, из-за которого 95% звонков не попадали в оценку — теперь учитываются 975 звонков.' },
+        value: { amount: '975 calls', note: { en: 'now scored; sales uplift from coaching not yet measured', ru: 'теперь оцениваются; рост продаж от коучинга ещё не измерен' }, confidence: 'none' },
       },
     ],
   },
@@ -199,16 +218,18 @@ export const ENGINEERS = [
     role: { en: 'IT / Security', ru: 'IT / Security' },
     tasks: [
       {
-        title: { en: 'hvacallianceexpert.com mail outage', ru: 'Почта hvacallianceexpert.com' },
-        goal: { en: 'Customer email on a business domain was stuck for 9 days.', ru: 'Клиентская почта на бизнес-домене стояла 9 дней.' },
-        effect: { en: '324 emails released; passwords reset for two mailboxes; DNS corrected; delivery confirmed by client.', ru: '324 письма доставлены; сброшены пароли двух ящиков; DNS исправлен; доставка подтверждена клиентом.' },
-        value: { amount: '324 emails', note: { en: 'customer correspondence recovered', ru: 'клиентская переписка восстановлена' }, confidence: 'confirmed' },
+        title: { en: 'Customer emails stuck for 9 days', ru: 'Письма клиентов стояли 9 дней' },
+        task: { en: 'Email on the hvacallianceexpert.com domain stopped; 324 customer letters piled up unread.', ru: 'Почта на домене hvacallianceexpert.com остановилась; 324 письма клиентов накопились непрочитанными.' },
+        goal: { en: 'Deliver the backlog and make the domain reliable.', ru: 'Доставить накопившееся и сделать домен надёжным.' },
+        benefit: { en: 'All 324 letters delivered; two mailboxes recovered; the client confirmed mail works.', ru: 'Все 324 письма доставлены; два ящика восстановлены; клиент подтвердил, что почта работает.' },
+        value: { amount: '324 letters', note: { en: 'customer correspondence recovered', ru: 'клиентская переписка восстановлена' }, confidence: 'confirmed' },
       },
       {
-        title: { en: 'SIEM — alerting and tool decision', ru: 'SIEM — алертинг и выбор инструмента' },
-        goal: { en: 'No central security alerting across Google Workspace logs.', ru: 'Не было централизованного алертинга по логам Google Workspace.' },
-        effect: { en: '11 critical + medium rules on 7 log types in Google Alert Center. Sentinel (~$27–35/mo) vs Wazuh (open source) evaluated.', ru: '11 critical + medium правил по 7 типам логов в Google Alert Center. Оценены Sentinel (~$27–35/мес) и Wazuh (open source).' },
-        value: { amount: '≈ $400 / yr', note: { en: 'if Wazuh is chosen over Sentinel', ru: 'если выбран Wazuh вместо Sentinel' }, confidence: 'estimate' },
+        title: { en: 'Security alerts across company accounts', ru: 'Оповещения о безопасности по аккаунтам компании' },
+        task: { en: 'Nobody was alerted when something suspicious happened in company Google accounts.', ru: 'Никто не получал сигнал, когда в аккаунтах Google компании происходило что-то подозрительное.' },
+        goal: { en: 'Suspicious activity raises an alert within minutes; pick the cheapest tool that does the job.', ru: 'Подозрительная активность поднимает сигнал за минуты; выбрать самый дешёвый инструмент, который справляется.' },
+        benefit: { en: '11 alert rules live across 7 types of activity. Paid option ($27–35 a month) compared against a free one.', ru: '11 правил оповещений по 7 типам активности. Платный вариант ($27–35 в месяц) сравнён с бесплатным.' },
+        value: { amount: '≈ $400 a year', note: { en: 'if the free tool is chosen', ru: 'если выбран бесплатный инструмент' }, confidence: 'estimate' },
       },
     ],
   },
@@ -218,16 +239,18 @@ export const ENGINEERS = [
     role: { en: 'DevOps', ru: 'DevOps' },
     tasks: [
       {
-        title: { en: 'ezMCP assessment for government contracts', ru: 'Оценка ezMCP для гос. контрактов' },
-        goal: { en: 'A $150K / 90-day pilot was on the table; the team needed to know if it was worth paying for.', ru: 'На столе был пилот $150K / 90 дней; нужно было понять, стоит ли за него платить.' },
-        effect: { en: 'A comparable product identified at no cost; infrastructure review done with Shawn.', ru: 'Найден сопоставимый продукт без затрат; инфраструктурное ревью с Shawn.' },
-        value: { amount: '$150K', note: { en: 'pilot spend avoided', ru: 'расход на пилот избежан' }, confidence: 'confirmed' },
+        title: { en: 'A $150,000 pilot we did not need to buy', ru: 'Пилот за $150,000, который не нужно было покупать' },
+        task: { en: 'A vendor offered a 90-day pilot for $150,000 for government-contract work.', ru: 'Поставщик предложил 90-дневный пилот за $150,000 для работы с гос. контрактами.' },
+        goal: { en: 'Check whether the same result is available for less.', ru: 'Проверить, доступен ли тот же результат дешевле.' },
+        benefit: { en: 'A comparable solution found at no cost. Infrastructure reviewed with Shawn.', ru: 'Найдено сопоставимое решение без затрат. Инфраструктура проверена вместе с Shawn.' },
+        value: { amount: '$150,000', note: { en: 'not spent', ru: 'не потрачено' }, confidence: 'confirmed' },
       },
       {
-        title: { en: 'Finance service infrastructure on AWS', ru: 'Инфраструктура Finance service на AWS' },
-        goal: { en: 'The $510K reconciliation work needed production-grade infrastructure.', ru: 'Работа по сверке на $510K нуждалась в продакшн-инфраструктуре.' },
-        effect: { en: 'ECS cluster, Load Balancer, WAF, RDS, drone-ci pipeline. Dashboard moved to PostgreSQL. 3CX storage and licence restored after incident.', ru: 'ECS, Load Balancer, WAF, RDS, drone-ci пайплайн. Дашборд переведён на PostgreSQL. После инцидента восстановлены storage и лицензия 3CX.' },
-        value: { amount: 'Enabler', note: { en: 'underpins Finance Data; call-center downtime stopped', ru: 'основа Finance Data; даунтайм колл-центра остановлен' }, confidence: 'none' },
+        title: { en: 'Phone system outage and infrastructure for finance', ru: 'Сбой телефонии и инфраструктура для финансов' },
+        task: { en: 'The call-centre phone system lost its storage and licence. The new finance reporting had no production servers to run on.', ru: 'Телефония колл-центра потеряла хранилище и лицензию. У новой финансовой отчётности не было продакшн-серверов.' },
+        goal: { en: 'Phones back; finance reporting on reliable infrastructure.', ru: 'Телефония работает; финансовая отчётность на надёжной инфраструктуре.' },
+        benefit: { en: 'Phone system restored. Finance servers, security and deployment pipeline built. Engineering dashboard moved to a production database.', ru: 'Телефония восстановлена. Построены серверы, защита и процесс выкладки для финансов. Инженерный дашборд переведён на продакшн-базу.' },
+        value: { amount: 'Enabler', note: { en: 'call-centre downtime stopped; foundation for finance reporting', ru: 'простой колл-центра остановлен; основа финансовой отчётности' }, confidence: 'none' },
       },
     ],
   },
@@ -237,10 +260,11 @@ export const ENGINEERS = [
     role: { en: 'AI / Automation', ru: 'AI / Automation' },
     tasks: [
       {
-        title: { en: 'HA Academy revamp and Leadbank spam control', ru: 'Обновление HA Academy и спам-контроль Leadbank' },
-        goal: { en: 'Internal training platform needed Slack integration and access control; Leadbank was receiving spam leads.', ru: 'Учебной платформе нужны интеграция со Slack и контроль доступа; в Leadbank приходили спам-лиды.' },
-        effect: { en: 'Academy: Slack integration, org chart, auth gating, 360 Health, AI assistant. Leadbank: routing plus real-time blocking (with Zach). SEO analyzer ready for deployment.', ru: 'Academy: интеграция Slack, org chart, auth gating, 360 Health, AI-ассистент. Leadbank: маршрутизация и блокировка в реальном времени (с Zach). SEO analyzer готов к деплою.' },
-        value: { amount: 'Not measured', note: { en: 'no before/after metrics in reports', ru: 'метрик до/после в репортах нет' }, confidence: 'none' },
+        title: { en: 'Training platform update and spam in Leadbank', ru: 'Обновление учебной платформы и спам в Leadbank' },
+        task: { en: 'The internal training platform lacked Slack integration and access control. Leadbank was receiving spam leads.', ru: 'У внутренней учебной платформы не было интеграции со Slack и контроля доступа. В Leadbank приходили спам-лиды.' },
+        goal: { en: 'Training platform usable day to day; only real leads in Leadbank.', ru: 'Учебная платформа удобна в ежедневной работе; в Leadbank только настоящие лиды.' },
+        benefit: { en: 'Platform updated: Slack, org chart, access control, AI assistant. Spam routing and real-time blocking added to Leadbank with Zach. SEO content tool ready to launch.', ru: 'Платформа обновлена: Slack, оргструктура, контроль доступа, AI-ассистент. В Leadbank добавлены маршрутизация и блокировка спама в реальном времени (с Zach). Инструмент SEO-контента готов к запуску.' },
+        value: { amount: 'Not measured', note: { en: 'no before/after figures in reports', ru: 'цифр до/после в репортах нет' }, confidence: 'none' },
       },
     ],
   },
@@ -250,20 +274,31 @@ export const ENGINEERS = [
     role: { en: 'Dev Lead', ru: 'Dev Lead' },
     tasks: [
       {
-        title: { en: 'Engineering Dashboard — Team Gantt and reporting', ru: 'Engineering Dashboard — Team Gantt и отчётность' },
-        goal: { en: 'Leadership needs one place to see who works on what, what it costs and what it returns.', ru: 'Руководству нужно одно место, где видно кто над чем работает, что это стоит и что приносит.' },
-        effect: { en: 'Smartsheet-style Gantt shipped (PR #79–#88): full-width, Active/Done, drag and resize, side panel with assignee and description. All August EOD/EOW reports loaded; bilingual task descriptions with sources.', ru: 'Ганта в стиле Smartsheet (PR #79–#88): полная ширина, Active/Done, drag и resize, панель с исполнителем и описанием. Все репорты августа загружены; двуязычные описания задач с источниками.' },
+        title: { en: 'One screen for who does what and what it returns', ru: 'Один экран: кто что делает и что это приносит' },
+        task: { en: 'Leadership had no single view of team workload, progress and business value; this review did not exist.', ru: 'У руководства не было единого вида на загрузку команды, прогресс и бизнес-ценность; этого обзора не существовало.' },
+        goal: { en: 'A live team plan and a monthly business review generated from daily reports.', ru: 'Живой план команды и ежемесячный бизнес-обзор, собираемые из ежедневных репортов.' },
+        benefit: { en: 'Team plan rebuilt: full-screen timeline, drag to reschedule, task cards with owner and description, active/done views. All August reports collected and loaded. This page is the first output.', ru: 'План команды перестроен: полноэкранная шкала, перенос задач мышкой, карточки с исполнителем и описанием, виды active/done. Все репорты августа собраны и загружены. Эта страница — первый результат.' },
         value: { amount: 'Management tool', note: { en: 'basis for this review', ru: 'основа этого обзора' }, confidence: 'none' },
       },
       {
-        title: { en: 'Dashboard incident after PostgreSQL migration', ru: 'Инцидент дашборда после переезда на PostgreSQL' },
-        goal: { en: 'The dashboard went down (connection pool exhausted) and AI-usage telemetry silently stored nothing for a week.', ru: 'Дашборд упал (исчерпан пул соединений), телеметрия AI неделю молча ничего не сохраняла.' },
-        effect: { en: 'Pool and non-blocking sync fix (PR #77); telemetry root cause found — PostgreSQL ON CONFLICT ambiguity rolled back every batch while returning 200 (PR #89).', ru: 'Фикс пула и неблокирующего синка (PR #77); root cause телеметрии — неоднозначность ON CONFLICT в PostgreSQL откатывала каждый батч при ответе 200 (PR #89).' },
-        value: { amount: 'Restored', note: { en: 'dashboard uptime and AI cost tracking', ru: 'работа дашборда и учёт расходов на AI' }, confidence: 'none' },
+        title: { en: 'Dashboard outage and a week of lost AI-cost data', ru: 'Падение дашборда и неделя потерянных данных о расходах на AI' },
+        task: { en: 'After moving to a production database the dashboard went down, and AI usage tracking silently recorded nothing for a week.', ru: 'После переезда на продакшн-базу дашборд упал, а учёт использования AI неделю молча ничего не записывал.' },
+        goal: { en: 'Dashboard stable; every dollar spent on AI tools is tracked again.', ru: 'Дашборд стабилен; каждый доллар на AI-инструменты снова учитывается.' },
+        benefit: { en: "Outage root cause fixed in a day. The silent data loss found and closed; lost data is being recovered from engineers' machines.", ru: 'Причина падения устранена за день. Тихая потеря данных найдена и закрыта; потерянные данные восстанавливаются с машин инженеров.' },
+        value: { amount: 'Restored', note: { en: 'dashboard uptime and AI cost visibility', ru: 'работа дашборда и видимость расходов на AI' }, confidence: 'none' },
       },
     ],
   },
 ];
+
+// ── Page support ──────────────────────────────────────────────────────────────
+// Not review content: what MonthlyReviewAugust needs to render and score the
+// page. Kept here so the whole month lives in one file.
+
+// One tone per SUMMARY card, in card order, on the same scale as the task
+// confidence pills. Kept beside SUMMARY (not in the page, and not per-language)
+// so adding or dropping a card cannot silently shift every card's colour.
+export const SUMMARY_TONES = ['confirmed', 'confirmed', 'needs_data'];
 
 // team_members.id — verified against GET /api/team on 2026-09-04
 export const ENGINEER_IDS = {
