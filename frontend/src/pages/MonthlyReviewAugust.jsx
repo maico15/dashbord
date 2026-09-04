@@ -2,20 +2,30 @@ import { useState, useEffect } from 'react'
 import { Link } from 'react-router-dom'
 import { useTheme, toggleTheme } from '../hooks/useTheme'
 import { api } from '../api/client'
-import {
-  PERIOD, LABELS, ASSUMPTIONS, SUMMARY, SUMMARY_TONES, ENGINEERS,
-  ENGINEER_IDS, SCORE_WEEK, SCORE_YEAR,
-} from '../data/august2026'
 
 /**
  * MonthlyReviewAugust — curated August 2026 review.
  *
- * Every string of content lives bilingually in ../data/august2026; T below is
- * page chrome only. Unlike /review/june-2026 this page renders task-shaped data
- * (goal / effect / value + confidence), so a claim always carries how sure we
- * are of it and, where a dollar figure needs a business input we do not have,
- * names the missing input instead of guessing.
+ * Content comes from GET /api/monthly-review/2026/8, not a bundled file, so a
+ * figure can be corrected without a deploy. T below is page chrome only.
+ *
+ * Every task carries goal / benefit / value plus a confidence level, so a claim
+ * always says how sure we are of it and, where a dollar figure needs a business
+ * input we do not have, names the missing input instead of guessing.
+ *
+ * Rows arrive with parallel _en/_ru columns; pick() reads the active language.
  */
+
+const REVIEW_MONTH = 8
+const REVIEW_YEAR = 2026
+
+// Aug 31 / Sep 1 2026 falls in ISO week 36 — the review is scored on the week it
+// is presented, the same way June 2026 was scored on week 27.
+const SCORE_WEEK = 36
+const SCORE_YEAR = 2026
+
+/** Read the active language's half of a row: pick(task, 'title', 'ru'). */
+const pick = (row, field, lang) => (row ? row[`${field}_${lang}`] || '' : '')
 
 // ── Translations (chrome only) ────────────────────────────────────────────────
 const T = {
@@ -35,6 +45,17 @@ const T = {
     sectionEngineers: 'Work by Engineer — August 2026',
     method: 'Method',
     score: 'Score',
+    task: 'Task',
+    goal: 'Goal',
+    benefit: 'Benefit',
+    amount: 'Amount',
+    tasks: 'tasks',
+    loading: 'Loading review…',
+    errorTitle: 'Could not load the review',
+    errorBody: 'The review API did not respond. Reload to try again.',
+    emptyTitle: 'No review published for this month',
+    emptyBody: 'Nothing has been entered for August 2026 yet.',
+    orphanWarning: n => `${n} task${n === 1 ? '' : 's'} belong to an engineer who is not listed in this review and are not shown.`,
     footer: 'Engineering Dashboard · Sources: EOD/EOW reports, #devs-and-product, #devs-apollo',
     nextReview: 'Next review: October 1, 2026 →',
     conf: {
@@ -60,6 +81,17 @@ const T = {
     sectionEngineers: 'Работа по инженерам — Август 2026',
     method: 'Методика',
     score: 'Оценка',
+    task: 'Задача',
+    goal: 'Цель',
+    benefit: 'Выгода',
+    amount: 'Сумма',
+    tasks: 'задач',
+    loading: 'Загрузка обзора…',
+    errorTitle: 'Не удалось загрузить обзор',
+    errorBody: 'API обзора не ответил. Обновите страницу, чтобы повторить.',
+    emptyTitle: 'За этот месяц обзор не опубликован',
+    emptyBody: 'Данные за август 2026 ещё не внесены.',
+    orphanWarning: n => `${n} задач(и) относятся к инженеру, которого нет в этом обзоре, и не показаны.`,
     footer: 'Engineering Dashboard · Источники: EOD/EOW репорты, #devs-and-product, #devs-apollo',
     nextReview: 'Следующий обзор: 1 октября 2026 →',
     conf: {
@@ -164,21 +196,33 @@ function Line({ label, text, muted }) {
 }
 
 function TaskRow({ task, lang, t, last }) {
-  const color = confColor(task.value.confidence)
-  const L = LABELS[lang]
+  const color = confColor(task.confidence)
   return (
     <div style={{ padding: '12px 0', borderBottom: last ? 'none' : '1px solid var(--border)' }}>
-      <div style={{ fontSize: 13, fontWeight: 600, lineHeight: 1.4, marginBottom: 7 }}>{task.title[lang]}</div>
+      <div style={{ fontSize: 13, fontWeight: 600, lineHeight: 1.4, marginBottom: 7 }}>{pick(task, 'title', lang)}</div>
 
-      <Line label={L.task}    text={task.task[lang]}    muted />
-      <Line label={L.goal}    text={task.goal[lang]}    muted />
-      <Line label={L.benefit} text={task.benefit[lang]} />
+      <Line label={t.task}    text={pick(task, 'task', lang)}    muted />
+      <Line label={t.goal}    text={pick(task, 'goal', lang)}    muted />
+      <Line label={t.benefit} text={pick(task, 'benefit', lang)} />
 
       <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap', marginTop: 8 }}>
-        <span style={ROW_LABEL}>{L.amount}</span>
-        <span style={{ fontSize: 15, fontWeight: 700, letterSpacing: '-.01em', color }}>{task.value.amount}</span>
-        <ConfidenceBadge level={task.value.confidence} t={t} />
-        <span style={{ fontSize: 11, color: 'var(--muted)', lineHeight: 1.5, flex: 1, minWidth: 160 }}>{task.value.note[lang]}</span>
+        <span style={ROW_LABEL}>{t.amount}</span>
+        <span style={{ fontSize: 15, fontWeight: 700, letterSpacing: '-.01em', color }}>{task.value_amount}</span>
+        <ConfidenceBadge level={task.confidence} t={t} />
+        <span style={{ fontSize: 11, color: 'var(--muted)', lineHeight: 1.5, flex: 1, minWidth: 160 }}>{pick(task, 'value_note', lang)}</span>
+      </div>
+    </div>
+  )
+}
+
+/** Loading / error / empty state, styled as the page rather than bare text. */
+function Notice({ title, text }) {
+  return (
+    <div style={{ minHeight: '100vh', background: 'var(--bg)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 40 }}>
+      <div style={{ background: 'var(--card)', border: '1px solid var(--border)', borderRadius: 12, padding: '28px 32px', maxWidth: 460, textAlign: 'center' }}>
+        {title && <div style={{ fontSize: 15, fontWeight: 600, marginBottom: 8 }}>{title}</div>}
+        <div style={{ fontSize: 13, color: 'var(--muted)', lineHeight: 1.6 }}>{text}</div>
+        <Link to="/" style={{ display: 'inline-block', marginTop: 18, fontSize: 13, color: 'var(--accent1)', textDecoration: 'none' }}>← Dashboard</Link>
       </div>
     </div>
   )
@@ -192,6 +236,14 @@ export default function MonthlyReviewAugust() {
   const [scores, setScores] = useState({})
   const [savedId, setSavedId] = useState(null)
   const [failedId, setFailedId] = useState(null)
+  const [review, setReview] = useState(null)
+  const [loadError, setLoadError] = useState(false)
+
+  useEffect(() => {
+    api.get(`/monthly-review/${REVIEW_YEAR}/${REVIEW_MONTH}`)
+      .then(setReview)
+      .catch(err => { console.error('Monthly review load error:', err); setLoadError(true) })
+  }, [])
 
   useEffect(() => {
     api.get(`/performance-scores?week=${SCORE_WEEK}&year=${SCORE_YEAR}`)
@@ -217,7 +269,16 @@ export default function MonthlyReviewAugust() {
     }
   }
 
-  const totalTasks = ENGINEERS.reduce((n, e) => n + e.tasks.length, 0)
+  const engineers = review?.engineers ?? []
+  const summary = review?.summary ?? []
+  const totalTasks = engineers.reduce((n, e) => n + e.tasks.length, 0)
+  const periodLabel = pick(review?.meta, 'label', lang) || `${REVIEW_MONTH}/${REVIEW_YEAR}`
+  const assumptions = pick(review?.meta, 'assumptions', lang)
+
+  // The page is a network read now, so it has three states before content.
+  if (!review && !loadError) return <Notice text={t.loading} />
+  if (loadError) return <Notice title={t.errorTitle} text={t.errorBody} />
+  if (!engineers.length && !summary.length) return <Notice title={t.emptyTitle} text={t.emptyBody} />
 
   return (
     <div style={{ minHeight: '100vh', background: 'var(--bg)' }}>
@@ -232,7 +293,7 @@ export default function MonthlyReviewAugust() {
           </div>
           <div style={{ fontSize: 36, fontWeight: 700, letterSpacing: '-.02em', lineHeight: 1.1 }}>
             {t.title}<br />
-            <span style={{ background: 'linear-gradient(90deg, #3333cc, #00cfff)', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent' }}>{PERIOD.label[lang]}</span>
+            <span style={{ background: 'linear-gradient(90deg, #3333cc, #00cfff)', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent' }}>{periodLabel}</span>
           </div>
           <div style={{ fontSize: 13, color: 'var(--muted)', marginTop: 8 }}>{t.subtitle}</div>
           <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6, padding: '5px 12px', borderRadius: 20, background: 'rgba(51,51,204,.15)', border: '1px solid rgba(51,51,204,.3)', fontSize: 12, fontWeight: 500, color: '#8888ff', marginTop: 14 }}>
@@ -243,7 +304,7 @@ export default function MonthlyReviewAugust() {
         <div style={{ textAlign: 'right', paddingTop: 8 }}>
           <div style={{ fontSize: 12, color: 'var(--muted)', lineHeight: 2.2 }}>
             <div>{t.prevReview}: <strong style={{ color: 'var(--text)' }}>{t.prevReviewDate}</strong></div>
-            <div>{t.teamSize}: <strong style={{ color: 'var(--text)' }}>{ENGINEERS.length}</strong></div>
+            <div>{t.teamSize}: <strong style={{ color: 'var(--text)' }}>{engineers.length}</strong></div>
             <div>{t.period}: <strong style={{ color: 'var(--text)' }}>{t.periodDates}</strong></div>
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, justifyContent: 'flex-end', marginTop: 16 }}>
@@ -277,13 +338,13 @@ export default function MonthlyReviewAugust() {
         {/* ── SUMMARY ── */}
         <div style={{ marginBottom: 40 }}>
           <SectionLabel>{t.sectionSummary}</SectionLabel>
-          <div style={{ display: 'grid', gridTemplateColumns: `repeat(${SUMMARY[lang].length}, 1fr)`, gap: 12 }}>
-            {SUMMARY[lang].map((tile, i) => (
-              <div key={i} style={{ background: 'var(--card)', border: '1px solid var(--border)', borderRadius: 12, padding: '18px 20px', position: 'relative', overflow: 'hidden' }}>
-                <div style={{ position: 'absolute', top: 0, left: 0, right: 0, height: 2, background: `linear-gradient(90deg, ${confColor(SUMMARY_TONES[i])}, transparent)` }} />
-                <div style={{ fontSize: 28, fontWeight: 700, letterSpacing: '-.02em', color: confColor(SUMMARY_TONES[i]) }}>{tile.value}</div>
-                <div style={{ fontSize: 12, color: 'var(--text)', marginTop: 6, fontWeight: 500 }}>{tile.label}</div>
-                <div style={{ fontSize: 11, color: 'var(--muted)', marginTop: 4, lineHeight: 1.5 }}>{tile.sub}</div>
+          <div style={{ display: 'grid', gridTemplateColumns: `repeat(${summary.length || 1}, 1fr)`, gap: 12 }}>
+            {summary.map(card => (
+              <div key={card.id} style={{ background: 'var(--card)', border: '1px solid var(--border)', borderRadius: 12, padding: '18px 20px', position: 'relative', overflow: 'hidden' }}>
+                <div style={{ position: 'absolute', top: 0, left: 0, right: 0, height: 2, background: `linear-gradient(90deg, ${confColor(card.tone)}, transparent)` }} />
+                <div style={{ fontSize: 28, fontWeight: 700, letterSpacing: '-.02em', color: confColor(card.tone) }}>{card.value}</div>
+                <div style={{ fontSize: 12, color: 'var(--text)', marginTop: 6, fontWeight: 500 }}>{pick(card, 'label', lang)}</div>
+                <div style={{ fontSize: 11, color: 'var(--muted)', marginTop: 4, lineHeight: 1.5 }}>{pick(card, 'sub', lang)}</div>
               </div>
             ))}
           </div>
@@ -294,7 +355,7 @@ export default function MonthlyReviewAugust() {
           <SectionLabel>{t.sectionMethod}</SectionLabel>
           <div style={{ background: 'var(--card2)', border: '1px solid var(--border)', borderRadius: 10, padding: '14px 18px', display: 'flex', gap: 14, alignItems: 'flex-start' }}>
             <span style={{ fontSize: 10, fontWeight: 600, letterSpacing: '.08em', textTransform: 'uppercase', color: 'var(--muted)', paddingTop: 3, flexShrink: 0 }}>{t.method}</span>
-            <span style={{ fontSize: 12, color: 'var(--muted)', lineHeight: 1.65 }}>{ASSUMPTIONS[lang]}</span>
+            <span style={{ fontSize: 12, color: 'var(--muted)', lineHeight: 1.65 }}>{assumptions}</span>
           </div>
           {/* Confidence legend — the reader needs it before the first pill */}
           <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginTop: 12 }}>
@@ -306,20 +367,27 @@ export default function MonthlyReviewAugust() {
 
         {/* ── ENGINEERS ── */}
         <div style={{ marginBottom: 52 }}>
-          <SectionLabel>{t.sectionEngineers} · {totalTasks} {LABELS[lang].tasks}</SectionLabel>
+          <SectionLabel>{t.sectionEngineers} · {totalTasks} {t.tasks}</SectionLabel>
+          {/* A task whose engineer is not in this review renders nowhere. Say so
+              rather than letting it disappear silently. */}
+          {review.orphan_tasks > 0 && (
+            <div style={{ fontSize: 12, color: 'var(--warning)', marginBottom: 12 }}>
+              ⚠ {t.orphanWarning(review.orphan_tasks)}
+            </div>
+          )}
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 12, alignItems: 'start' }}>
-            {ENGINEERS.map(eng => (
+            {engineers.map(eng => (
               <div key={eng.id} style={{ background: 'var(--card)', border: '1px solid var(--border)', borderRadius: 12, padding: '20px 24px' }}>
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, marginBottom: 8, paddingBottom: 12, borderBottom: '1px solid var(--border)' }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
                     <div style={{ width: 30, height: 30, borderRadius: '50%', background: eng.color, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 11, fontWeight: 700, color: 'var(--bg)', flexShrink: 0 }}>{eng.initials}</div>
                     <div style={{ minWidth: 0 }}>
-                      <div style={{ fontSize: 14, fontWeight: 600 }}>{eng.name[lang]}</div>
-                      <div style={{ fontSize: 11, color: 'var(--muted)', marginTop: 1 }}>{eng.role[lang]}</div>
+                      <div style={{ fontSize: 14, fontWeight: 600 }}>{lang === 'ru' && eng.name_ru ? eng.name_ru : eng.name_en}</div>
+                      <div style={{ fontSize: 11, color: 'var(--muted)', marginTop: 1 }}>{pick(eng, 'role', lang)}</div>
                     </div>
                   </div>
                   <ScoreInput
-                    engId={ENGINEER_IDS[eng.id]}
+                    engId={eng.engineer_id}
                     color={eng.color}
                     scores={scores}
                     saveScore={saveScore}
@@ -329,7 +397,7 @@ export default function MonthlyReviewAugust() {
                   />
                 </div>
                 {eng.tasks.map((task, ti) => (
-                  <TaskRow key={ti} task={task} lang={lang} t={t} last={ti === eng.tasks.length - 1} />
+                  <TaskRow key={task.id} task={task} lang={lang} t={t} last={ti === eng.tasks.length - 1} />
                 ))}
               </div>
             ))}

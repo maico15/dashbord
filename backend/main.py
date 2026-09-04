@@ -499,6 +499,81 @@ def init_db():
             title_key  TEXT PRIMARY KEY,
             retired_at TEXT
         );
+
+        /* ── Monthly review ──────────────────────────────────────────────
+         * Curated per-month leadership review, previously a static JS file
+         * in the frontend bundle. Four tables keyed by (month, year) so a
+         * review can be edited without a deploy.
+         *   _meta      one row per month — title and the assumptions note
+         *   _summary   the headline cards
+         *   _engineers who appears, in what order, with the role they held
+         *              that month ("AI / Automation · until Aug 31")
+         *   _tasks     the work itself
+         * Name and colour come from team_members. name_ru lives here
+         * because team_members holds a single name.
+         * Keep this comment free of semicolons. executescript() splits the
+         * DDL on the semicolon character and would tear it in half.
+         */
+        CREATE TABLE IF NOT EXISTS monthly_review_meta (
+            id             INTEGER PRIMARY KEY AUTOINCREMENT,
+            month          INTEGER NOT NULL,
+            year           INTEGER NOT NULL,
+            label_en       TEXT DEFAULT '',
+            label_ru       TEXT DEFAULT '',
+            assumptions_en TEXT DEFAULT '',
+            assumptions_ru TEXT DEFAULT '',
+            updated_at     TEXT,
+            UNIQUE(month, year)
+        );
+
+        CREATE TABLE IF NOT EXISTS monthly_review_summary (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            month      INTEGER NOT NULL,
+            year       INTEGER NOT NULL,
+            sort_order INTEGER DEFAULT 0,
+            label_en   TEXT DEFAULT '',
+            label_ru   TEXT DEFAULT '',
+            value      TEXT DEFAULT '',
+            sub_en     TEXT DEFAULT '',
+            sub_ru     TEXT DEFAULT '',
+            tone       TEXT DEFAULT 'none',
+            updated_at TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS monthly_review_engineers (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            month       INTEGER NOT NULL,
+            year        INTEGER NOT NULL,
+            engineer_id INTEGER NOT NULL REFERENCES team_members(id) ON DELETE CASCADE,
+            name_ru     TEXT DEFAULT '',
+            role_en     TEXT DEFAULT '',
+            role_ru     TEXT DEFAULT '',
+            sort_order  INTEGER DEFAULT 0,
+            updated_at  TEXT,
+            UNIQUE(month, year, engineer_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS monthly_review_tasks (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            month         INTEGER NOT NULL,
+            year          INTEGER NOT NULL,
+            engineer_id   INTEGER NOT NULL REFERENCES team_members(id) ON DELETE CASCADE,
+            sort_order    INTEGER DEFAULT 0,
+            title_en      TEXT DEFAULT '',
+            title_ru      TEXT DEFAULT '',
+            task_en       TEXT DEFAULT '',
+            task_ru       TEXT DEFAULT '',
+            goal_en       TEXT DEFAULT '',
+            goal_ru       TEXT DEFAULT '',
+            benefit_en    TEXT DEFAULT '',
+            benefit_ru    TEXT DEFAULT '',
+            value_amount  TEXT DEFAULT '',
+            value_note_en TEXT DEFAULT '',
+            value_note_ru TEXT DEFAULT '',
+            confidence    TEXT NOT NULL DEFAULT 'none'
+                          CHECK (confidence IN ('confirmed','estimate','needs_data','none')),
+            updated_at    TEXT
+        );
     """)
     conn.commit()
     # Everything below this point is a migration/seed step, and every one of them runs
@@ -6797,6 +6872,371 @@ def get_releases():
         }
     except Exception as e:
         return {"releases": [], "error": str(e)}
+
+
+# -- Monthly review ------------------------------------------------------------
+# Curated leadership review, one per (month, year). Content lives in the DB so a
+# review can be corrected without a frontend deploy; see the four
+# monthly_review_* tables in init_db(). Reads are public (the page is public);
+# every write takes the admin password, like the rest of the admin surface.
+
+CONFIDENCE_LEVELS = ("confirmed", "estimate", "needs_data", "none")
+
+
+class ReviewMeta(BaseModel):
+    label_en: str = ""
+    label_ru: str = ""
+    assumptions_en: str = ""
+    assumptions_ru: str = ""
+
+
+class ReviewSummaryCard(BaseModel):
+    label_en: str = ""
+    label_ru: str = ""
+    value: str = ""
+    sub_en: str = ""
+    sub_ru: str = ""
+    tone: str = "none"
+
+
+class ReviewEngineer(BaseModel):
+    engineer_id: int
+    name_ru: str = ""
+    role_en: str = ""
+    role_ru: str = ""
+
+
+class ReviewTask(BaseModel):
+    engineer_id: int
+    title_en: str = ""
+    title_ru: str = ""
+    task_en: str = ""
+    task_ru: str = ""
+    goal_en: str = ""
+    goal_ru: str = ""
+    benefit_en: str = ""
+    benefit_ru: str = ""
+    value_amount: str = ""
+    value_note_en: str = ""
+    value_note_ru: str = ""
+    confidence: str = "none"
+
+
+class ReviewOrder(BaseModel):
+    ids: List[int]
+
+
+def _initials(name: str) -> str:
+    """AP from "Andrey Pogrebnyak". team_members has no initials column and the
+    review only ever shows two letters, so derive rather than store a field that
+    could drift from the name."""
+    parts = [p for p in (name or "").split() if p]
+    return "".join(p[0].upper() for p in parts[:2]) or "?"
+
+
+def _check_confidence(value: str):
+    if value not in CONFIDENCE_LEVELS:
+        raise HTTPException(422, "confidence must be one of " + ", ".join(CONFIDENCE_LEVELS))
+
+
+def _next_order(conn, table: str, month: int, year: int) -> int:
+    row = conn.execute(
+        "SELECT COALESCE(MAX(sort_order),0)+1 FROM " + table + " WHERE month=? AND year=?",
+        (month, year),
+    ).fetchone()
+    return row[0]
+
+
+@app.get("/api/monthly-review/{year}/{month}")
+def get_monthly_review(year: int, month: int):
+    """The whole review in one call - the page needs all of it to render, and one
+    round trip keeps it fast on the free-tier backend."""
+    conn = get_db()
+    c = conn.cursor()
+
+    c.execute(
+        "SELECT label_en, label_ru, assumptions_en, assumptions_ru "
+        "FROM monthly_review_meta WHERE month=? AND year=?",
+        (month, year),
+    )
+    row = c.fetchone()
+    meta = dict(row) if row else {
+        "label_en": "", "label_ru": "", "assumptions_en": "", "assumptions_ru": ""
+    }
+
+    c.execute(
+        "SELECT id, sort_order, label_en, label_ru, value, sub_en, sub_ru, tone "
+        "FROM monthly_review_summary WHERE month=? AND year=? ORDER BY sort_order, id",
+        (month, year),
+    )
+    summary = [dict(r) for r in c.fetchall()]
+
+    c.execute(
+        "SELECT e.id, e.engineer_id, e.name_ru, e.role_en, e.role_ru, e.sort_order, "
+        "       t.name AS name_en, t.avatar_color AS color "
+        "FROM monthly_review_engineers e "
+        "JOIN team_members t ON t.id = e.engineer_id "
+        "WHERE e.month=? AND e.year=? ORDER BY e.sort_order, e.id",
+        (month, year),
+    )
+    engineers = [dict(r) for r in c.fetchall()]
+
+    c.execute(
+        "SELECT id, engineer_id, sort_order, title_en, title_ru, task_en, task_ru, "
+        "       goal_en, goal_ru, benefit_en, benefit_ru, "
+        "       value_amount, value_note_en, value_note_ru, confidence "
+        "FROM monthly_review_tasks WHERE month=? AND year=? ORDER BY sort_order, id",
+        (month, year),
+    )
+    tasks = [dict(r) for r in c.fetchall()]
+    conn.close()
+
+    by_engineer = {}
+    for t in tasks:
+        by_engineer.setdefault(t["engineer_id"], []).append(t)
+
+    for e in engineers:
+        e["initials"] = _initials(e["name_en"])
+        e["tasks"] = by_engineer.get(e["engineer_id"], [])
+
+    listed = {e["engineer_id"] for e in engineers}
+    return {
+        "month": month, "year": year,
+        "meta": meta,
+        "summary": summary,
+        "engineers": engineers,
+        # Tasks belonging to nobody in _engineers would otherwise vanish from the
+        # page with no sign; surface the count so it is visible, not silent.
+        "orphan_tasks": sum(len(v) for k, v in by_engineer.items() if k not in listed),
+    }
+
+
+@app.put("/api/monthly-review/{year}/{month}/meta")
+def put_monthly_review_meta(year: int, month: int, data: ReviewMeta, password: str = ""):
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    conn = get_db()
+    now = datetime.utcnow().isoformat()
+    existing = conn.execute(
+        "SELECT id FROM monthly_review_meta WHERE month=? AND year=?", (month, year)
+    ).fetchone()
+    if existing:
+        conn.execute(
+            "UPDATE monthly_review_meta SET label_en=?, label_ru=?, assumptions_en=?, "
+            "assumptions_ru=?, updated_at=? WHERE month=? AND year=?",
+            (data.label_en, data.label_ru, data.assumptions_en, data.assumptions_ru,
+             now, month, year),
+        )
+    else:
+        conn.execute(
+            "INSERT INTO monthly_review_meta "
+            "(month, year, label_en, label_ru, assumptions_en, assumptions_ru, updated_at) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (month, year, data.label_en, data.label_ru, data.assumptions_en,
+             data.assumptions_ru, now),
+        )
+    conn.commit()
+    conn.close()
+    return {"ok": True}
+
+
+# Registered ahead of the /{id} routes below: FastAPI matches in registration
+# order and will not fall through when a path param fails to parse, so with
+# this last, PATCH /api/monthly-review/summary/reorder would be read as
+# card_id="reorder" and 422 instead of reaching this handler.
+@app.patch("/api/monthly-review/{kind}/reorder")
+def reorder_monthly_review(kind: str, data: ReviewOrder, password: str = ""):
+    """Reorder summary cards, engineers or tasks - ids in the order wanted."""
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    table = {
+        "summary":   "monthly_review_summary",
+        "engineers": "monthly_review_engineers",
+        "tasks":     "monthly_review_tasks",
+    }.get(kind)
+    if not table:
+        raise HTTPException(404, "Unknown collection")
+    conn = get_db()
+    now = datetime.utcnow().isoformat()
+    for i, row_id in enumerate(data.ids):
+        conn.execute(
+            "UPDATE " + table + " SET sort_order=?, updated_at=? WHERE id=?", (i, now, row_id)
+        )
+    conn.commit()
+    conn.close()
+    return {"ok": True, "reordered": len(data.ids)}
+
+
+@app.post("/api/monthly-review/{year}/{month}/summary")
+def add_summary_card(year: int, month: int, data: ReviewSummaryCard, password: str = ""):
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    _check_confidence(data.tone)
+    conn = get_db()
+    cur = conn.execute(
+        "INSERT INTO monthly_review_summary "
+        "(month, year, sort_order, label_en, label_ru, value, sub_en, sub_ru, tone, updated_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?)",
+        (month, year, _next_order(conn, "monthly_review_summary", month, year),
+         data.label_en, data.label_ru, data.value, data.sub_en, data.sub_ru,
+         data.tone, datetime.utcnow().isoformat()),
+    )
+    conn.commit()
+    cid = cur.lastrowid
+    conn.close()
+    return {"ok": True, "id": cid}
+
+
+@app.patch("/api/monthly-review/summary/{card_id}")
+def update_summary_card(card_id: int, data: ReviewSummaryCard, password: str = ""):
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    _check_confidence(data.tone)
+    conn = get_db()
+    conn.execute(
+        "UPDATE monthly_review_summary SET label_en=?, label_ru=?, value=?, sub_en=?, "
+        "sub_ru=?, tone=?, updated_at=? WHERE id=?",
+        (data.label_en, data.label_ru, data.value, data.sub_en, data.sub_ru,
+         data.tone, datetime.utcnow().isoformat(), card_id),
+    )
+    conn.commit()
+    conn.close()
+    return {"ok": True}
+
+
+@app.delete("/api/monthly-review/summary/{card_id}")
+def delete_summary_card(card_id: int, password: str = ""):
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    conn = get_db()
+    conn.execute("DELETE FROM monthly_review_summary WHERE id=?", (card_id,))
+    conn.commit()
+    conn.close()
+    return {"ok": True}
+
+
+@app.post("/api/monthly-review/{year}/{month}/engineers")
+def add_review_engineer(year: int, month: int, data: ReviewEngineer, password: str = ""):
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    conn = get_db()
+    if not conn.execute("SELECT id FROM team_members WHERE id=?", (data.engineer_id,)).fetchone():
+        conn.close()
+        raise HTTPException(422, "Unknown engineer_id")
+    if conn.execute(
+        "SELECT id FROM monthly_review_engineers WHERE month=? AND year=? AND engineer_id=?",
+        (month, year, data.engineer_id),
+    ).fetchone():
+        conn.close()
+        raise HTTPException(409, "Engineer already in this review")
+    cur = conn.execute(
+        "INSERT INTO monthly_review_engineers "
+        "(month, year, engineer_id, name_ru, role_en, role_ru, sort_order, updated_at) "
+        "VALUES (?,?,?,?,?,?,?,?)",
+        (month, year, data.engineer_id, data.name_ru, data.role_en, data.role_ru,
+         _next_order(conn, "monthly_review_engineers", month, year),
+         datetime.utcnow().isoformat()),
+    )
+    conn.commit()
+    eid = cur.lastrowid
+    conn.close()
+    return {"ok": True, "id": eid}
+
+
+@app.patch("/api/monthly-review/engineers/{row_id}")
+def update_review_engineer(row_id: int, data: ReviewEngineer, password: str = ""):
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    conn = get_db()
+    conn.execute(
+        "UPDATE monthly_review_engineers SET name_ru=?, role_en=?, role_ru=?, updated_at=? "
+        "WHERE id=?",
+        (data.name_ru, data.role_en, data.role_ru, datetime.utcnow().isoformat(), row_id),
+    )
+    conn.commit()
+    conn.close()
+    return {"ok": True}
+
+
+@app.delete("/api/monthly-review/engineers/{row_id}")
+def delete_review_engineer(row_id: int, password: str = ""):
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    conn = get_db()
+    row = conn.execute(
+        "SELECT month, year, engineer_id FROM monthly_review_engineers WHERE id=?", (row_id,)
+    ).fetchone()
+    if not row:
+        conn.close()
+        raise HTTPException(404, "Not found")
+    # Their tasks would otherwise stay in the table invisible to the page.
+    conn.execute(
+        "DELETE FROM monthly_review_tasks WHERE month=? AND year=? AND engineer_id=?",
+        (row["month"], row["year"], row["engineer_id"]),
+    )
+    conn.execute("DELETE FROM monthly_review_engineers WHERE id=?", (row_id,))
+    conn.commit()
+    conn.close()
+    return {"ok": True}
+
+
+@app.post("/api/monthly-review/{year}/{month}/tasks")
+def add_review_task(year: int, month: int, data: ReviewTask, password: str = ""):
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    _check_confidence(data.confidence)
+    conn = get_db()
+    if not conn.execute("SELECT id FROM team_members WHERE id=?", (data.engineer_id,)).fetchone():
+        conn.close()
+        raise HTTPException(422, "Unknown engineer_id")
+    cur = conn.execute(
+        "INSERT INTO monthly_review_tasks "
+        "(month, year, engineer_id, sort_order, title_en, title_ru, task_en, task_ru, "
+        " goal_en, goal_ru, benefit_en, benefit_ru, value_amount, value_note_en, "
+        " value_note_ru, confidence, updated_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (month, year, data.engineer_id,
+         _next_order(conn, "monthly_review_tasks", month, year),
+         data.title_en, data.title_ru, data.task_en, data.task_ru,
+         data.goal_en, data.goal_ru, data.benefit_en, data.benefit_ru,
+         data.value_amount, data.value_note_en, data.value_note_ru,
+         data.confidence, datetime.utcnow().isoformat()),
+    )
+    conn.commit()
+    tid = cur.lastrowid
+    conn.close()
+    return {"ok": True, "id": tid}
+
+
+@app.patch("/api/monthly-review/tasks/{task_id}")
+def update_review_task(task_id: int, data: ReviewTask, password: str = ""):
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    _check_confidence(data.confidence)
+    conn = get_db()
+    conn.execute(
+        "UPDATE monthly_review_tasks SET engineer_id=?, title_en=?, title_ru=?, task_en=?, "
+        "task_ru=?, goal_en=?, goal_ru=?, benefit_en=?, benefit_ru=?, value_amount=?, "
+        "value_note_en=?, value_note_ru=?, confidence=?, updated_at=? WHERE id=?",
+        (data.engineer_id, data.title_en, data.title_ru, data.task_en, data.task_ru,
+         data.goal_en, data.goal_ru, data.benefit_en, data.benefit_ru,
+         data.value_amount, data.value_note_en, data.value_note_ru, data.confidence,
+         datetime.utcnow().isoformat(), task_id),
+    )
+    conn.commit()
+    conn.close()
+    return {"ok": True}
+
+
+@app.delete("/api/monthly-review/tasks/{task_id}")
+def delete_review_task(task_id: int, password: str = ""):
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    conn = get_db()
+    conn.execute("DELETE FROM monthly_review_tasks WHERE id=?", (task_id,))
+    conn.commit()
+    conn.close()
+    return {"ok": True}
 
 
 if __name__ == "__main__":

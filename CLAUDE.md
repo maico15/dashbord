@@ -83,7 +83,8 @@ Key helpers:
 - `_anthropic_get(path, admin_key, usage_beta=True)` — HTTP call to Anthropic API with error logging
 
 **SQLite/PostgreSQL tables**:
-`team_members`, `dev_metrics`, `support_metrics`, `docs_metrics`, `score_rules`, `config`, `ai_usage_cache`, `weekly_tasks`, `sync_log`, `api_key_mapping`, `ai_usage`, `daily_reports`
+`team_members`, `dev_metrics`, `support_metrics`, `docs_metrics`, `score_rules`, `config`, `ai_usage_cache`, `weekly_tasks`, `sync_log`, `api_key_mapping`, `ai_usage`, `daily_reports`,
+`monthly_review_meta`, `monthly_review_summary`, `monthly_review_engineers`, `monthly_review_tasks`
 
 **Key endpoints**:
 
@@ -102,6 +103,10 @@ Key helpers:
 | GET | `/api/ai-usage/test` | pw | Test Anthropic Admin API key |
 | GET/PUT | `/api/ai-key-mappings` | PUT needs pw | Engineer ↔ Anthropic key ID mapping |
 | GET | `/api/reports` | — | Daily reports by date |
+| GET | `/api/monthly-review/{year}/{month}` | — | Whole review in one call — meta, summary cards, engineers with nested tasks |
+| PUT | `/api/monthly-review/{year}/{month}/meta` | pw | Upsert the month's title + assumptions note |
+| POST/PATCH/DELETE | `/api/monthly-review/.../summary`, `/engineers`, `/tasks` | pw | Review content CRUD |
+| PATCH | `/api/monthly-review/{summary\|engineers\|tasks}/reorder` | pw | Reorder by id list |
 | POST | `/api/sync/jira` | pw | Trigger Jira sync |
 | POST | `/api/sync/github` | pw | Trigger GitHub PR sync |
 | GET | `/api/sync/github/debug` | — | Config + live API test + last 5 log entries |
@@ -209,6 +214,44 @@ Deliberately **not** in `ai_tool_sessions` — that table feeds engineer XP via
 plus the top allocation sites and flushes state. `--memdebug` runs the collector
 headless with tracemalloc sampling — see `cc_memdebug.py` and
 `scripts/memdebug_stub_server.py`.
+
+## Monthly Review
+
+The curated leadership review at `/review/august-2026` reads from the database,
+not a bundled file, so a figure can be corrected without a frontend deploy.
+
+Four tables keyed by `(month, year)`:
+
+| Table | Holds |
+|---|---|
+| `monthly_review_meta` | one row per month — bilingual title, assumptions note |
+| `monthly_review_summary` | the headline cards (`tone` uses the confidence scale) |
+| `monthly_review_engineers` | who appears, in what order, and the role held **that month** |
+| `monthly_review_tasks` | the work — task / goal / benefit / value + `confidence` |
+
+Bilingual content is stored as parallel `_en` / `_ru` columns; the page's
+`pick(row, field, lang)` reads the active half. Engineer name and colour come
+from `team_members` via a join and initials are derived from the name, so those
+never drift; `name_ru` lives on the review row because `team_members` holds a
+single name. Roles are per-review because they change month to month
+("AI / Automation · until Aug 31").
+
+`confidence` and summary `tone` share one scale, enforced by a CHECK
+constraint: `confirmed` | `estimate` | `needs_data` | `none`.
+
+Reads are public (the page is public); every write takes `?password=`.
+`GET` on a month with no rows returns empty lists rather than a 404, and the
+page shows a "not published" notice. A task whose engineer is not listed in
+`monthly_review_engineers` renders nowhere, so the GET reports `orphan_tasks`
+and the page warns rather than dropping it silently.
+
+**Importing a static review**: `scripts/migrate_review_to_db.py` parses a
+`frontend/src/data/<month><year>.js` module and writes it into these tables.
+Run `--dry-run` first. It refuses to overwrite a month whose task count has
+drifted from the source file (someone edited via the API) unless `--force`.
+August 2026 was imported this way and its source file deleted.
+
+Editing is API-only for now — an Admin panel section is not built yet.
 
 ## Work Streams & Scoring
 
