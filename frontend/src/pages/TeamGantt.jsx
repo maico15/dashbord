@@ -862,6 +862,23 @@ function CheckGlyph() {
   );
 }
 
+/** Sheet-style calendar. Inlined for the same reason as CheckGlyph — no icon
+ *  library in the project, and the toolbar needs exactly one calendar. */
+function CalendarGlyph() {
+  return (
+    <svg viewBox="0 0 14 14" width="11" height="11" aria-hidden="true">
+      <rect
+        x="1.5" y="2.5" width="11" height="10" rx="1.5"
+        fill="none" stroke="currentColor" strokeWidth="1.3"
+      />
+      <path
+        d="M1.5 5.5 H12.5 M4.5 1.5 V3.5 M9.5 1.5 V3.5"
+        fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round"
+      />
+    </svg>
+  );
+}
+
 const STATUS_LABEL = {
   active: "active", queued: "queued", done: "done",
   continuous: "ongoing", error: "?", idle: "idle",
@@ -2350,6 +2367,11 @@ export default function TeamGantt() {
           ))}
         </div>
 
+        <span className="tg-sep" />
+        <Link to="/review/august-2026" className="tg-btn" title="August 2026 monthly review">
+          <CalendarGlyph /> Monthly review
+        </Link>
+
         <div className="tg-controls">
           <button className="tg-btn" onClick={syncFromReports}>⟳ Sync from reports</button>
           {editMode && (
@@ -3075,6 +3097,10 @@ function Style() {
       .tg-btn{height:28px;padding:4px 10px;border-radius:var(--radius);border:1px solid var(--border-strong);
         background:var(--surface-0);color:var(--text);font-size:11px;font-weight:500;cursor:pointer;
         font-family:inherit;display:flex;align-items:center;gap:4px;white-space:nowrap}
+      /* The Monthly review link wears .tg-btn too — strip the anchor underline
+       * and keep it from being squeezed, without touching the real buttons. */
+      a.tg-btn{text-decoration:none;flex:none}
+      a.tg-btn:hover{border-color:var(--accent1);color:var(--text-accent)}
       .tg-btn.on{background:var(--accent1);color:var(--on-accent);border-color:var(--accent1)}
       .tg-btn:disabled{opacity:.4;cursor:not-allowed}
       .tg-btn-save.on{background:var(--fill-accent);border-color:var(--fill-accent);color:var(--on-accent)}
