@@ -547,7 +547,7 @@ function BadgeLabel({ type, t }) {
 }
 
 function CompareCard({ label, mayVal, juneVal, delta, deltaType = 'up', mayNote, juneNote, accent, footNote }) {
-  const accentColor = accent || 'var(--accent)'
+  const accentColor = accent || 'var(--accent1)'
   const deltaStyle = deltaType === 'new'
     ? { background: 'rgba(0,207,255,.15)', color: 'var(--accent1)' }
     : { background: 'rgba(34,197,94,.15)', color: 'var(--success)' }
@@ -685,7 +685,7 @@ export default function MonthlyReview() {
             {/* Language toggle */}
             <div style={{ display: 'flex', gap: 6 }}>
               {['en', 'ru'].map(l => (
-                <button key={l} onClick={() => setLang(l)} style={{ padding: '5px 14px', borderRadius: 8, border: '1px solid var(--border)', cursor: 'pointer', fontSize: 12, fontWeight: 600, textTransform: 'uppercase', background: lang === l ? 'var(--accent)' : 'var(--card)', color: lang === l ? '#fff' : 'var(--muted)', transition: 'all .2s' }}>
+                <button key={l} onClick={() => setLang(l)} style={{ padding: '5px 14px', borderRadius: 8, border: '1px solid var(--border)', cursor: 'pointer', fontSize: 12, fontWeight: 600, textTransform: 'uppercase', background: lang === l ? 'var(--accent1)' : 'var(--card)', color: lang === l ? 'var(--on-accent)' : 'var(--muted)', transition: 'all .2s' }}>
                   {l}
                 </button>
               ))}
@@ -771,7 +771,7 @@ export default function MonthlyReview() {
                     <span style={{ color: row.peak ? 'var(--accent1)' : 'var(--text)' }}>{row.val}{row.peak ? ` ${t.peak}` : ''}</span>
                   </div>
                   <div style={{ height: 5, background: 'var(--border)', borderRadius: 3 }}>
-                    <div style={{ width: `${row.w}%`, height: 5, borderRadius: 3, background: row.peak ? 'linear-gradient(90deg, var(--accent), var(--accent1))' : 'var(--accent)' }} />
+                    <div style={{ width: `${row.w}%`, height: 5, borderRadius: 3, background: row.peak ? 'linear-gradient(90deg, var(--accent2), var(--accent1))' : 'var(--accent1)' }} />
                   </div>
                 </div>
               ))}

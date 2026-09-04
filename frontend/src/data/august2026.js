@@ -14,17 +14,20 @@ export const ASSUMPTIONS = {
 export const SUMMARY = {
   en: [
     { label: 'Confirmed savings', value: '$157K', sub: 'ezMCP pilot avoided $150K + Workspace $6.85K/yr' },
-    { label: 'Brought under control', value: '$510K', sub: 'Authorize.Net unsettled charges gap' },
     { label: 'Leaks stopped', value: '3', sub: 'reward minted ×3, double charge path, brand-less payment SMS' },
     { label: 'Awaiting business input for $', value: '3', sub: 'average ticket · Passport ARPU · AI cost per call' },
   ],
   ru: [
     { label: 'Подтверждённая экономия', value: '$157K', sub: 'ezMCP pilot $150K + Workspace $6.85K/год' },
-    { label: 'Взято под контроль', value: '$510K', sub: 'разрыв Authorize.Net unsettled charges' },
     { label: 'Утечек остановлено', value: '3', sub: 'rewards ×3, двойное списание, SMS без бренда' },
     { label: 'Нужны данные для $', value: '3', sub: 'средний чек · ARPU Passport · $/звонок' },
   ],
 };
+
+// One tone per SUMMARY card, in card order, on the same scale as the task
+// confidence pills. Kept beside SUMMARY (not in the page, and not per-language)
+// so adding or dropping a card cannot silently shift every card's colour.
+export const SUMMARY_TONES = ['confirmed', 'confirmed', 'needs_data'];
 
 // confidence: 'confirmed' | 'estimate' | 'needs_data' | 'none'
 export const ENGINEERS = [
@@ -33,12 +36,6 @@ export const ENGINEERS = [
     name: { en: 'Andrey Pogrebnyak', ru: 'Андрей Погребняк' },
     role: { en: 'Full-stack', ru: 'Full-stack' },
     tasks: [
-      {
-        title: { en: 'Finance Data — Authorize.Net reconciliation', ru: 'Finance Data — сверка Authorize.Net' },
-        goal: { en: 'Payments in Authorize.Net did not match CRM — part of the money was invisible to reports and accounting.', ru: 'Платежи из Authorize.Net не сходились с CRM — часть денег не была видна ни в отчётах, ни в бухгалтерии.' },
-        effect: { en: 'Sync 96.2%. Unsettled-charges gap of $509,981 identified. Homes dimension: 617K locations, 481K unique homes, 98K Zillow-matched. Saba/Sardor scorecard live with ARPH and Active Households.', ru: 'Sync 96.2%. Выявлен разрыв $509,981 unsettled charges. Homes dimension: 617K локаций, 481K домов, 98K Zillow-matched. Scorecard Saba/Sardor live с ARPH и Active Households.' },
-        value: { amount: '$509,981', note: { en: 'brought under control for reconciliation and recovery', ru: 'взято под контроль для сверки и востребования' }, confidence: 'confirmed' },
-      },
       {
         title: { en: 'Passport 2 — notifications and data accuracy', ru: 'Passport 2 — уведомления и точность данных' },
         goal: { en: 'Members were not receiving SMS confirmations and 133 of 202 saw the wrong tier — trust and renewals at risk.', ru: 'Участники не получали SMS-подтверждения, 133 из 202 видели неверный тариф — под риском доверие и продления.' },
