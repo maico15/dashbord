@@ -3,7 +3,7 @@ import { Link } from 'react-router-dom'
 import { useTheme, toggleTheme } from '../hooks/useTheme'
 import { api } from '../api/client'
 import {
-  PERIOD, ASSUMPTIONS, SUMMARY, ENGINEERS,
+  PERIOD, ASSUMPTIONS, SUMMARY, SUMMARY_TONES, ENGINEERS,
   ENGINEER_IDS, SCORE_WEEK, SCORE_YEAR,
 } from '../data/august2026'
 
@@ -108,10 +108,6 @@ function confColor(level) {
   return CONF_COLOR[level] || CONF_COLOR.none
 }
 
-// Summary tiles, in SUMMARY order, coloured on the same scale as the pills:
-// confirmed money · money under control but not yet recovered · leaks stopped ·
-// the count of figures still waiting on a business input.
-const SUMMARY_COLORS = ['var(--success)', 'var(--warning)', 'var(--accent1)', 'var(--muted)']
 
 function ConfidenceBadge({ level, t }) {
   const color = confColor(level)
@@ -257,7 +253,7 @@ export default function MonthlyReviewAugust() {
             {/* Language toggle */}
             <div style={{ display: 'flex', gap: 6 }}>
               {['en', 'ru'].map(l => (
-                <button key={l} onClick={() => setLang(l)} style={{ padding: '5px 14px', borderRadius: 8, border: '1px solid var(--border)', cursor: 'pointer', fontSize: 12, fontWeight: 600, textTransform: 'uppercase', background: lang === l ? 'var(--accent1)' : 'var(--card)', color: lang === l ? '#fff' : 'var(--muted)', transition: 'all .2s' }}>
+                <button key={l} onClick={() => setLang(l)} style={{ padding: '5px 14px', borderRadius: 8, border: '1px solid var(--border)', cursor: 'pointer', fontSize: 12, fontWeight: 600, textTransform: 'uppercase', background: lang === l ? 'var(--accent1)' : 'var(--card)', color: lang === l ? 'var(--on-accent)' : 'var(--muted)', transition: 'all .2s' }}>
                   {l}
                 </button>
               ))}
@@ -276,11 +272,11 @@ export default function MonthlyReviewAugust() {
         {/* ── SUMMARY ── */}
         <div style={{ marginBottom: 40 }}>
           <SectionLabel>{t.sectionSummary}</SectionLabel>
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: `repeat(${SUMMARY[lang].length}, 1fr)`, gap: 12 }}>
             {SUMMARY[lang].map((tile, i) => (
               <div key={i} style={{ background: 'var(--card)', border: '1px solid var(--border)', borderRadius: 12, padding: '18px 20px', position: 'relative', overflow: 'hidden' }}>
-                <div style={{ position: 'absolute', top: 0, left: 0, right: 0, height: 2, background: `linear-gradient(90deg, ${SUMMARY_COLORS[i]}, transparent)` }} />
-                <div style={{ fontSize: 28, fontWeight: 700, letterSpacing: '-.02em', color: SUMMARY_COLORS[i] }}>{tile.value}</div>
+                <div style={{ position: 'absolute', top: 0, left: 0, right: 0, height: 2, background: `linear-gradient(90deg, ${confColor(SUMMARY_TONES[i])}, transparent)` }} />
+                <div style={{ fontSize: 28, fontWeight: 700, letterSpacing: '-.02em', color: confColor(SUMMARY_TONES[i]) }}>{tile.value}</div>
                 <div style={{ fontSize: 12, color: 'var(--text)', marginTop: 6, fontWeight: 500 }}>{tile.label}</div>
                 <div style={{ fontSize: 11, color: 'var(--muted)', marginTop: 4, lineHeight: 1.5 }}>{tile.sub}</div>
               </div>

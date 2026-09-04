@@ -674,7 +674,7 @@ function Style() {
       .mr-icon-btn{width:32px;height:32px;border-radius:8px;border:1px solid var(--border);background:var(--card);color:var(--muted);cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:15px}
       .mr-lang{display:flex;gap:6px}
       .mr-lang button{padding:5px 12px;border-radius:8px;border:1px solid var(--border);background:var(--card);color:var(--muted);font-size:12px;font-weight:600;text-transform:uppercase;cursor:pointer}
-      .mr-lang button.active{background:var(--accent);color:#fff;border-color:var(--accent)}
+      .mr-lang button.active{background:var(--accent1);color:var(--on-accent);border-color:var(--accent1)}
       .mr-coverage{display:inline-block;margin-top:12px;padding:5px 12px;border:1px solid var(--border);border-radius:16px;font-size:11.5px;color:var(--warning)}
 
       .mr-section-title{font-size:12px;font-weight:600;letter-spacing:.16em;text-transform:uppercase;color:var(--muted);border-bottom:1px solid var(--border);padding-bottom:10px;margin:44px 0 18px}
