@@ -1,13 +1,17 @@
 import { useState, useEffect } from 'react'
-import { Link } from 'react-router-dom'
+import { Link, useParams } from 'react-router-dom'
 import { useTheme, toggleTheme } from '../hooks/useTheme'
 import { api } from '../api/client'
 
 /**
- * MonthlyReviewAugust — curated August 2026 review.
+ * MonthlyReviewCurated — the curated leadership review for one month.
  *
- * Content comes from GET /api/monthly-review/2026/8, not a bundled file, so a
- * figure can be corrected without a deploy. T below is page chrome only.
+ * Serves /review/:year/:month; the legacy /review/august-2026 path carries no
+ * params and falls back to August 2026. Content comes from
+ * GET /api/monthly-review/{year}/{month}, not a bundled file, so a figure can be
+ * corrected without a deploy. T below is page chrome only, and every date in it
+ * is derived from the month being shown rather than hard-coded, so publishing a
+ * new month needs no frontend change.
  *
  * Every task carries goal / benefit / value plus a confidence level, so a claim
  * always says how sure we are of it and, where a dollar figure needs a business
@@ -16,16 +20,69 @@ import { api } from '../api/client'
  * Rows arrive with parallel _en/_ru columns; pick() reads the active language.
  */
 
-const REVIEW_MONTH = 8
-const REVIEW_YEAR = 2026
-
-// Aug 31 / Sep 1 2026 falls in ISO week 36 — the review is scored on the week it
-// is presented, the same way June 2026 was scored on week 27.
-const SCORE_WEEK = 36
-const SCORE_YEAR = 2026
+const DEFAULT_MONTH = 8
+const DEFAULT_YEAR = 2026
 
 /** Read the active language's half of a row: pick(task, 'title', 'ru'). */
 const pick = (row, field, lang) => (row ? row[`${field}_${lang}`] || '' : '')
+
+// ── Month chrome (derived, never hard-coded per month) ───────────────────────
+const MONTH_NAMES = {
+  en: ['January', 'February', 'March', 'April', 'May', 'June',
+       'July', 'August', 'September', 'October', 'November', 'December'],
+  ru: ['Январь', 'Февраль', 'Март', 'Апрель', 'Май', 'Июнь',
+       'Июль', 'Август', 'Сентябрь', 'Октябрь', 'Ноябрь', 'Декабрь'],
+}
+
+// Russian dates take the genitive: "1 сентября 2026", not "1 Сентябрь 2026".
+const MONTH_GENITIVE_RU = ['января', 'февраля', 'марта', 'апреля', 'мая', 'июня',
+  'июля', 'августа', 'сентября', 'октября', 'ноября', 'декабря']
+
+// Which review preceded a given month. Not derivable — there was no July 2026
+// review, so August's predecessor is June. Absent ⇒ the line is not shown.
+const PREVIOUS_REVIEW = {
+  '2026-8': { en: 'June 2026 — July 1', ru: 'Июнь 2026 — 1 июля' },
+}
+
+const shiftMonth = (year, month, by) => {
+  const i = month - 1 + by
+  return { year: year + Math.floor(i / 12), month: ((i % 12) + 12) % 12 + 1 }
+}
+
+const monthYear = (year, month, lang) => `${MONTH_NAMES[lang][month - 1]} ${year}`
+
+/** The label inside "Данные за …" — Russian keeps the nominative form there
+ *  ("за август 2026", not the genitive "за августа 2026"). */
+const monthYearInProse = (year, month, lang) => (lang === 'ru'
+  ? `${MONTH_NAMES.ru[month - 1].toLowerCase()} ${year}`
+  : monthYear(year, month, 'en'))
+
+/** "September 1, 2026" / "1 сентября 2026" — a review is presented on the 1st. */
+const firstOfMonth = (year, month, lang) => (lang === 'ru'
+  ? `1 ${MONTH_GENITIVE_RU[month - 1]} ${year}`
+  : `${MONTH_NAMES.en[month - 1]} 1, ${year}`)
+
+/** ISO week of a date — the review is scored on the week it is presented. */
+function isoWeek(d) {
+  const date = new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()))
+  const day = date.getUTCDay() || 7
+  date.setUTCDate(date.getUTCDate() + 4 - day)
+  const yearStart = new Date(Date.UTC(date.getUTCFullYear(), 0, 1))
+  return { week: Math.ceil(((date - yearStart) / 86400000 + 1) / 7), year: date.getUTCFullYear() }
+}
+
+/** "Aug 3 – Aug 31, 2026" — the period covers working days, so a month that
+ *  opens on a weekend starts on the following Monday. */
+function periodDates(year, month, lang) {
+  const dow = new Date(year, month - 1, 1).getDay()   // 0 Sun … 6 Sat
+  const startDay = dow === 0 ? 2 : dow === 6 ? 3 : 1
+  const endDay = new Date(year, month, 0).getDate()
+  if (lang === 'ru') {
+    return `${startDay} – ${endDay} ${MONTH_GENITIVE_RU[month - 1]} ${year}`
+  }
+  const abbr = MONTH_NAMES.en[month - 1].slice(0, 3)
+  return `${abbr} ${startDay} – ${abbr} ${endDay}, ${year}`
+}
 
 // ── Translations (chrome only) ────────────────────────────────────────────────
 const T = {
@@ -33,16 +90,13 @@ const T = {
     title: 'IT Department',
     subtitle: 'Engineering · Infrastructure · AI · Operations',
     presented: 'Presented',
-    presentedDate: 'September 1, 2026',
     prevReview: 'Previous review',
-    prevReviewDate: 'June 2026 — July 1',
     teamSize: 'Team size',
     period: 'Period',
-    periodDates: 'Aug 3 – Aug 31, 2026',
     backToDashboard: '← Dashboard',
-    sectionSummary: 'August 2026 — Bottom Line',
+    sectionSummary: m => `${m} — Bottom Line`,
     sectionMethod: 'How these numbers were derived',
-    sectionEngineers: 'Work by Engineer — August 2026',
+    sectionEngineers: m => `Work by Engineer — ${m}`,
     method: 'Method',
     score: 'Score',
     task: 'Task',
@@ -54,10 +108,10 @@ const T = {
     errorTitle: 'Could not load the review',
     errorBody: 'The review API did not respond. Reload to try again.',
     emptyTitle: 'No review published for this month',
-    emptyBody: 'Nothing has been entered for August 2026 yet.',
+    emptyBody: m => `Nothing has been entered for ${m} yet.`,
     orphanWarning: n => `${n} task${n === 1 ? '' : 's'} belong to an engineer who is not listed in this review and are not shown.`,
     footer: 'Engineering Dashboard · Sources: EOD/EOW reports, #devs-and-product, #devs-apollo',
-    nextReview: 'Next review: October 1, 2026 →',
+    nextReview: d => `Next review: ${d} →`,
     conf: {
       confirmed: 'Confirmed',
       estimate: 'Estimate',
@@ -69,16 +123,13 @@ const T = {
     title: 'IT Отдел',
     subtitle: 'Разработка · Инфраструктура · AI · Операции',
     presented: 'Презентация',
-    presentedDate: '1 сентября 2026',
     prevReview: 'Предыдущий обзор',
-    prevReviewDate: 'Июнь 2026 — 1 июля',
     teamSize: 'Команда',
     period: 'Период',
-    periodDates: '3 – 31 августа 2026',
     backToDashboard: '← Дашборд',
-    sectionSummary: 'Август 2026 — Итог',
+    sectionSummary: m => `${m} — Итог`,
     sectionMethod: 'Как получены эти цифры',
-    sectionEngineers: 'Работа по инженерам — Август 2026',
+    sectionEngineers: m => `Работа по инженерам — ${m}`,
     method: 'Методика',
     score: 'Оценка',
     task: 'Задача',
@@ -90,10 +141,10 @@ const T = {
     errorTitle: 'Не удалось загрузить обзор',
     errorBody: 'API обзора не ответил. Обновите страницу, чтобы повторить.',
     emptyTitle: 'За этот месяц обзор не опубликован',
-    emptyBody: 'Данные за август 2026 ещё не внесены.',
+    emptyBody: m => `Данные за ${m} ещё не внесены.`,
     orphanWarning: n => `${n} задач(и) относятся к инженеру, которого нет в этом обзоре, и не показаны.`,
     footer: 'Engineering Dashboard · Источники: EOD/EOW репорты, #devs-and-product, #devs-apollo',
-    nextReview: 'Следующий обзор: 1 октября 2026 →',
+    nextReview: d => `Следующий обзор: ${d} →`,
     conf: {
       confirmed: 'Подтверждено',
       estimate: 'Оценка',
@@ -229,7 +280,7 @@ function Notice({ title, text }) {
 }
 
 // ── Main Component ────────────────────────────────────────────────────────────
-export default function MonthlyReviewAugust() {
+export default function MonthlyReviewCurated() {
   const [lang, setLang] = useState('en')
   const theme = useTheme()
   const t = T[lang]
@@ -239,17 +290,29 @@ export default function MonthlyReviewAugust() {
   const [review, setReview] = useState(null)
   const [loadError, setLoadError] = useState(false)
 
-  useEffect(() => {
-    api.get(`/monthly-review/${REVIEW_YEAR}/${REVIEW_MONTH}`)
-      .then(setReview)
-      .catch(err => { console.error('Monthly review load error:', err); setLoadError(true) })
-  }, [])
+  // /review/:year/:month — the legacy /review/august-2026 path has no params.
+  const params = useParams()
+  const reviewYear = Number(params.year) || DEFAULT_YEAR
+  const reviewMonth = Number(params.month) || DEFAULT_MONTH
+
+  // A review is presented on the 1st of the following month and scored on the
+  // week it is presented — the same rule June 2026 (week 27) was scored under.
+  const presentedOn = shiftMonth(reviewYear, reviewMonth, 1)
+  const scoreWeek = isoWeek(new Date(presentedOn.year, presentedOn.month - 1, 1))
 
   useEffect(() => {
-    api.get(`/performance-scores?week=${SCORE_WEEK}&year=${SCORE_YEAR}`)
+    setReview(null)
+    setLoadError(false)
+    api.get(`/monthly-review/${reviewYear}/${reviewMonth}`)
+      .then(setReview)
+      .catch(err => { console.error('Monthly review load error:', err); setLoadError(true) })
+  }, [reviewYear, reviewMonth])
+
+  useEffect(() => {
+    api.get(`/performance-scores?week=${scoreWeek.week}&year=${scoreWeek.year}`)
       .then(setScores)
       .catch(() => {})
-  }, [])
+  }, [scoreWeek.week, scoreWeek.year])
 
   const saveScore = async (engineerId, val) => {
     const num = parseInt(val)
@@ -257,7 +320,7 @@ export default function MonthlyReviewAugust() {
     const pw = sessionStorage.getItem('admin_pw') || ''
     try {
       await api.post('/performance-scores',
-        { engineer_id: engineerId, week: SCORE_WEEK, year: SCORE_YEAR, score: num }, pw)
+        { engineer_id: engineerId, week: scoreWeek.week, year: scoreWeek.year, score: num }, pw)
       setScores(prev => ({ ...prev, [engineerId]: num }))
       setSavedId(engineerId)
       setTimeout(() => setSavedId(null), 1500)
@@ -272,13 +335,21 @@ export default function MonthlyReviewAugust() {
   const engineers = review?.engineers ?? []
   const summary = review?.summary ?? []
   const totalTasks = engineers.reduce((n, e) => n + e.tasks.length, 0)
-  const periodLabel = pick(review?.meta, 'label', lang) || `${REVIEW_MONTH}/${REVIEW_YEAR}`
+  const monthLabel = monthYear(reviewYear, reviewMonth, lang)
+  const periodLabel = pick(review?.meta, 'label', lang) || monthLabel
   const assumptions = pick(review?.meta, 'assumptions', lang)
+
+  const presentedDate = firstOfMonth(presentedOn.year, presentedOn.month, lang)
+  const nextOn = shiftMonth(reviewYear, reviewMonth, 2)
+  const nextReviewDate = firstOfMonth(nextOn.year, nextOn.month, lang)
+  const previousReview = PREVIOUS_REVIEW[`${reviewYear}-${reviewMonth}`]?.[lang]
 
   // The page is a network read now, so it has three states before content.
   if (!review && !loadError) return <Notice text={t.loading} />
   if (loadError) return <Notice title={t.errorTitle} text={t.errorBody} />
-  if (!engineers.length && !summary.length) return <Notice title={t.emptyTitle} text={t.emptyBody} />
+  if (!engineers.length && !summary.length) {
+    return <Notice title={t.emptyTitle} text={t.emptyBody(monthYearInProse(reviewYear, reviewMonth, lang))} />
+  }
 
   return (
     <div style={{ minHeight: '100vh', background: 'var(--bg)' }}>
@@ -298,14 +369,14 @@ export default function MonthlyReviewAugust() {
           <div style={{ fontSize: 13, color: 'var(--muted)', marginTop: 8 }}>{t.subtitle}</div>
           <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6, padding: '5px 12px', borderRadius: 20, background: 'rgba(51,51,204,.15)', border: '1px solid rgba(51,51,204,.3)', fontSize: 12, fontWeight: 500, color: '#8888ff', marginTop: 14 }}>
             <div style={{ width: 6, height: 6, borderRadius: '50%', background: 'var(--success)' }} />
-            {t.presented} {t.presentedDate}
+            {t.presented} {presentedDate}
           </div>
         </div>
         <div style={{ textAlign: 'right', paddingTop: 8 }}>
           <div style={{ fontSize: 12, color: 'var(--muted)', lineHeight: 2.2 }}>
-            <div>{t.prevReview}: <strong style={{ color: 'var(--text)' }}>{t.prevReviewDate}</strong></div>
+            {previousReview && <div>{t.prevReview}: <strong style={{ color: 'var(--text)' }}>{previousReview}</strong></div>}
             <div>{t.teamSize}: <strong style={{ color: 'var(--text)' }}>{engineers.length}</strong></div>
-            <div>{t.period}: <strong style={{ color: 'var(--text)' }}>{t.periodDates}</strong></div>
+            <div>{t.period}: <strong style={{ color: 'var(--text)' }}>{periodDates(reviewYear, reviewMonth, lang)}</strong></div>
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, justifyContent: 'flex-end', marginTop: 16 }}>
             {/* Theme toggle */}
@@ -337,7 +408,7 @@ export default function MonthlyReviewAugust() {
 
         {/* ── SUMMARY ── */}
         <div style={{ marginBottom: 40 }}>
-          <SectionLabel>{t.sectionSummary}</SectionLabel>
+          <SectionLabel>{t.sectionSummary(monthLabel)}</SectionLabel>
           <div style={{ display: 'grid', gridTemplateColumns: `repeat(${summary.length || 1}, 1fr)`, gap: 12 }}>
             {summary.map(card => (
               <div key={card.id} style={{ background: 'var(--card)', border: '1px solid var(--border)', borderRadius: 12, padding: '18px 20px', position: 'relative', overflow: 'hidden' }}>
@@ -367,7 +438,7 @@ export default function MonthlyReviewAugust() {
 
         {/* ── ENGINEERS ── */}
         <div style={{ marginBottom: 52 }}>
-          <SectionLabel>{t.sectionEngineers} · {totalTasks} {t.tasks}</SectionLabel>
+          <SectionLabel>{t.sectionEngineers(monthLabel)} · {totalTasks} {t.tasks}</SectionLabel>
           {/* A task whose engineer is not in this review renders nowhere. Say so
               rather than letting it disappear silently. */}
           {review.orphan_tasks > 0 && (
@@ -406,8 +477,8 @@ export default function MonthlyReviewAugust() {
 
         {/* ── Footer ── */}
         <div style={{ paddingTop: 20, borderTop: '1px solid var(--border)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 16, fontSize: 12, color: 'var(--muted)' }}>
-          <div>{t.footer} · {t.presentedDate}</div>
-          <div style={{ color: 'var(--accent1)', fontWeight: 500 }}>{t.nextReview}</div>
+          <div>{t.footer} · {presentedDate}</div>
+          <div style={{ color: 'var(--accent1)', fontWeight: 500 }}>{t.nextReview(nextReviewDate)}</div>
         </div>
 
       </div>

@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { Link } from 'react-router-dom'
+import { Link, useLocation } from 'react-router-dom'
 import { api } from '../api/client'
 import TopBar from '../components/TopBar'
 import MetricCard from '../components/MetricCard'
@@ -19,6 +19,8 @@ const TABS_IT = [
   { key: 'dev',          label: 'Development' },
   { key: 'daily',        label: '📅 Daily Report' },
   { key: 'report',       label: '📋 Weekly Report' },
+  // Not a panel — the review is its own full page, so this tab is a link.
+  { key: 'monthly',      label: '🗓️ Monthly Review', link: true },
   { key: 'trends',       label: '📈 Trends' },
   { key: 'achievements', label: '🏆 Achievements' },
 ]
@@ -26,6 +28,13 @@ const TABS_IT = [
 const TABS_OTHER = [
   { key: 'ai', label: '⬡ AI Usage' },
 ]
+
+// Where the Monthly Review tab points until GET /api/monthly-review/latest
+// answers, and where it stays if that call fails — August 2026 is published.
+const FALLBACK_REVIEW_PATH = '/review/2026/8'
+
+// Gantt, Team Plan and Monthly Review are links wearing .tab-btn.
+const LINK_TAB_STYLE = { textDecoration: 'none', display: 'inline-flex', alignItems: 'center' }
 
 function calcCurrentWeek() {
   const now = new Date()
@@ -228,10 +237,23 @@ export default function Dashboard() {
   const [scoringMode, setScoringMode] = useState(() => {
     return localStorage.getItem('leaderboard_scoring') || 'github'
   })
+  const [reviewPath, setReviewPath] = useState(FALLBACK_REVIEW_PATH)
+
+  // The Monthly Review tab is highlighted while a review page is open — the tab
+  // bar renders on / today, but this keeps the rule true if it is ever reused.
+  const onReviewRoute = useLocation().pathname.startsWith('/review/')
 
   useEffect(() => {
     api.get('/departments').then(data => {
       setDepartments(data.filter(d => d.active))
+    }).catch(() => {})
+  }, [])
+
+  // Point the tab at the newest published review. A 404 (nothing published) or
+  // any failure leaves the fallback path in place rather than a dead tab.
+  useEffect(() => {
+    api.get('/monthly-review/latest').then(d => {
+      if (d?.year && d?.month) setReviewPath(`/review/${d.year}/${d.month}`)
     }).catch(() => {})
   }, [])
 
@@ -325,7 +347,16 @@ export default function Dashboard() {
         )}
 
         <div className="tabs">
-          {currentTabs.map((t) => (
+          {currentTabs.map((t) => (t.link ? (
+            <Link
+              key={t.key}
+              to={reviewPath}
+              className={`tab-btn${onReviewRoute ? ' active' : ''}`}
+              style={LINK_TAB_STYLE}
+            >
+              {t.label}
+            </Link>
+          ) : (
             <button
               key={t.key}
               className={`tab-btn${activeTab === t.key ? ' active' : ''}${t.key === 'ai' ? ' tab-ai' : ''}`}
@@ -333,14 +364,14 @@ export default function Dashboard() {
             >
               {t.label}
             </button>
-          ))}
+          )))}
           {activeDept === IT_DEPT_ID && (
-            <Link to="/team-gantt" className="tab-btn" style={{ textDecoration: 'none', display: 'inline-flex', alignItems: 'center' }}>
+            <Link to="/team-gantt" className="tab-btn" style={LINK_TAB_STYLE}>
               📅 Gantt
             </Link>
           )}
           {activeDept === IT_DEPT_ID && (
-            <Link to="/team-plan" className="tab-btn" style={{ textDecoration: 'none', display: 'inline-flex', alignItems: 'center' }}>
+            <Link to="/team-plan" className="tab-btn" style={LINK_TAB_STYLE}>
               Team Plan
             </Link>
           )}

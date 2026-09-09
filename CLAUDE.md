@@ -104,6 +104,7 @@ Key helpers:
 | GET/PUT | `/api/ai-key-mappings` | PUT needs pw | Engineer ↔ Anthropic key ID mapping |
 | GET | `/api/reports` | — | Daily reports by date |
 | GET | `/api/monthly-review/{year}/{month}` | — | Whole review in one call — meta, summary cards, engineers with nested tasks |
+| GET | `/api/monthly-review/latest` | — | `{year, month}` of the newest month with at least one task; 404 if none |
 | PUT | `/api/monthly-review/{year}/{month}/meta` | pw | Upsert the month's title + assumptions note |
 | POST/PATCH/DELETE | `/api/monthly-review/.../summary`, `/engineers`, `/tasks` | pw | Review content CRUD |
 | PATCH | `/api/monthly-review/{summary\|engineers\|tasks}/reorder` | pw | Reorder by id list |
@@ -217,8 +218,18 @@ headless with tracemalloc sampling — see `cc_memdebug.py` and
 
 ## Monthly Review
 
-The curated leadership review at `/review/august-2026` reads from the database,
-not a bundled file, so a figure can be corrected without a frontend deploy.
+The curated leadership review reads from the database, not a bundled file, so a
+figure can be corrected without a frontend deploy.
+
+`frontend/src/pages/MonthlyReviewCurated.jsx` renders one month, served at
+`/review/:year/:month`; every date in its chrome (period, presentation date,
+score week) is derived from that month, so publishing a new month needs no
+frontend change. `/review/august-2026` is kept as a legacy path and falls back
+to August 2026. The Dashboard's **Monthly Review** tab resolves the newest
+published month via `GET /api/monthly-review/latest` and falls back to
+`/review/2026/8` if that call fails. The one non-derivable string is the
+"Previous review" pointer (there was no July 2026 review), held in
+`PREVIOUS_REVIEW` on that page.
 
 Four tables keyed by `(month, year)`:
 
