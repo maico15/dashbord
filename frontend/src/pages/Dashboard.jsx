@@ -22,12 +22,28 @@ const TABS_IT = [
   // Not a panel — the review is its own full page, so this tab is a link.
   { key: 'monthly',      label: '🗓️ Monthly Review', link: true },
   { key: 'trends',       label: '📈 Trends' },
-  { key: 'achievements', label: '🏆 Achievements' },
+  // Achievements is deliberately absent — the panel still renders, it is just
+  // not advertised while it is a placeholder. See PANEL_KEYS.
 ]
 
 const TABS_OTHER = [
   { key: 'ai', label: '⬡ AI Usage' },
 ]
+
+// Every panel the tab bar can show, nav entry or not — `/?tab=achievements`
+// still opens Achievements after it was taken out of the nav. Anything else
+// falls back to the default tab.
+const PANEL_KEYS = ['ai', 'dev', 'support', 'docs', 'daily', 'report', 'trends', 'achievements']
+const DEFAULT_TAB = 'ai'
+
+function initialTab() {
+  try {
+    const requested = new URLSearchParams(window.location.search).get('tab')
+    return PANEL_KEYS.includes(requested) ? requested : DEFAULT_TAB
+  } catch {
+    return DEFAULT_TAB
+  }
+}
 
 // Where the Monthly Review tab points until GET /api/monthly-review/latest
 // answers, and where it stays if that call fails — August 2026 is published.
@@ -260,7 +276,7 @@ function DocsTab({ data }) {
 }
 
 export default function Dashboard() {
-  const [activeTab, setActiveTab] = useState('ai')
+  const [activeTab, setActiveTab] = useState(initialTab)
   const [overview, setOverview] = useState(null)
   const [leaderboard, setLeaderboard] = useState(null)
   const [tabData, setTabData] = useState({})
@@ -296,7 +312,7 @@ export default function Dashboard() {
   const handleDeptChange = (deptId) => {
     setActiveDept(deptId)
     localStorage.setItem('active_department', String(deptId))
-    setActiveTab('ai')
+    setActiveTab(DEFAULT_TAB)
   }
 
   const currentTabs = activeDept === IT_DEPT_ID ? TABS_IT : TABS_OTHER
