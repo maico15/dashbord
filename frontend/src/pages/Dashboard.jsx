@@ -33,8 +33,44 @@ const TABS_OTHER = [
 // answers, and where it stays if that call fails — August 2026 is published.
 const FALLBACK_REVIEW_PATH = '/review/2026/8'
 
-// Gantt, Team Plan and Monthly Review are links wearing .tab-btn.
-const LINK_TAB_STYLE = { textDecoration: 'none', display: 'inline-flex', alignItems: 'center' }
+// Tabs stack their content from the top of the row, so a tab carrying a
+// subtitle grows downward instead of nudging its neighbours' label off the
+// first line. Gantt, Team Plan and Monthly Review are links wearing .tab-btn,
+// hence the text-decoration reset.
+const TAB_STYLE = {
+  textDecoration: 'none',
+  display: 'inline-flex',
+  flexDirection: 'column',
+  alignItems: 'center',
+  justifyContent: 'flex-start',
+}
+
+const TAB_SUBTITLE_STYLE = {
+  fontSize: 10,
+  fontWeight: 400,
+  color: 'var(--muted)',
+  letterSpacing: '0.02em',
+  marginTop: 1,
+  whiteSpace: 'nowrap',
+}
+
+/**
+ * One tab in the dashboard tab row — a <button> that switches the panel below,
+ * or a <Link> when `to` is given (the review, Gantt and Team Plan pages are
+ * routes of their own). `subtitle` adds a second, smaller line under the label.
+ */
+function Tab({ label, subtitle, active, to, onClick, className = '' }) {
+  const cls = `tab-btn${active ? ' active' : ''}${className ? ` ${className}` : ''}`
+  const body = (
+    <>
+      <span>{label}</span>
+      {subtitle && <span style={TAB_SUBTITLE_STYLE}>{subtitle}</span>}
+    </>
+  )
+  return to
+    ? <Link to={to} className={cls} style={TAB_STYLE}>{body}</Link>
+    : <button className={cls} style={TAB_STYLE} onClick={onClick}>{body}</button>
+}
 
 function calcCurrentWeek() {
   const now = new Date()
@@ -347,33 +383,20 @@ export default function Dashboard() {
         )}
 
         <div className="tabs">
-          {currentTabs.map((t) => (t.link ? (
-            <Link
+          {currentTabs.map((t) => (
+            <Tab
               key={t.key}
-              to={reviewPath}
-              className={`tab-btn${onReviewRoute ? ' active' : ''}`}
-              style={LINK_TAB_STYLE}
-            >
-              {t.label}
-            </Link>
-          ) : (
-            <button
-              key={t.key}
-              className={`tab-btn${activeTab === t.key ? ' active' : ''}${t.key === 'ai' ? ' tab-ai' : ''}`}
-              onClick={() => setActiveTab(t.key)}
-            >
-              {t.label}
-            </button>
-          )))}
+              label={t.label}
+              subtitle={t.subtitle}
+              active={t.link ? onReviewRoute : activeTab === t.key}
+              to={t.link ? reviewPath : undefined}
+              onClick={t.link ? undefined : () => setActiveTab(t.key)}
+              className={t.key === 'ai' ? 'tab-ai' : ''}
+            />
+          ))}
+          {activeDept === IT_DEPT_ID && <Tab label="📅 Gantt" to="/team-gantt" />}
           {activeDept === IT_DEPT_ID && (
-            <Link to="/team-gantt" className="tab-btn" style={LINK_TAB_STYLE}>
-              📅 Gantt
-            </Link>
-          )}
-          {activeDept === IT_DEPT_ID && (
-            <Link to="/team-plan" className="tab-btn" style={LINK_TAB_STYLE}>
-              Team Plan
-            </Link>
+            <Tab label="Team Plan" subtitle="in development" to="/team-plan" />
           )}
         </div>
 
