@@ -6947,6 +6947,27 @@ def _next_order(conn, table: str, month: int, year: int) -> int:
     return row[0]
 
 
+@app.get("/api/monthly-review/latest")
+def get_monthly_review_latest():
+    """Newest published review - the month/year with at least one task.
+
+    Declared before /{year}/{month} for readability; the paths cannot collide
+    (one path segment vs two). The Dashboard tab links through here so a newly
+    published month goes live without a frontend deploy. A month with meta or
+    summary cards but no tasks is not "published" yet - the page would render
+    an empty engineer section - so tasks are the gate.
+    """
+    conn = get_db()
+    row = conn.execute(
+        "SELECT year, month FROM monthly_review_tasks "
+        "GROUP BY year, month ORDER BY year DESC, month DESC LIMIT 1"
+    ).fetchone()
+    conn.close()
+    if not row:
+        raise HTTPException(404, "No monthly review published")
+    return {"year": row[0], "month": row[1]}
+
+
 @app.get("/api/monthly-review/{year}/{month}")
 def get_monthly_review(year: int, month: int):
     """The whole review in one call - the page needs all of it to render, and one
