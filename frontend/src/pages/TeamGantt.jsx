@@ -42,10 +42,10 @@ function parseISODate(s) {
   const [y, m, d] = s.split("-").map(Number);
   return new Date(y, m - 1, d);
 }
-/** Surname sort key: the last whitespace-separated word of a name, lowercased. */
-function surnameOf(name) {
+/** First-name sort key: the first whitespace-separated word of a name, lowercased. */
+function firstNameOf(name) {
   const parts = String(name || "").trim().split(/\s+/);
-  return (parts[parts.length - 1] || "").toLowerCase();
+  return (parts[0] || "").toLowerCase();
 }
 function isWeekend(d) {
   const g = d.getDay();
@@ -2167,12 +2167,12 @@ export default function TeamGantt() {
 
   // Viewers never see hidden lanes; edit mode shows everything so the admin
   // keeps full context while managing visibility. Lanes are then ordered
-  // alphabetically by surname so the board reads the same way every time —
+  // alphabetically by first name so the board reads the same way every time —
   // sorted after the filter, so hiding a lane never reshuffles the rest.
   const boardEngineers = useMemo(() => {
     const visible = editMode ? sortedEngineers : sortedEngineers.filter((e) => !e.hidden);
     return visible.slice().sort((a, b) => {
-      const diff = surnameOf(a.name).localeCompare(surnameOf(b.name), undefined, { sensitivity: "base" });
+      const diff = firstNameOf(a.name).localeCompare(firstNameOf(b.name), undefined, { sensitivity: "base" });
       return diff !== 0 ? diff : String(a.name || "").localeCompare(String(b.name || ""), undefined, { sensitivity: "base" });
     });
   }, [sortedEngineers, editMode]);
