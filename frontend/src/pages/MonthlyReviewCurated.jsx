@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { useTheme, toggleTheme } from '../hooks/useTheme'
 import { api } from '../api/client'
+import LangToggle from '../components/LangToggle'
 
 /**
  * MonthlyReviewCurated — the curated leadership review for one month.
@@ -388,13 +389,7 @@ export default function MonthlyReviewCurated() {
               {theme === 'dark' ? '☀️' : '🌙'}
             </button>
             {/* Language toggle */}
-            <div style={{ display: 'flex', gap: 6 }}>
-              {['en', 'ru'].map(l => (
-                <button key={l} onClick={() => setLang(l)} style={{ padding: '5px 14px', borderRadius: 8, border: '1px solid var(--border)', cursor: 'pointer', fontSize: 12, fontWeight: 600, textTransform: 'uppercase', background: lang === l ? 'var(--accent1)' : 'var(--card)', color: lang === l ? 'var(--on-accent)' : 'var(--muted)', transition: 'all .2s' }}>
-                  {l}
-                </button>
-              ))}
-            </div>
+            <LangToggle lang={lang} onChange={setLang} />
           </div>
         </div>
       </div>

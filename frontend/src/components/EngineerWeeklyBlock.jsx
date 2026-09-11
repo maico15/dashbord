@@ -1,5 +1,22 @@
 import { useState } from 'react'
 import DOMPurify from 'dompurify'
+import { splitWeeklyTasks, isBlankHtml } from '../lib/weeklyTasks'
+
+// Tab labels and empty states follow the reader's chosen language.
+const T = {
+  en: {
+    tasks: 'Weekly tasks',
+    activity: 'Activity',
+    noTasks: 'No weekly for this engineer',
+    noActivity: 'No GitHub activity this week',
+  },
+  ru: {
+    tasks: 'Задачи недели',
+    activity: 'Активность',
+    noTasks: 'Weekly не заполнен',
+    noActivity: 'Нет активности на GitHub за эту неделю',
+  },
+}
 
 // Detect whether stored value is rich HTML or legacy plain text
 const isHtml = s => typeof s === 'string' && /<[a-z]/i.test(s)
@@ -159,31 +176,46 @@ const tabBtnStyle = (active) => ({
   transition: 'color 0.15s',
 })
 
-export default function EngineerWeeklyBlock({ engineer }) {
+export default function EngineerWeeklyBlock({ engineer, lang = 'en' }) {
   const [tab, setTab] = useState('tasks')
+  const t = T[lang] || T.en
+
+  // Stored text may carry both languages (English, `____ ru`, Russian). Falling
+  // back to English when the Russian half is missing is better than an empty
+  // tab, so the reader is told which one they are looking at instead.
+  const { en, ru } = splitWeeklyTasks(engineer.tasks)
+  const ruMissing = lang === 'ru' && isBlankHtml(ru)
+  const body = lang === 'ru' && !ruMissing ? ru : en
 
   return (
     <div>
       <div style={{ display: 'flex', borderBottom: '1px solid var(--border)', marginBottom: 14 }}>
         <button style={tabBtnStyle(tab === 'tasks')} onClick={() => setTab('tasks')}>
-          Weekly tasks
+          {t.tasks}
         </button>
         <button style={tabBtnStyle(tab === 'activity')} onClick={() => setTab('activity')}>
-          Activity
+          {t.activity}
         </button>
       </div>
 
       {tab === 'tasks' && (
         <div>
-          {engineer.tasks ? (
-            isHtml(engineer.tasks)
-              ? <SafeHtml html={engineer.tasks} />
-              : <p style={{ whiteSpace: 'pre-line', margin: 0, fontSize: 14, lineHeight: 1.7, color: 'var(--text)' }}>
-                  {engineer.tasks}
-                </p>
+          {!isBlankHtml(body) ? (
+            <>
+              {ruMissing && (
+                <div style={{ fontSize: 11, color: 'var(--muted)', fontStyle: 'italic', marginBottom: 6 }}>
+                  (RU not provided)
+                </div>
+              )}
+              {isHtml(body)
+                ? <SafeHtml html={body} />
+                : <p style={{ whiteSpace: 'pre-line', margin: 0, fontSize: 14, lineHeight: 1.7, color: 'var(--text)' }}>
+                    {body}
+                  </p>}
+            </>
           ) : (
             <p style={{ margin: 0, fontSize: 13, color: 'var(--muted)', fontStyle: 'italic' }}>
-              No tasks added for this week
+              {t.noTasks}
             </p>
           )}
         </div>
@@ -193,7 +225,7 @@ export default function EngineerWeeklyBlock({ engineer }) {
         <div>
           {(!engineer.projects || engineer.projects.length === 0) ? (
             <p style={{ margin: 0, fontSize: 13, color: 'var(--muted)', fontStyle: 'italic' }}>
-              No GitHub activity this week
+              {t.noActivity}
             </p>
           ) : (
             engineer.projects.map((p, i) => (
