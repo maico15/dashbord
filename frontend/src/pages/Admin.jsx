@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom'
 import { api } from '../api/client'
 import LoadingSpinner from '../components/LoadingSpinner'
 import RichTextEditor from '../components/RichTextEditor'
+import { splitWeeklyTasks, joinWeeklyTasks } from '../lib/weeklyTasks'
 
 const STREAMS = ['dev', 'support', 'docs']
 const STREAM_LABELS = { dev: 'Development', support: 'Support', docs: 'Documentation' }
@@ -972,7 +973,10 @@ function WeeklyTasksAdminSection({ pw }) {
   })
   const [year, setYear]     = useState(new Date().getFullYear())
   const [tasks, setTasks]   = useState([])   // [{ engineer_id, name, color, position, tasks }]
-  const [drafts, setDrafts] = useState({})   // { engineer_id: string }
+  // One draft per engineer, split into the two halves the row stores as a
+  // single `____ ru`-separated string. A row saved before the split existed
+  // has no marker, so it loads as English-only.
+  const [drafts, setDrafts] = useState({})   // { engineer_id: { en, ru } }
   const [saving, setSaving] = useState({})   // { engineer_id: bool }
   const [saved,  setSaved]  = useState({})   // { engineer_id: bool }
   const [errors, setErrors] = useState({})   // { engineer_id: string }
@@ -982,7 +986,7 @@ function WeeklyTasksAdminSection({ pw }) {
       .then(d => {
         setTasks(d.tasks || [])
         const init = {}
-        for (const t of (d.tasks || [])) init[t.engineer_id] = t.tasks || ''
+        for (const t of (d.tasks || [])) init[t.engineer_id] = splitWeeklyTasks(t.tasks || '')
         setDrafts(init)
       })
       .catch(() => {})
@@ -994,7 +998,9 @@ function WeeklyTasksAdminSection({ pw }) {
     setSaving(s => ({ ...s, [engineer_id]: true }))
     setErrors(e => ({ ...e, [engineer_id]: null }))
     try {
-      await api.post('/weekly-tasks', { engineer_id, week, year, tasks: drafts[engineer_id] || '' }, pw)
+      const draft = drafts[engineer_id] || { en: '', ru: '' }
+      const tasksText = joinWeeklyTasks(draft.en, draft.ru)
+      await api.post('/weekly-tasks', { engineer_id, week, year, tasks: tasksText }, pw)
       setSaved(s => ({ ...s, [engineer_id]: true }))
       setTimeout(() => setSaved(s => ({ ...s, [engineer_id]: false })), 2000)
     } catch (e) {
@@ -1047,11 +1053,26 @@ function WeeklyTasksAdminSection({ pw }) {
                     {t.position && <div style={{ fontSize: 11, color: 'var(--muted)' }}>{t.position}</div>}
                   </div>
                 </div>
-                <RichTextEditor
-                  value={drafts[t.engineer_id] ?? ''}
-                  onChange={html => setDrafts(d => ({ ...d, [t.engineer_id]: html }))}
-                  placeholder={`Tasks for ${t.name}…`}
-                />
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                  {[
+                    { half: 'en', label: 'English',  hint: `Tasks for ${t.name}…` },
+                    { half: 'ru', label: 'Русский', hint: `Задачи — ${t.name}…` },
+                  ].map(({ half, label, hint }) => (
+                    <div key={half}>
+                      <div style={{ fontSize: 11, color: 'var(--muted)', marginBottom: 4, letterSpacing: '.03em' }}>
+                        {label}
+                      </div>
+                      <RichTextEditor
+                        value={drafts[t.engineer_id]?.[half] ?? ''}
+                        onChange={html => setDrafts(d => ({
+                          ...d,
+                          [t.engineer_id]: { ...(d[t.engineer_id] || { en: '', ru: '' }), [half]: html },
+                        }))}
+                        placeholder={hint}
+                      />
+                    </div>
+                  ))}
+                </div>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 6 }}>
                   <button
                     className="btn btn-primary"

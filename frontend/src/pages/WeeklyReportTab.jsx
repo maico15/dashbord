@@ -2,6 +2,46 @@ import { useState, useEffect } from 'react'
 import { api } from '../api/client'
 import LoadingSpinner from '../components/LoadingSpinner'
 import EngineerWeeklyBlock from '../components/EngineerWeeklyBlock'
+import LangToggle from '../components/LangToggle'
+
+// Reader's language choice — the tab chrome and the weekly text follow it.
+// Persisted so the choice survives a reload; EN when nothing is stored.
+const LANG_KEY = 'weekly_lang'
+
+const T = {
+  en: {
+    week: 'Week',
+    aiSummary: 'AI Summary',
+    generating: 'Generating…',
+    genDone: '✓ Summary generated — scroll down to see weekly tasks',
+    changes: 'Changes this week',
+    edit: '✎ edit',
+    changesPlaceholder: 'Administrative changes this week — one per line…',
+    noChanges: 'No changes recorded for this week. Click edit to add.',
+    loadError: 'Failed to load weekly report',
+    retry: '↺ Retry',
+    score: 'Score',
+    commits: 'commits',
+    prs: 'PRs',
+    locale: 'en-US',
+  },
+  ru: {
+    week: 'Неделя',
+    aiSummary: 'AI-сводка',
+    generating: 'Генерация…',
+    genDone: '✓ Сводка готова — задачи недели ниже',
+    changes: 'Изменения за неделю',
+    edit: '✎ изменить',
+    changesPlaceholder: 'Административные изменения за неделю — по одному в строке…',
+    noChanges: 'Изменений за эту неделю нет. Нажмите «изменить», чтобы добавить.',
+    loadError: 'Не удалось загрузить отчёт за неделю',
+    retry: '↺ Повторить',
+    score: 'Оценка',
+    commits: 'коммитов',
+    prs: 'PR',
+    locale: 'ru-RU',
+  },
+}
 
 // ── Date helpers ───────────────────────────────────────────────────────────────
 
@@ -21,15 +61,16 @@ function fmtDate(d) {
   return d.toISOString().slice(0, 10)
 }
 
-function weekDateRange(week, year) {
+function weekDateRange(week, year, locale = 'en-US') {
   const { mon, fri } = getWeekRange(week, year)
-  const fmt = d => d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+  const fmt = d => d.toLocaleDateString(locale, { month: 'short', day: 'numeric' })
   return `${fmt(mon)} – ${fmt(fri)}`
 }
 
 // ── Engineer row ───────────────────────────────────────────────────────────────
 
-function EngineerRow({ engineer, score, onScoreChange, week, year }) {
+function EngineerRow({ engineer, score, onScoreChange, week, year, lang }) {
+  const t = T[lang] || T.en
   const initials = engineer.name.split(' ').slice(0, 2).map(w => w[0]).join('')
   const [localScore, setLocalScore] = useState(score || '')
   const [saving, setSaving]         = useState(false)
@@ -87,7 +128,7 @@ function EngineerRow({ engineer, score, onScoreChange, week, year }) {
                 fontSize: 12, padding: '2px 10px', borderRadius: 10,
                 background: 'rgba(0,207,255,0.1)', color: 'var(--accent1)',
               }}>
-                {engineer.total_commits} commits
+                {engineer.total_commits} {t.commits}
               </span>
             )}
             {engineer.total_prs > 0 && (
@@ -95,7 +136,7 @@ function EngineerRow({ engineer, score, onScoreChange, week, year }) {
                 fontSize: 12, padding: '2px 10px', borderRadius: 10,
                 background: 'rgba(123,97,255,0.1)', color: 'var(--accent2)',
               }}>
-                {engineer.total_prs} PRs
+                {engineer.total_prs} {t.prs}
               </span>
             )}
             {(engineer.lines_added > 0 || engineer.lines_deleted > 0) && (
@@ -110,7 +151,7 @@ function EngineerRow({ engineer, score, onScoreChange, week, year }) {
 
         {/* Score input */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
-          <span style={{ fontSize: 12, color: 'var(--muted)' }}>Score</span>
+          <span style={{ fontSize: 12, color: 'var(--muted)' }}>{t.score}</span>
           <input
             type="number"
             min="1"
@@ -138,7 +179,7 @@ function EngineerRow({ engineer, score, onScoreChange, week, year }) {
         </div>
       </div>
       <div style={{ paddingLeft: 58 }}>
-        <EngineerWeeklyBlock engineer={engineer} />
+        <EngineerWeeklyBlock engineer={engineer} lang={lang} />
       </div>
     </div>
   )
@@ -158,6 +199,14 @@ export default function WeeklyReportTab() {
   const [scores, setScores]         = useState({})
   const [changes, setChanges]       = useState('')
   const [editingChanges, setEditingChanges] = useState(false)
+  const [lang, setLang] = useState(() => {
+    try { return localStorage.getItem(LANG_KEY) === 'ru' ? 'ru' : 'en' } catch { return 'en' }
+  })
+  const t = T[lang] || T.en
+
+  useEffect(() => {
+    try { localStorage.setItem(LANG_KEY, lang) } catch { /* storage unavailable */ }
+  }, [lang])
 
   useEffect(() => {
     api.get('/overview').then(d => {
@@ -177,7 +226,7 @@ export default function WeeklyReportTab() {
     setGenDone(false)
     api.get(`/reports/weekly?week=${week}&year=${year}`)
       .then(d => { setReport(d); setLoading(false) })
-      .catch(e => { console.error(e); setError('Failed to load weekly report'); setLoading(false) })
+      .catch(e => { console.error(e); setError('load'); setLoading(false) })
   }, [week, year])
 
   useEffect(() => {
@@ -265,7 +314,7 @@ export default function WeeklyReportTab() {
     }
   }
 
-  const dateRange = week && year ? weekDateRange(week, year) : ''
+  const dateRange = week && year ? weekDateRange(week, year, t.locale) : ''
 
   return (
     <div>
@@ -273,7 +322,7 @@ export default function WeeklyReportTab() {
       <div style={{ display: 'flex', alignItems: 'center', gap: 16, marginTop: 16, marginBottom: 8 }}>
         <button className="btn btn-ghost" onClick={() => navigate(-1)} style={{ padding: '5px 14px' }}>←</button>
         <div style={{ textAlign: 'center', minWidth: 180 }}>
-          <div style={{ fontSize: 16, fontWeight: 700 }}>Week {week ?? '…'}</div>
+          <div style={{ fontSize: 16, fontWeight: 700 }}>{t.week} {week ?? '…'}</div>
           {dateRange && (
             <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 2 }}>
               {dateRange}, {year}
@@ -282,6 +331,8 @@ export default function WeeklyReportTab() {
         </div>
         <button className="btn btn-ghost" onClick={() => navigate(+1)} style={{ padding: '5px 14px' }}>→</button>
 
+        <LangToggle lang={lang} onChange={setLang} />
+
         <button
           className="btn btn-primary"
           style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 6, padding: '6px 14px' }}
@@ -289,14 +340,14 @@ export default function WeeklyReportTab() {
           disabled={generating || !report}
         >
           {generating ? <span className="spinner" style={{ animation: 'spin 0.7s linear infinite' }} /> : '✨'}
-          {generating ? 'Generating…' : 'AI Summary'}
+          {generating ? t.generating : t.aiSummary}
         </button>
       </div>
 
       {/* Status messages */}
       {genDone && !genError && (
         <div style={{ fontSize: 12, color: 'var(--success)', marginBottom: 12 }}>
-          ✓ Summary generated — scroll down to see weekly tasks
+          {t.genDone}
         </div>
       )}
       {genError && (
@@ -311,18 +362,18 @@ export default function WeeklyReportTab() {
       <div style={{ background: 'var(--card)', border: '1px solid var(--border)', borderRadius: 12, padding: '16px 20px', marginBottom: 20 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
           <span style={{ fontSize: 14 }}>📋</span>
-          <span style={{ fontSize: 13, fontWeight: 600, letterSpacing: '.03em' }}>Changes this week</span>
+          <span style={{ fontSize: 13, fontWeight: 600, letterSpacing: '.03em' }}>{t.changes}</span>
           {!editingChanges && (
             <button onClick={() => setEditingChanges(true)}
               style={{ marginLeft: 'auto', background: 'none', border: 'none', color: 'var(--muted)', cursor: 'pointer', fontSize: 12 }}>
-              ✎ edit
+              {t.edit}
             </button>
           )}
         </div>
         {editingChanges ? (
           <textarea autoFocus defaultValue={changes}
             onBlur={(e) => saveChanges(e.target.value)}
-            placeholder="Administrative changes this week — one per line…"
+            placeholder={t.changesPlaceholder}
             style={{
               width: '100%', minHeight: 90, background: 'var(--base)', border: '1px solid var(--accent2)',
               borderRadius: 8, padding: 10, color: 'var(--text)', fontSize: 13, lineHeight: 1.6,
@@ -332,7 +383,7 @@ export default function WeeklyReportTab() {
           changes ? (
             <div style={{ fontSize: 13, color: 'var(--text)', lineHeight: 1.7, whiteSpace: 'pre-wrap' }}>{changes}</div>
           ) : (
-            <div style={{ fontSize: 13, color: 'var(--muted)', fontStyle: 'italic' }}>No changes recorded for this week. Click edit to add.</div>
+            <div style={{ fontSize: 13, color: 'var(--muted)', fontStyle: 'italic' }}>{t.noChanges}</div>
           )
         )}
       </div>
@@ -345,7 +396,7 @@ export default function WeeklyReportTab() {
 
       {!loading && error && (
         <div className="card" style={{ padding: '20px 24px', color: 'var(--danger)', display: 'flex', alignItems: 'center', gap: 12 }}>
-          <span>{error}</span>
+          <span>{t.loadError}</span>
           <button
             className="btn btn-ghost"
             style={{ fontSize: 13 }}
@@ -354,10 +405,10 @@ export default function WeeklyReportTab() {
               setLoading(true)
               api.get(`/reports/weekly?week=${week}&year=${year}`)
                 .then(d => { setReport(d); setLoading(false) })
-                .catch(() => { setError('Failed to load weekly report'); setLoading(false) })
+                .catch(() => { setError('load'); setLoading(false) })
             }}
           >
-            ↺ Retry
+            {t.retry}
           </button>
         </div>
       )}
@@ -372,6 +423,7 @@ export default function WeeklyReportTab() {
               onScoreChange={(val) => setScores(prev => ({ ...prev, [eng.id]: val }))}
               week={week}
               year={year}
+              lang={lang}
             />
           ))}
         </div>
