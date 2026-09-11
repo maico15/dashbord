@@ -6,6 +6,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Engineering Dashboard — a full-stack team performance tracker with gamification. Engineers earn XP points across three work streams based on weekly metrics. Features a public leaderboard, individual profile pages, admin panel, daily reports, and AI token usage tracking.
 
+Deeper context lives in [PROJECT_CONTEXT.md](PROJECT_CONTEXT.md) (onboarding reference), [HANDOFF.md](HANDOFF.md) (ownership, history, roadmap) and [docs/OPERATOR_PLAYBOOK.md](docs/OPERATOR_PLAYBOOK.md) (day-to-day operation and incident recovery).
+
 ## Stack
 
 - **Frontend**: React 18 + Vite, React Router v6, Recharts, Chart.js — served on port 3000
