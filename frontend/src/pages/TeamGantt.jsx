@@ -42,6 +42,11 @@ function parseISODate(s) {
   const [y, m, d] = s.split("-").map(Number);
   return new Date(y, m - 1, d);
 }
+/** Surname sort key: the last whitespace-separated word of a name, lowercased. */
+function surnameOf(name) {
+  const parts = String(name || "").trim().split(/\s+/);
+  return (parts[parts.length - 1] || "").toLowerCase();
+}
 function isWeekend(d) {
   const g = d.getDay();
   return g === 0 || g === 6;
@@ -2161,11 +2166,16 @@ export default function TeamGantt() {
   }, [draft.engineers, aiMap]);
 
   // Viewers never see hidden lanes; edit mode shows everything so the admin
-  // keeps full context while managing visibility.
-  const boardEngineers = useMemo(
-    () => (editMode ? sortedEngineers : sortedEngineers.filter((e) => !e.hidden)),
-    [sortedEngineers, editMode]
-  );
+  // keeps full context while managing visibility. Lanes are then ordered
+  // alphabetically by surname so the board reads the same way every time —
+  // sorted after the filter, so hiding a lane never reshuffles the rest.
+  const boardEngineers = useMemo(() => {
+    const visible = editMode ? sortedEngineers : sortedEngineers.filter((e) => !e.hidden);
+    return visible.slice().sort((a, b) => {
+      const diff = surnameOf(a.name).localeCompare(surnameOf(b.name), undefined, { sensitivity: "base" });
+      return diff !== 0 ? diff : String(a.name || "").localeCompare(String(b.name || ""), undefined, { sensitivity: "base" });
+    });
+  }, [sortedEngineers, editMode]);
 
   const { lanes, totalRows, rowSizes } = useMemo(
     () => buildLanes(boardEngineers, rangeStart, today, { addRow: editMode, view }),
