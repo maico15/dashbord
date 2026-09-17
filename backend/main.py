@@ -1,7 +1,7 @@
 import os
 import threading
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, HTTPException, Header
+from fastapi import FastAPI, HTTPException, Header, Body
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional, Dict, Any, List
@@ -677,6 +677,34 @@ def init_db():
                           (normalized, row["id"]))
         if rows:
             print(f"[init] Normalized {len(rows)} ai_tool_sessions tool name(s) to lowercase.")
+
+    # ── IT backlog (hidden page at /it-backlog) ──────────────────────────────
+    # Own step rather than the executescript block above so a database created
+    # before this feature picks the table up on the next boot without a manual
+    # migration. Timestamps are TEXT ISO-8601 UTC like every other table here:
+    # a real Postgres TIMESTAMP comes back without a zone marker and the browser
+    # would read it as local time, skewing the "изменено …" label by the UTC offset.
+    with conn.step("it_backlog_items"):
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS it_backlog_items (
+                id                INTEGER PRIMARY KEY AUTOINCREMENT,
+                sort_order        INTEGER NOT NULL DEFAULT 0,
+                section           TEXT DEFAULT '',
+                section_note      TEXT DEFAULT '',
+                title             TEXT NOT NULL,
+                status            TEXT NOT NULL DEFAULT 'new'
+                                  CHECK (status IN ('new','in_progress','done')),
+                priority          TEXT DEFAULT '',
+                owner             TEXT DEFAULT '',
+                estimate          TEXT DEFAULT '',
+                gantt_ref         TEXT DEFAULT '',
+                description_html  TEXT DEFAULT '',
+                details_html      TEXT DEFAULT '',
+                source            TEXT DEFAULT '',
+                status_changed_at TEXT,
+                updated_at        TEXT DEFAULT (datetime('now'))
+            );
+        """)
 
     conn.close()
 
@@ -7258,6 +7286,194 @@ def delete_review_task(task_id: int, password: str = ""):
     conn.commit()
     conn.close()
     return {"ok": True}
+
+
+# ── IT backlog (hidden page at /it-backlog) ──────────────────────────────────
+# Not linked from any nav — the page is reachable by typing the URL only. Reads
+# are public like the rest of the read API; every write takes ?password=.
+
+IT_BACKLOG_STATUSES = ("new", "in_progress", "done")
+
+# PATCH is deliberately narrow — create/seed write every column, but the page
+# edits only these four, and a typo in a client payload must not be able to
+# blank out the prose columns.
+_IT_BACKLOG_PATCHABLE = ("status", "owner", "priority", "estimate")
+
+
+def _it_backlog_next_order(conn) -> int:
+    row = conn.execute("SELECT MAX(sort_order) AS m FROM it_backlog_items").fetchone()
+    return int((row["m"] if row and row["m"] is not None else 0)) + 1
+
+
+def _it_backlog_insert(conn, item: dict, fallback_order: int) -> int:
+    """Insert one item, filling every column the caller left out with a default."""
+    title = str(item.get("title") or "").strip()
+    if not title:
+        raise HTTPException(422, "it_backlog item requires a title")
+    status = str(item.get("status") or "new").strip() or "new"
+    if status not in IT_BACKLOG_STATUSES:
+        raise HTTPException(422, f"status must be one of {', '.join(IT_BACKLOG_STATUSES)}")
+    try:
+        sort_order = int(item["sort_order"])
+    except (KeyError, TypeError, ValueError):
+        sort_order = fallback_order
+    now = datetime.utcnow().isoformat()
+    cur = conn.execute(
+        "INSERT INTO it_backlog_items "
+        "(sort_order, section, section_note, title, status, priority, owner, estimate, "
+        " gantt_ref, description_html, details_html, source, status_changed_at, updated_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (sort_order,
+         str(item.get("section") or ""),
+         str(item.get("section_note") or ""),
+         title,
+         status,
+         str(item.get("priority") or ""),
+         str(item.get("owner") or ""),
+         str(item.get("estimate") or ""),
+         str(item.get("gantt_ref") or ""),
+         str(item.get("description_html") or ""),
+         str(item.get("details_html") or ""),
+         str(item.get("source") or ""),
+         item.get("status_changed_at") or None,
+         now),
+    )
+    return cur.lastrowid
+
+
+@app.get("/api/it-backlog")
+def get_it_backlog():
+    conn = get_db()
+    # id as the tiebreaker keeps the order stable when a seed left sort_order flat.
+    rows = conn.execute(
+        "SELECT * FROM it_backlog_items ORDER BY sort_order, id"
+    ).fetchall()
+    items = [dict(r) for r in rows]
+    conn.close()
+    return {"generated": datetime.utcnow().isoformat(), "items": items}
+
+
+@app.patch("/api/it-backlog/{item_id}")
+def patch_it_backlog_item(item_id: int, data: dict, password: str = ""):
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    fields = {k: v for k, v in (data or {}).items() if k in _IT_BACKLOG_PATCHABLE}
+    if not fields:
+        raise HTTPException(
+            422, f"nothing to update — send one of: {', '.join(_IT_BACKLOG_PATCHABLE)}"
+        )
+    if "status" in fields and fields["status"] not in IT_BACKLOG_STATUSES:
+        raise HTTPException(422, f"status must be one of {', '.join(IT_BACKLOG_STATUSES)}")
+
+    conn = get_db()
+    row = conn.execute("SELECT status FROM it_backlog_items WHERE id=?", (item_id,)).fetchone()
+    if not row:
+        conn.close()
+        raise HTTPException(404, "Not found")
+
+    now = datetime.utcnow().isoformat()
+    sets, vals = [], []
+    for key, value in fields.items():
+        sets.append(f"{key}=?")
+        vals.append(str(value or "") if key != "status" else value)
+    # Only a real move stamps the clock — re-clicking the segment the item is
+    # already in must not reset "изменено …" on the page.
+    if "status" in fields and fields["status"] != row["status"]:
+        sets.append("status_changed_at=?")
+        vals.append(now)
+    sets.append("updated_at=?")
+    vals.append(now)
+    vals.append(item_id)
+    conn.execute(f"UPDATE it_backlog_items SET {', '.join(sets)} WHERE id=?", vals)
+    conn.commit()
+    # Hand the stored row back so the page can show the new status_changed_at
+    # without a second round trip.
+    updated = dict(conn.execute("SELECT * FROM it_backlog_items WHERE id=?", (item_id,)).fetchone())
+    conn.close()
+    return {"ok": True, "item": updated}
+
+
+@app.post("/api/it-backlog")
+def create_it_backlog_item(data: dict, password: str = ""):
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    conn = get_db()
+    try:
+        new_id = _it_backlog_insert(conn, data or {}, _it_backlog_next_order(conn))
+    except HTTPException:
+        conn.close()
+        raise
+    conn.commit()
+    conn.close()
+    return {"ok": True, "id": new_id}
+
+
+@app.delete("/api/it-backlog/{item_id}")
+def delete_it_backlog_item(item_id: int, password: str = ""):
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    conn = get_db()
+    if not conn.execute("SELECT id FROM it_backlog_items WHERE id=?", (item_id,)).fetchone():
+        conn.close()
+        raise HTTPException(404, "Not found")
+    conn.execute("DELETE FROM it_backlog_items WHERE id=?", (item_id,))
+    conn.commit()
+    conn.close()
+    return {"ok": True}
+
+
+@app.post("/api/it-backlog/seed")
+def seed_it_backlog(data: Any = Body(...), password: str = ""):
+    """Load the initial backlog. Idempotent: a non-empty table is left untouched,
+    so re-POSTing the seed file after a redeploy can never duplicate rows or undo
+    status edits made on the page."""
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+
+    # The seed file is hand-maintained, so accept the three shapes it can take:
+    # a bare list, {"items": [...]}, or sections carrying their own item lists.
+    items: List[dict] = []
+    if isinstance(data, list):
+        raw = data
+    elif isinstance(data, dict):
+        raw = data.get("items") or data.get("sections") or []
+    else:
+        raise HTTPException(422, "seed body must be a list or an object")
+    for entry in raw:
+        if not isinstance(entry, dict):
+            raise HTTPException(422, "seed entries must be objects")
+        nested = entry.get("items")
+        if isinstance(nested, list):
+            # A section wrapper: its section/section_note apply to each child that
+            # does not carry its own.
+            for child in nested:
+                if not isinstance(child, dict):
+                    raise HTTPException(422, "seed entries must be objects")
+                merged = dict(child)
+                merged.setdefault("section", entry.get("section") or "")
+                merged.setdefault("section_note", entry.get("section_note") or "")
+                items.append(merged)
+        else:
+            items.append(entry)
+
+    conn = get_db()
+    existing = conn.execute("SELECT COUNT(*) AS n FROM it_backlog_items").fetchone()
+    if int(existing["n"]) > 0:
+        conn.close()
+        return {"ok": True, "seeded": False, "count": 0,
+                "existing": int(existing["n"]),
+                "detail": "it_backlog_items is not empty — nothing inserted"}
+
+    try:
+        for i, item in enumerate(items, start=1):
+            _it_backlog_insert(conn, item, i)
+    except HTTPException:
+        conn.rollback()
+        conn.close()
+        raise
+    conn.commit()
+    conn.close()
+    return {"ok": True, "seeded": True, "count": len(items)}
 
 
 if __name__ == "__main__":

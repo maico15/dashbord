@@ -266,6 +266,39 @@ August 2026 was imported this way and its source file deleted.
 
 Editing is API-only for now — an Admin panel section is not built yet.
 
+## IT Backlog (hidden page)
+
+`/it-backlog` — `frontend/src/pages/ITBacklog.jsx`, a standalone page deliberately
+**not** linked from the tab bar, the Gantt toolbar, the home page or any menu. The
+only way in is typing the URL; `App.jsx` holds the sole reference. Keep it that way.
+
+One table, `it_backlog_items` (created in its own `conn.step("it_backlog_items")`
+inside `init_db`): `sort_order`, `section` + `section_note`, `title`,
+`status` (`new` | `in_progress` | `done`, CHECK-constrained), `priority`, `owner`,
+`estimate`, `gantt_ref`, `description_html`, `details_html`, `source`,
+`status_changed_at`, `updated_at`. Timestamps are TEXT ISO-8601 UTC like every
+other table here — a real Postgres `TIMESTAMP` comes back without a zone marker
+and the browser would read it as local time.
+
+| Method | Path | Auth | Purpose |
+|---|---|---|---|
+| GET | `/api/it-backlog` | — | `{generated, items}` ordered by `sort_order, id` |
+| PATCH | `/api/it-backlog/{id}` | pw | Partial: `status` \| `owner` \| `priority` \| `estimate`; a real status move stamps `status_changed_at`. Returns the stored row |
+| POST | `/api/it-backlog` | pw | Create (`sort_order` = max+1 when omitted) |
+| DELETE | `/api/it-backlog/{id}` | pw | Remove one item |
+| POST | `/api/it-backlog/seed` | pw | Bulk load — **only when the table is empty**, so re-POSTing the seed file after a redeploy can never duplicate rows or undo status edits |
+
+The seed body may be a bare list, `{"items": [...]}`, or section wrappers carrying
+their own `items` (the wrapper's `section`/`section_note` then apply to each child).
+
+The page reads the API, groups by `section`, colours each row's left bar by status
+(new = red, in_progress = amber, done = muted green) and edits `status` (three
+segments) and `owner` (click → input → Enter) in place, optimistically, reverting
+on error. Writes need the admin password; it reuses the `sessionStorage.admin_pw`
+pattern and shows a password field at the top when it is not set. The
+"Требуют твоего решения" block at the top is still hard-coded (`DECISIONS` in the
+component) and renders only when that array is non-empty.
+
 ## Work Streams & Scoring
 
 Three streams: **Development** (`dev`), **Support** (`support`), **Documentation** (`docs`). Engineers can belong to multiple streams (JSON array in `team_members.stream`). Points per action are configurable in Admin → Rules.
