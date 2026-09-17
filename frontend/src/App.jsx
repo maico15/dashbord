@@ -12,6 +12,7 @@ import TeamPlan from './pages/TeamPlan'
 import TaskBoard from './pages/TaskBoard'
 import Roadmap from './pages/Roadmap'
 import NorthStar from './pages/NorthStar'
+import ITBacklog from './pages/ITBacklog'
 
 export default function App() {
   return (
@@ -31,6 +32,9 @@ export default function App() {
       <Route path="/tasks" element={<TaskBoard />} />
       <Route path="/roadmap" element={<Roadmap />} />
       <Route path="/north-star" element={<NorthStar />} />
+      {/* Hidden page: intentionally absent from every nav, tab bar and link.
+       * Reachable only by typing /it-backlog. */}
+      <Route path="/it-backlog" element={<ITBacklog />} />
     </Routes>
   )
 }
