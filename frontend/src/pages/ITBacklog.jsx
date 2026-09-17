@@ -20,8 +20,20 @@ const STATUS_LABEL = Object.fromEntries(STATUSES.map(s => [s.key, s.label]))
  * moves into the database later), so it lives here as plain data — one string
  * per item, or {title, note} when a line needs a second sentence. */
 const DECISIONS = [
-  // TODO: paste the 7 items from IT_backlog_2026-09-17.html here. The block
-  // renders only when this array is non-empty, so the page is correct meanwhile.
+  { title: 'sold_threshold для 39 департаментов',
+    note: 'Azizbek не может включить score и grade в Technician Scorecard (просил 16 сент).' },
+  { title: 'Постановки задач по FOS для Brunetkin',
+    note: 'ждёт с 16 сент, обещано к миту 17-го.' },
+  { title: 'Перенос репо dashbord в org homealliance',
+    note: 'Bachinskiy стоит на 93% деплоя dashboard.homealliance.com.' },
+  { title: 'Канал алертов и порог для Lead SLA Monitor',
+    note: 'Azizbek предложил #lead-sla-alerts и 30 мин, ждёт «ок» с 16 сент.' },
+  { title: 'Roman: «висяк важный, нужно твоё решение» и созвон с Tom',
+    note: 'доступы к системе Luka и DocuHub блокируют поиск техников и инвойсы.' },
+  { title: 'RingCentral',
+    note: 'сейчас выдать аккаунт Luka (через XTR), затем решение об уходе: $1,600 в месяц.' },
+  { title: 'Лицензии Slider Revolution / VamTam',
+    note: 'покупать или снимать; Anna (BBDM) — расширенный доступ к Open WebUI / Apollo (вопрос к Sardor).' },
 ]
 
 /* ── time ──────────────────────────────────────────────────────────────── */
