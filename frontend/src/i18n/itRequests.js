@@ -216,6 +216,12 @@ const en = {
     copied: 'Copied',
   },
 
+  notFound: {
+    title: 'Page not found',
+    text: 'This address does not exist in the dashboard. If it used to work, the page may be newer than the deployed build — reload, or pick one of the links below.',
+    home: 'Go to the dashboard',
+  },
+
   footer: {
     team: 'For the team',
     requests: 'Requests',
@@ -433,6 +439,12 @@ const ru = {
     back: 'Назад',
     copy: 'Скопировать',
     copied: 'Скопировано',
+  },
+
+  notFound: {
+    title: 'Страница не найдена',
+    text: 'Такого адреса в дашборде нет. Если он раньше работал, страница может быть новее развёрнутой сборки — обновите страницу или выберите ссылку ниже.',
+    home: 'На дашборд',
   },
 
   footer: {

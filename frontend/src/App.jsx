@@ -18,6 +18,7 @@ import ITRequestStatus from './pages/ITRequestStatus'
 import ITRequestsMine from './pages/ITRequestsMine'
 import ITRequestsAdmin from './pages/ITRequestsAdmin'
 import MonthlyReviewLatest from './pages/MonthlyReviewLatest'
+import NotFound from './pages/NotFound'
 
 export default function App() {
   return (
@@ -50,6 +51,11 @@ export default function App() {
       <Route path="/it-requests/status/:ref" element={<ITRequestStatus />} />
       <Route path="/it-requests/mine" element={<ITRequestsMine />} />
       <Route path="/it-requests/admin" element={<ITRequestsAdmin />} />
+
+      {/* Anything else. Without this route React Router renders nothing, and an
+        * unknown URL — most often one newer than the deployed bundle — shows a
+        * blank page that looks like a broken build. */}
+      <Route path="*" element={<NotFound />} />
     </Routes>
   )
 }
