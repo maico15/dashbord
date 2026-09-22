@@ -889,7 +889,71 @@ const STATUS_LABEL = {
   continuous: "ongoing", error: "?", idle: "idle",
 };
 
-/** Left-pane row for a single bar — checkbox / name / status pill / percent.
+/* Wording for the bars, the empty lane and the legend. The board has no
+ * language switch of its own and this restyle does not add one, so it follows
+ * the only language preference the app persists — the Weekly Report tab's
+ * EN/RU toggle — and falls back to the English the board has always shown. */
+const LANG = (() => {
+  try {
+    return localStorage.getItem("weekly_lang") === "ru" ? "ru" : "en";
+  } catch {
+    return "en"; // private mode / storage disabled
+  }
+})();
+
+const TXT = {
+  en: {
+    starts: "starts", overdue: "overdue", noTask: "No active task",
+    active: "active", queued: "queued", continuous: "ongoing", done: "done",
+  },
+  ru: {
+    starts: "старт", overdue: "просрочена", noTask: "Нет активной задачи",
+    active: "в работе", queued: "в очереди", continuous: "бессрочно", done: "сделано",
+  },
+}[LANG];
+
+/** Two-letter avatar initials: "Andrey Brunetkin" -> "AB", "Cher" -> "CH". */
+function initials(name) {
+  const parts = String(name || "").trim().split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return "?";
+  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
+  return (parts[0][0] + parts[1][0]).toUpperCase();
+}
+
+/** Avatar chip colours. The spec's plain white initials fail AA on the colours
+ *  this team actually uses (white on Evgeniy's #00ff9d is 1.33:1), so each
+ *  avatar takes whichever of white / near-black contrasts better with it — and
+ *  where neither clears 4.5:1 (Andrey P's #7b61ff tops out at 4.2:1) the chip
+ *  itself is nudged along its own hue until one does. Identity survives; the
+ *  initials stay readable. */
+function avatarStyle(color) {
+  const m = /^#([0-9a-f]{6})$/i.exec(String(color || "").trim());
+  if (!m) return { background: color, color: "#1C1C1E" }; // var(--accent1): a bright cyan
+  const n = parseInt(m[1], 16);
+  let rgb = [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+  const f = (v) => (v / 255 <= 0.03928 ? v / 255 / 12.92 : ((v / 255 + 0.055) / 1.055) ** 2.4);
+  const lum = (c) => 0.2126 * f(c[0]) + 0.7152 * f(c[1]) + 0.0722 * f(c[2]);
+  const onWhite = (c) => 1.05 / (lum(c) + 0.05);
+  const onDark = (c) => (lum(c) + 0.05) / 0.0644; // 0.0644 = luminance of #1C1C1E + 0.05
+  const white = onWhite(rgb) >= onDark(rgb);
+  // Scaling all three channels by the same factor holds the hue; 12 steps is
+  // far more than any real avatar colour needs.
+  for (let i = 0; i < 12 && (white ? onWhite(rgb) : onDark(rgb)) < 4.5; i++) {
+    rgb = white
+      ? rgb.map((v) => Math.round(v * 0.92))
+      : rgb.map((v) => Math.round(v + (255 - v) * 0.1));
+  }
+  return { background: `rgb(${rgb.join(",")})`, color: white ? "#fff" : "#1C1C1E" };
+}
+
+/** Left-column percent cell: "—" for queued, "∞" for continuous, "N%" otherwise. */
+function percentLabel(a) {
+  if (a.status === "continuous") return "∞";
+  if (a.status === "active" || a.status === "done") return `${a.percent}%`;
+  return "—";
+}
+
+/** Left-pane row for a single bar — checkbox / status dot / name / percent.
  *  Sits in the SAME grid row as its GanttBar, which is what keeps the task list
  *  and the timeline aligned without any measurement code.
  *
@@ -902,12 +966,14 @@ function TaskRow({
   const a = bar.assignment;
 
   // The idle placeholder isn't a task — no id, nothing to check off or open.
+  // It has no bar either (an empty lane says "free" more quietly than a red
+  // dashed strip did), so this row is the only thing that marks it.
   if (!a) {
     return (
       <div className="tg-task-row tg-task-idle" style={{ gridColumn: 1, gridRow }}>
         <span />
-        <span className="tg-task-name">No active project</span>
         <span />
+        <span className="tg-task-none">{TXT.noTask}</span>
         <span />
       </div>
     );
@@ -916,10 +982,9 @@ function TaskRow({
   const status = bar.kind === "error" ? "error" : a.status;
   const done = a.status === "done";
   const selected = selectedId === a.id;
-  const showPercent = a.status === "active" || a.status === "done";
   // `overdue` is derived per-bar (past due and not finished), not a stored
-  // status, so the pill has to check it before falling back to the status.
-  const pill = bar.overdue ? "overdue" : status;
+  // status, so the dot has to check it before falling back to the status.
+  const dotStatus = bar.overdue ? "overdue" : status;
 
   function toggleDone(ev) {
     ev.stopPropagation();
@@ -950,13 +1015,16 @@ function TaskRow({
       >
         {done && <CheckGlyph />}
       </span>
+      <span
+        className={`tg-sdot tg-sdot-${dotStatus}`}
+        title={STATUS_LABEL[dotStatus] || dotStatus}
+      />
       <span className="tg-task-name" title={a.project}>
         {bar.kind === "error" && "⚠ "}{a.project}
         {a.__pending && <span className="tg-pending-dot" title="Unsaved" />}
       </span>
-      <span className={`tg-pill tg-pill-${pill}`}>{STATUS_LABEL[pill] || pill}</span>
       <span className="tg-task-pct">
-        {doneView ? formatClosed(a) : (showPercent ? `${a.percent}%` : "")}
+        {doneView ? formatClosed(a) : percentLabel(a)}
       </span>
     </div>
   );
@@ -982,13 +1050,9 @@ function GanttBar({
         onClick: (e) => { if (wasRealClick(e)) onOpenDetail(bar.assignment.id) },
       }
     : {};
-  if (bar.kind === "idle") {
-    return (
-      <div className="tg-bar tg-idle" style={{ gridColumn: `2 / ${DAY_COLS + 2}`, gridRow }}>
-        <span className="tg-bar-label">IDLE — no active project</span>
-      </div>
-    );
-  }
+  // An engineer with nothing on is shown by an empty lane plus the left
+  // column's "no active task" line — not by a bar. There is no work to draw.
+  if (bar.kind === "idle") return null;
 
   if (bar.kind === "error") {
     return (
@@ -1006,10 +1070,10 @@ function GanttBar({
     return (
       <div
         className={`tg-bar tg-continuous${editMode ? " tg-editing" : ""}${bar.assignment.__pending ? " tg-bar-pending" : ""}`}
-        style={{ gridColumn: `${bar.colStart + 2} / ${bar.colEnd + 2}`, gridRow, background: `${color}2e` }}
+        style={{ gridColumn: `${bar.colStart + 2} / ${bar.colEnd + 2}`, gridRow }}
         {...viewerClickHandlers}
       >
-        <span className="tg-bar-label">{bar.assignment.project || "Untitled"} · continuous</span>
+        <span className="tg-bar-label">{bar.assignment.project || "Untitled"}</span>
         {bar.assignment.__pending && <span className="tg-pending-badge" title="Unsaved change">unsaved</span>}
         {editMode && (
           <AssignmentEditor
@@ -1031,10 +1095,10 @@ function GanttBar({
       <div
         ref={setBarRef(bar.assignment.id)}
         className={`tg-bar tg-done${editMode ? " tg-editing" : ""}${bar.assignment.__pending ? " tg-bar-pending" : ""}`}
-        style={{ gridColumn: `${bar.colStart + 2} / ${bar.colEnd + 2}`, gridRow, background: `${color}73` }}
+        style={{ gridColumn: `${bar.colStart + 2} / ${bar.colEnd + 2}`, gridRow }}
         {...viewerClickHandlers}
       >
-        <span className="tg-bar-label">✓ {bar.assignment.project || "Untitled"} · done</span>
+        <span className="tg-bar-label">{bar.assignment.project || "Untitled"} ✓</span>
         {bar.assignment.__pending && <span className="tg-pending-badge" title="Unsaved change">unsaved</span>}
         {editMode && (
           <AssignmentEditor
@@ -1070,6 +1134,47 @@ function GanttBar({
     ? assignmentsById[bar.assignment.depends_on]?.project || null
     : null;
 
+  /* Bar wording. The percentage is deliberately absent — it is in the left
+   * column, and repeating it inside a 22px bar is what made the old labels
+   * long enough to need truncating. */
+  const project = bar.assignment.project || "Untitled";
+  const labelText = isQueued
+    ? `${project} · ${TXT.starts} ${bar.startLabel}`
+    : bar.overdue
+      ? `${project} · ${TXT.overdue}`
+      : bar.future
+        ? `${project} · ${TXT.starts} ${bar.startDate}`
+        : project;
+  /* Where the label sits relative to the progress fill. Text must never
+   * straddle the two: no ink passes AA on both the fill and the tint (in dark
+   * mode the tint is nearly black while the fill is bright). So a wide fill
+   * carries the label inside itself — clipped at its own edge — and a narrow
+   * one hands the label to the tint beside it, in the tint's ink.
+   *
+   * Which one wins is decided in estimated pixels, not percent: 40% of a
+   * three-day bar holds no text at all. Day columns are minmax(22px,1fr) and
+   * land near 26px at the widths this board is used at, and the label averages
+   * ~6.2px a character at 11.5px — rough numbers, but they only have to choose
+   * between two layouts that are both readable, never a colour that isn't. The
+   * fill takes the label when the label fits in it, or when the fill is the
+   * larger of the two areas (at 95% there is nothing beside it to use). */
+  const spanPx = Math.max(1, cols.colEnd - cols.colStart) * 26;
+  const fillPx = spanPx * (bar.assignment.percent / 100);
+  const textPx = labelText.length * 6.2 + 18;
+  const onFill = !isQueued && (fillPx >= textPx || fillPx >= spanPx - fillPx);
+  const barLabel = onFill ? (
+    <div className="tg-bar-fill" style={{ width: `${bar.assignment.percent}%` }}>
+      <span className="tg-bar-label">{labelText}</span>
+    </div>
+  ) : (
+    <>
+      {!isQueued && (
+        <div className="tg-bar-fill" style={{ width: `${bar.assignment.percent}%` }} />
+      )}
+      <span className="tg-bar-label tg-bar-label-tint">{labelText}</span>
+    </>
+  );
+
   return (
     <div
       ref={setBarRef(bar.assignment.id)}
@@ -1083,7 +1188,19 @@ function GanttBar({
       style={{
         gridColumn: `${cols.colStart + 2} / ${cols.colEnd + 2}`,
         gridRow,
-        ...(isQueued ? { borderColor: color, color } : {}),
+        // Narrow fill: start the label just past it instead of letting the two
+        // overlap (no ink colour is readable on the fill AND on the tint).
+        // Percentage padding on a grid item resolves against its grid area —
+        // the bar's own width — so this lands exactly on the fill's edge.
+        ...(!isQueued && !onFill
+          ? { paddingLeft: `calc(${bar.assignment.percent}% + 6px)` }
+          : {}),
+        // The one place an engineer's colour still appears on a bar: the
+        // outline of the bar being edited, so the side panel's subject is
+        // traceable back to its lane. Everything else here encodes status.
+        ...(expanded || (editMode && selectedId === bar.assignment.id)
+          ? { outline: `2px solid ${color}`, outlineOffset: "1px" }
+          : {}),
       }}
       onMouseDown={
         !editMode
@@ -1106,23 +1223,7 @@ function GanttBar({
       onMouseEnter={() => setHoveredId(bar.assignment.id)}
       onMouseLeave={() => setHoveredId((h) => (h === bar.assignment.id ? null : h))}
     >
-      {!isQueued && (
-        <>
-          <div className="tg-bar-fillwrap">
-            <div className="tg-bar-fill" style={{ width: `${bar.assignment.percent}%`, background: color }} />
-            <div className="tg-bar-rest" style={{ width: `${100 - bar.assignment.percent}%`, background: color }} />
-          </div>
-          <div className="tg-bar-progress" style={{ width: `${bar.assignment.percent}%` }} />
-        </>
-      )}
-      <span className="tg-bar-label">
-        {isQueued
-          ? `NEXT: ${bar.assignment.project || "Untitled"} · starts ${bar.startLabel}`
-          : bar.future
-            ? `${bar.assignment.project || "Untitled"} · starts ${bar.startDate} · ${bar.assignment.percent}%`
-            : `${bar.assignment.project || "Untitled"} · day ${bar.dayX} of ~${bar.estY} · ${bar.assignment.percent}%`}
-      </span>
-      {!isQueued && bar.overdue && <span className="tg-overdue-tag">overdue</span>}
+      {barLabel}
       {bar.assignment.__pending && <span className="tg-pending-badge" title="Unsaved change">unsaved</span>}
       {warn && (
         <span className="tg-dep-warn" title={`Starts before "${warn.predProject}" ends`}>⚠</span>
@@ -2522,6 +2623,9 @@ export default function TeamGantt() {
         </div>
       )}
 
+      {/* Header row and every lane share one rounded surface; the legend is
+        * the card's footer rather than a strip floating under the page. */}
+      <div className="tg-card">
       <div className="tg-scroll" ref={scrollRef}>
         <div
           ref={gridRef}
@@ -2567,8 +2671,8 @@ export default function TeamGantt() {
           {/* header: name spacer */}
           <div className="tg-name-header" style={{ gridColumn: 1, gridRow: "1 / 3" }}>
             <span />
+            <span />
             <span>Task</span>
-            <span>Status</span>
             <span className="tg-hdr-pct">{doneView ? "Closed" : "%"}</span>
           </div>
 
@@ -2613,7 +2717,12 @@ export default function TeamGantt() {
                 {/* group header — engineer name (left pane) + a band across the
                  * timeline so the row reads as one unit at any scroll offset */}
                 <div className="tg-group-name" style={{ gridColumn: 1, gridRow: headerRow }}>
-                  <span className="tg-dot" style={{ background: color }} />
+                  {/* Identity moved here when the bars stopped carrying it:
+                    * the avatar is now the only place an engineer's colour
+                    * appears on the board (bars encode status instead). */}
+                  <span className="tg-avatar" style={avatarStyle(color)}>
+                    {initials(e.name)}
+                  </span>
                   <span className="tg-eng-name">{e.name}</span>
                   <span className="tg-eng-count">{bars.filter((b) => b.assignment).length}</span>
                 </div>
@@ -2686,6 +2795,15 @@ export default function TeamGantt() {
             );
           })}
         </div>
+      </div>
+
+      <div className="tg-legend">
+        <span><i className="sw sw-active" /> {TXT.active}</span>
+        <span><i className="sw sw-queued" /> {TXT.queued}</span>
+        <span><i className="sw sw-continuous" /> {TXT.continuous}</span>
+        <span><i className="sw sw-overdue" /> {TXT.overdue}</span>
+        <span><i className="sw sw-done" /> {TXT.done}</span>
+      </div>
       </div>
 
       <div className={`bl-section${blCollapsed ? " bl-collapsed" : ""}`}>
@@ -2980,13 +3098,6 @@ export default function TeamGantt() {
 
       <div className="tg-statusbar">
         <span>{taskCount} task{taskCount === 1 ? "" : "s"} · {lanes.length} engineer{lanes.length === 1 ? "" : "s"}</span>
-        <span className="tg-legend">
-          <span><i className="sw solid" /> active</span>
-          <span><i className="sw dash" /> queued</span>
-          <span><i className="sw red" /> idle</span>
-          <span><i className="sw amber" /> overdue</span>
-          <span><i className="sw done" /> done</span>
-        </span>
         <span className="tg-status-right">
           {lastUpdated && (
             <span>Updated {lastUpdated.slice(0, 16).replace("T", " ")} UTC</span>
@@ -3057,100 +3168,137 @@ export default function TeamGantt() {
 function Style() {
   return (
     <style>{`
+      /* iOS-style sheet. Colour on a bar means STATUS (blue in progress, orange
+       * overdue, grey queued/ongoing, green done); an engineer's own colour
+       * survives only on their avatar and on the outline of a selected bar.
+       * Every token comes from the --ios-* scale in index.css, which is where
+       * the light/dark pairs and the WCAG AA notes live. */
+
       /* Viewport-filling shell: the board owns the only scrollport, so the
        * sticky timeline header pins to the board rather than to the browser
        * viewport. Scoped body lock (added/removed on mount) because
        * body{min-height:100vh} is shared with every other route. */
       .tg-viewport-lock{overflow:hidden}
       .tg-wrap{width:100%;max-width:none;margin:0;padding:0;height:100dvh;
-        display:flex;flex-direction:column;overflow:hidden;background:var(--surface-0)}
+        display:flex;flex-direction:column;overflow:hidden;background:var(--ios-bg);
+        color:var(--ios-label);font-family:var(--ios-font);
+        -webkit-font-smoothing:antialiased}
       /* The side panel is position:fixed; on a full-bleed board it would sit on
        * top of real timeline and over the toolbar's Save button, so make room
        * for it while it's open. MUST stay after .tg-wrap — same specificity,
        * so declaring it earlier lets the padding:0 there win instead. */
       .tg-wrap-panel{padding-right:var(--tg-panel-w,200px)}
-      .tg-loading{padding:60px 0;text-align:center;color:var(--muted)}
-      .tg-error{color:var(--danger);padding:6px 12px;font-size:12px}
+      .tg-loading{padding:60px 0;text-align:center;color:var(--ios-label3);font-size:14px}
+      .tg-error{color:#fff;background:var(--ios-orange);border:none;border-radius:10px;
+        padding:7px 12px;font-size:12px}
 
+      /* ---- toolbar (sits on the page background, above the card) ---- */
       .tg-head{flex:0 0 auto;display:flex;align-items:center;gap:10px;
-        padding:6px 12px;border-bottom:1px solid var(--border);background:var(--surface-1)}
-      .tg-title{font-size:13px;font-weight:600;margin:0;letter-spacing:-.01em;white-space:nowrap}
-      .tg-back{font-size:15px;color:var(--text-muted);text-decoration:none;padding:0 4px;line-height:1}
-      .tg-back:hover{color:var(--text-accent)}
-      .tg-controls{display:flex;align-items:center;gap:6px;margin-left:auto;flex-wrap:wrap}
-      .tg-sep{width:1px;height:18px;background:var(--border-strong);flex:none}
-      .tg-tabs{display:flex;align-items:center;gap:2px}
-      .tg-tab{height:28px;padding:4px 12px;border:1px solid transparent;border-radius:var(--radius);
-        background:none;color:var(--text-muted);font-family:inherit;font-size:11px;font-weight:500;cursor:pointer}
-      .tg-tab:hover{color:var(--text);background:var(--surface-0)}
-      .tg-tab.on{background:var(--bg-accent);color:var(--text-accent);border-color:var(--border-accent)}
+        padding:14px 16px 10px;background:transparent}
+      .tg-title{font-size:22px;font-weight:700;margin:0;letter-spacing:-.3px;
+        white-space:nowrap;color:var(--ios-label)}
+      .tg-back{font-size:17px;color:var(--ios-blue-ink);text-decoration:none;padding:0 4px;line-height:1}
+      .tg-back:hover{opacity:.7}
+      .tg-controls{display:flex;align-items:center;gap:8px;margin-left:auto;flex-wrap:wrap}
+      /* The separators did structural work in the old dense toolbar; the pills
+       * carry their own edges now, so the rules would just add noise. */
+      .tg-sep{display:none}
 
-      /* Done tab: a read-only archive. Bars are context for when the work sat,
-       * not something to interact with, so they recede. */
-      .tg-view-done .tg-bar{opacity:.4}
+      /* iOS segmented control: one recessed track, the selected segment lifted
+       * out of it on a white chip. */
+      .tg-tabs{display:flex;align-items:center;gap:2px;background:var(--ios-sep);
+        border-radius:9px;padding:2px}
+      .tg-tab{height:26px;padding:0 14px;border:none;border-radius:7px;
+        background:none;color:var(--ios-label);font-family:inherit;font-size:13px;
+        font-weight:500;cursor:pointer;transition:background 140ms ease}
+      .tg-tab:hover{color:var(--ios-label)}
+      .tg-tab.on{background:var(--ios-card);font-weight:600;box-shadow:var(--ios-shadow-btn)}
+
+      /* Done tab: a read-only archive. The green tint is quiet enough on its
+       * own — fading the bars further would drop their labels below AA. */
       .tg-view-done .tg-task-row{cursor:pointer}
       /* Every row here is closed, so a strike-through on all of them is noise. */
-      .tg-view-done .tg-task-done .tg-task-name{text-decoration:none;color:var(--text)}
+      .tg-view-done .tg-task-done .tg-task-name{text-decoration:none;color:var(--ios-label)}
       /* "28 Aug" needs more room than "100%". */
       .tg-view-done .tg-task-row,
-      .tg-view-done .tg-name-header{grid-template-columns:28px 1fr 72px 56px}
-      .tg-actions{display:flex;align-items:center;gap:6px}
+      .tg-view-done .tg-name-header{grid-template-columns:28px 14px 1fr 72px}
+      .tg-actions{display:flex;align-items:center;gap:8px}
       .tg-actions-off{opacity:.4;pointer-events:none}
-      .tg-alerts{flex:0 0 auto;display:flex;flex-direction:column;gap:4px;padding:6px 12px}
+      .tg-alerts{flex:0 0 auto;display:flex;flex-direction:column;gap:6px;padding:0 16px 8px}
 
-      .tg-hintbar{flex:0 0 auto;font-size:10px;color:var(--text-muted);background:var(--bg-accent);
-        border-top:1px solid var(--border-accent);padding:4px 12px}
-      .tg-statusbar{flex:0 0 auto;font-size:10px;color:var(--text-muted);background:var(--surface-1);
-        border-top:1px solid var(--border);padding:4px 12px;display:flex;gap:16px;align-items:center;flex-wrap:wrap}
+      .tg-hintbar{flex:0 0 auto;font-size:12px;color:var(--ios-label2);
+        padding:6px 20px}
+      .tg-statusbar{flex:0 0 auto;font-size:12px;color:var(--ios-label3);
+        padding:6px 20px 10px;display:flex;gap:16px;align-items:center;flex-wrap:wrap}
       .tg-status-right{margin-left:auto;display:flex;gap:16px;align-items:center}
 
-      .tg-btn{height:28px;padding:4px 10px;border-radius:var(--radius);border:1px solid var(--border-strong);
-        background:var(--surface-0);color:var(--text);font-size:11px;font-weight:500;cursor:pointer;
-        font-family:inherit;display:flex;align-items:center;gap:4px;white-space:nowrap}
+      /* iOS buttons: secondary = white pill with blue text, primary = blue fill. */
+      .tg-btn{height:30px;padding:0 13px;border-radius:9px;border:none;
+        background:var(--ios-card);color:var(--ios-blue-ink);font-size:13px;font-weight:500;
+        cursor:pointer;font-family:inherit;display:flex;align-items:center;gap:5px;
+        white-space:nowrap;box-shadow:var(--ios-shadow-btn)}
       /* The Monthly review link wears .tg-btn too — strip the anchor underline
        * and keep it from being squeezed, without touching the real buttons. */
       a.tg-btn{text-decoration:none;flex:none}
-      a.tg-btn:hover{border-color:var(--accent1);color:var(--text-accent)}
-      .tg-btn.on{background:var(--accent1);color:var(--on-accent);border-color:var(--accent1)}
-      .tg-btn:disabled{opacity:.4;cursor:not-allowed}
-      .tg-btn-save.on{background:var(--fill-accent);border-color:var(--fill-accent);color:var(--on-accent)}
-      .tg-btn-discard:not(:disabled){color:var(--danger);border-color:var(--danger)}
-      .tg-icon-btn{width:32px;height:32px;border-radius:8px;border:1px solid var(--border);background:var(--card);color:var(--muted);cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:15px}
-      .tg-toast{margin-top:12px;padding:8px 14px;border-radius:8px;background:rgba(34,197,94,.12);color:var(--success);font-size:12.5px;font-weight:600}
-      .tg-toast-link{background:rgba(0,207,255,.12);color:var(--accent1)}
+      .tg-btn:hover{opacity:.75}
+      .tg-btn.on{background:var(--ios-blue-fill);color:#fff}
+      .tg-btn:disabled{opacity:.4;cursor:not-allowed;box-shadow:none}
+      .tg-btn-save.on{background:var(--ios-blue-fill);color:#fff}
+      .tg-btn-discard:not(:disabled){color:var(--ios-orange-text)}
+      .tg-icon-btn{width:30px;height:30px;border-radius:9px;border:none;
+        background:var(--ios-card);color:var(--ios-blue-ink);cursor:pointer;display:flex;
+        align-items:center;justify-content:center;font-size:14px;box-shadow:var(--ios-shadow-btn)}
+      .tg-toast{margin-top:0;padding:8px 14px;border-radius:10px;
+        background:var(--ios-green-tint);color:var(--ios-green-text);font-size:13px;font-weight:500}
+      .tg-toast-link{background:var(--ios-blue-tint);color:var(--ios-blue-text)}
 
-      .tg-legend{display:flex;gap:12px;flex-wrap:wrap;font-size:10px;color:var(--text-muted);align-items:center}
+      /* ---- the card: header row + every lane + the legend ---- */
+      .tg-card{flex:1 1 auto;min-height:0;display:flex;flex-direction:column;
+        margin:0 16px 10px;background:var(--ios-card);border-radius:14px;
+        box-shadow:var(--ios-shadow);overflow:hidden}
+
+      .tg-legend{flex:0 0 auto;display:flex;gap:16px;flex-wrap:wrap;align-items:center;
+        font-size:12px;color:var(--ios-label2);padding:8px 14px;
+        border-top:0.5px solid var(--ios-sep)}
       .tg-legend span{display:flex;align-items:center;gap:6px}
-      .tg-legend .sw{width:20px;height:10px;border-radius:3px;display:inline-block}
-      .tg-legend .sw.solid{background:var(--accent1)}
-      .tg-legend .sw.dash{border:1.5px dashed var(--muted)}
-      .tg-legend .sw.red{border:1.5px dashed var(--danger)}
-      .tg-legend .sw.amber{border:1.5px solid var(--warning)}
-      .tg-legend .sw.done{background:var(--success);opacity:.45}
+      .tg-legend .sw{width:22px;height:11px;border-radius:5px;display:inline-block}
+      .tg-legend .sw-active{background:var(--ios-blue-fill)}
+      .tg-legend .sw-queued{border:1.5px dashed var(--ios-fill3)}
+      .tg-legend .sw-continuous{background:var(--ios-continuous)}
+      .tg-legend .sw-overdue{background:var(--ios-orange)}
+      .tg-legend .sw-done{background:var(--ios-green-tint);border:1px solid var(--ios-green)}
 
-      .tg-modal-backdrop{position:fixed;inset:0;background:rgba(6,9,26,.55);display:flex;align-items:flex-start;justify-content:center;padding:60px 20px;z-index:50}
-      .tg-modal{width:100%;max-width:480px;max-height:70vh;display:flex;flex-direction:column;padding:0;overflow:hidden}
-      .tg-modal-head{display:flex;align-items:center;justify-content:space-between;padding:16px 20px;border-bottom:1px solid var(--border)}
-      .tg-modal-head h2{font-size:15px;font-weight:700;margin:0}
+      /* ---- modals ---- */
+      .tg-modal-backdrop{position:fixed;inset:0;background:rgba(0,0,0,.4);display:flex;
+        align-items:flex-start;justify-content:center;padding:60px 20px;z-index:50}
+      .tg-modal{width:100%;max-width:480px;max-height:70vh;display:flex;flex-direction:column;
+        padding:0;overflow:hidden;background:var(--ios-card);border:none;border-radius:14px;
+        box-shadow:0 12px 40px rgba(0,0,0,.18)}
+      .tg-modal-head{display:flex;align-items:center;justify-content:space-between;
+        padding:16px 20px;border-bottom:0.5px solid var(--ios-sep)}
+      .tg-modal-head h2{font-size:17px;font-weight:700;margin:0;letter-spacing:-.2px}
       .tg-modal-list{overflow-y:auto;padding:8px 20px}
-      .tg-modal-row{display:flex;align-items:center;gap:10px;padding:10px 0;border-bottom:1px solid var(--border);flex-wrap:wrap}
+      .tg-modal-row{display:flex;align-items:center;gap:10px;padding:10px 0;
+        border-bottom:0.5px solid var(--ios-sep);flex-wrap:wrap}
       .tg-modal-row:last-child{border-bottom:none}
       .tg-modal-row-hidden{opacity:.45}
-      .tg-modal-name{font-size:13px;font-weight:600;flex:1}
-      .tg-modal-action{font-size:11.5px;padding:5px 12px;white-space:nowrap}
-      .tg-modal-action.warn{background:var(--danger);color:#fff;border-color:var(--danger)}
+      .tg-modal-name{font-size:14px;font-weight:600;flex:1}
+      .tg-modal-action{font-size:12.5px;padding:0 12px;white-space:nowrap}
+      .tg-modal-action.warn{background:var(--ios-orange);color:var(--ios-orange-ink)}
       .tg-modal-confirm{display:flex;align-items:center;gap:8px;flex-wrap:wrap;width:100%;padding-top:6px}
-      .tg-modal-warning{font-size:11px;color:var(--warning);flex:1 1 100%}
-      .tg-modal-hint{font-size:11px;color:var(--muted);padding:14px 20px;border-top:1px solid var(--border)}
+      .tg-modal-warning{font-size:12px;color:var(--ios-orange-text);flex:1 1 100%}
+      .tg-modal-hint{font-size:12px;color:var(--ios-label3);padding:14px 20px;border-top:0.5px solid var(--ios-sep)}
 
       /* Stacking order for the board. Sticky cells must outrank everything
        * that scrolls under them, and the corner must outrank both sticky axes:
        *   0  weekend columns, day cells
-       *   1  today line, row dividers, group band
+       *   1  row dividers, group band
        *   2  bars (5 while inline-editing)
        *   6  dependency arrows
        *   8  backlog lane-drop overlay
        *   10 sticky timeline header (rows 1-2)
+       *   11 today marker — above the header so its cap can sit on top of it,
+       *      below the left pane so it never crosses the task names
        *   20 sticky left pane (column 1)
        *   30 sticky corner (.tg-name-header)
        * .tg-bar-resize (11) and .tg-editor (10) live inside .tg-bar's own
@@ -3161,299 +3309,386 @@ function Style() {
 
       /* corner: sticky on BOTH axes, so it holds the top-left while either
        * scrollbar moves. Same 4-col template as the task rows below it. */
-      .tg-name-header{position:sticky;left:0;top:0;z-index:30;background:var(--surface-1);
-        display:grid;grid-template-columns:28px 1fr 72px 40px;align-items:end;gap:0;
-        padding:0 0 4px;border-bottom:1px solid var(--border);border-right:2px solid var(--border-strong)}
-      .tg-name-header span{font-size:10px;font-weight:500;color:var(--text-muted);
-        text-transform:uppercase;letter-spacing:.06em;padding:4px 6px}
+      .tg-name-header{position:sticky;left:0;top:0;z-index:30;background:var(--ios-card);
+        display:grid;grid-template-columns:28px 14px 1fr 48px;align-items:end;gap:0;
+        padding:0 0 5px;border-bottom:0.5px solid var(--ios-sep);border-right:0.5px solid var(--ios-sep)}
+      .tg-name-header span{font-size:11px;font-weight:500;color:var(--ios-label3);
+        letter-spacing:0;padding:4px 6px}
       .tg-hdr-pct{text-align:right}
 
-      .tg-week-cell{position:sticky;top:0;z-index:10;background:var(--surface-1);
-        font-size:10px;font-weight:500;color:var(--text-secondary);padding:0 6px;
-        border-bottom:1px solid var(--border);border-right:1px solid var(--border-strong);
+      .tg-week-cell{position:sticky;top:0;z-index:10;background:var(--ios-card);
+        font-size:11px;font-weight:600;color:var(--ios-label2);padding:0 8px;
+        border-bottom:0.5px solid var(--ios-sep);border-right:0.5px solid var(--ios-sep);
         display:flex;align-items:center;white-space:nowrap;overflow:hidden}
-      .tg-day-cell{position:sticky;top:22px;z-index:10;background:var(--surface-1);
-        font-size:10px;color:var(--text-muted);text-align:center;
-        border-bottom:1px solid var(--border);pointer-events:none;
-        display:flex;align-items:center;justify-content:center}
-      .tg-day-cell.weekend{opacity:.4}
-      .tg-day-cell.today{color:var(--text-accent);font-weight:500;background:var(--bg-accent)}
-      .tg-weekend-col{position:relative;background:var(--surface-1);opacity:.6;pointer-events:none;z-index:0}
-      .tg-today-col{position:relative;pointer-events:none;z-index:1}
-      .tg-today-line{position:absolute;left:50%;top:0;bottom:0;width:1.5px;background:var(--border-accent);transform:translateX(-50%);pointer-events:none}
-      .tg-row-divider{position:relative;pointer-events:none;z-index:1;border-bottom:1px solid var(--border)}
+      .tg-day-cell{position:sticky;top:22px;z-index:10;background:var(--ios-card);
+        font-size:11px;color:var(--ios-label3);text-align:center;
+        border-bottom:0.5px solid var(--ios-sep);pointer-events:none;
+        display:flex;align-items:center;justify-content:center;font-variant-numeric:tabular-nums}
+      .tg-day-cell.weekend{background:var(--ios-weekend)}
+      .tg-day-cell.today{color:var(--ios-blue-ink);font-weight:600;background:var(--ios-card)}
+      /* Flat tint rather than an opacity trick, so nothing underneath shows
+       * through and the weekend reads the same at every scroll offset. */
+      .tg-weekend-col{position:relative;background:var(--ios-weekend);pointer-events:none;z-index:0}
+      .tg-today-col{position:relative;pointer-events:none;z-index:11}
+      .tg-today-line{position:absolute;left:50%;top:0;bottom:0;width:2px;
+        background:var(--ios-blue);transform:translateX(-50%);pointer-events:none}
+      /* 10px cap at the very top of the header, the way iOS marks "now". */
+      .tg-today-line::before{content:"";position:absolute;top:0;left:50%;
+        width:10px;height:10px;border-radius:50%;background:var(--ios-blue);
+        transform:translate(-50%,-2px)}
+      .tg-row-divider{position:relative;pointer-events:none;z-index:1}
 
       /* ---- left pane ---- */
-      .tg-group-name{position:sticky;left:0;z-index:20;background:var(--surface-1);
+      /* Hairlines live in the left column only — the timeline side stays clean,
+       * which is what makes the lanes read as rows of one sheet. */
+      .tg-group-name{position:sticky;left:0;z-index:20;background:var(--ios-card);
         display:flex;align-items:center;gap:8px;padding:0 8px;
-        border-bottom:1px solid var(--border);border-right:2px solid var(--border-strong)}
-      .tg-group-band{background:var(--surface-1);border-bottom:1px solid var(--border);position:relative;z-index:1}
+        border-bottom:0.5px solid var(--ios-sep);border-right:0.5px solid var(--ios-sep)}
+      .tg-group-band{background:var(--ios-card);position:relative;z-index:1}
       .tg-dot{width:8px;height:8px;border-radius:50%;flex:none}
-      .tg-eng-name{font-size:12px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-      .tg-eng-count{margin-left:auto;font-size:10px;color:var(--text-muted);font-variant-numeric:tabular-nums}
+      /* The ink is set per avatar (see avatarInk) — white on the dark chips,
+       * near-black on the bright ones — because the team's colours span both. */
+      .tg-avatar{width:22px;height:22px;border-radius:50%;flex:none;display:flex;
+        align-items:center;justify-content:center;font-size:9px;font-weight:600;
+        letter-spacing:.02em}
+      .tg-eng-name{font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;
+        text-overflow:ellipsis;color:var(--ios-label)}
+      .tg-eng-count{margin-left:auto;font-size:12px;color:var(--ios-label3);font-variant-numeric:tabular-nums}
 
-      .tg-task-row{position:sticky;left:0;z-index:20;background:var(--surface-0);
-        display:grid;grid-template-columns:28px 1fr 72px 40px;align-items:center;
-        border-bottom:1px solid var(--border);border-right:2px solid var(--border-strong);cursor:pointer}
-      .tg-task-row:hover{background:var(--surface-1)}
-      .tg-task-selected,.tg-task-selected:hover{background:var(--bg-accent)}
-      .tg-task-idle{cursor:default;opacity:.55}
-      .tg-task-idle:hover{background:var(--surface-0)}
-      .tg-task-name{font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;padding:0 6px}
-      .tg-task-done .tg-task-name{color:var(--text-muted);text-decoration:line-through}
-      .tg-task-pct{font-size:11px;color:var(--text-muted);text-align:right;padding-right:6px;font-variant-numeric:tabular-nums}
-      .tg-pending-dot{display:inline-block;width:5px;height:5px;border-radius:50%;background:var(--fill-accent);margin-left:5px;vertical-align:middle}
+      .tg-task-row{position:sticky;left:0;z-index:20;background:var(--ios-card);
+        display:grid;grid-template-columns:28px 14px 1fr 48px;align-items:center;
+        border-bottom:0.5px solid var(--ios-sep);border-right:0.5px solid var(--ios-sep);cursor:pointer}
+      .tg-task-row:hover{background:var(--ios-bg)}
+      .tg-task-selected,.tg-task-selected:hover{background:var(--ios-blue-tint)}
+      .tg-task-idle{cursor:default}
+      .tg-task-idle:hover{background:var(--ios-card)}
+      .tg-task-none{font-size:12.5px;color:var(--ios-label3);padding:0 6px;
+        white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+      .tg-task-name{font-size:13px;color:var(--ios-label);white-space:nowrap;overflow:hidden;
+        text-overflow:ellipsis;padding:0 6px}
+      .tg-task-done .tg-task-name{color:var(--ios-label3);text-decoration:line-through}
+      .tg-task-pct{font-size:12px;color:var(--ios-label3);text-align:right;padding-right:8px;
+        font-variant-numeric:tabular-nums}
+      .tg-pending-dot{display:inline-block;width:5px;height:5px;border-radius:50%;
+        background:var(--ios-blue);margin-left:5px;vertical-align:middle}
 
-      .tg-check{width:13px;height:13px;border:1px solid var(--border-strong);border-radius:3px;
-        margin:0 auto;display:flex;align-items:center;justify-content:center;color:var(--text-success)}
-      .tg-check.on{background:var(--bg-success);border-color:var(--text-success)}
+      /* 7px status dot — what the status pills used to say in words. */
+      .tg-sdot{width:7px;height:7px;border-radius:50%;justify-self:center}
+      .tg-sdot-active{background:var(--ios-blue)}
+      .tg-sdot-overdue{background:var(--ios-orange)}
+      .tg-sdot-queued{background:var(--ios-fill3)}
+      .tg-sdot-continuous{background:var(--ios-label3)}
+      .tg-sdot-done{background:var(--ios-green)}
+      .tg-sdot-error{background:var(--ios-orange)}
+
+      .tg-check{width:15px;height:15px;border:1.5px solid var(--ios-fill3);border-radius:50%;
+        margin:0 auto;display:flex;align-items:center;justify-content:center;color:#fff}
+      .tg-check.on{background:var(--ios-green);border-color:var(--ios-green)}
       .tg-check-live{cursor:pointer}
 
-      .tg-pill{font-size:9px;padding:1px 5px;border-radius:20px;justify-self:start;
-        white-space:nowrap;border:1px solid transparent}
-      .tg-pill-active{background:var(--bg-accent);color:var(--text-accent)}
-      .tg-pill-queued{background:transparent;color:var(--text-muted);border-color:var(--border-strong)}
-      .tg-pill-done{background:var(--bg-success);color:var(--text-success)}
-      .tg-pill-continuous{background:var(--bg-success);color:var(--text-success)}
-      .tg-pill-overdue{background:#faeeda;color:#633806;border-color:#e8a838}
-      .tg-pill-error{background:transparent;color:var(--danger);border-color:var(--danger)}
-
-      .tg-add-row{position:sticky;left:0;z-index:20;background:var(--surface-0);
-        border:none;border-bottom:1px solid var(--border);border-right:2px solid var(--border-strong);
-        font-family:inherit;font-size:11px;color:var(--text-muted);text-align:left;
+      .tg-add-row{position:sticky;left:0;z-index:20;background:var(--ios-card);
+        border:none;border-bottom:0.5px solid var(--ios-sep);border-right:0.5px solid var(--ios-sep);
+        font-family:inherit;font-size:12.5px;color:var(--ios-blue-ink);text-align:left;
         padding:3px 6px 3px 34px;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-      .tg-add-row:hover{background:var(--surface-1);color:var(--text-accent)}
+      .tg-add-row:hover{background:var(--ios-bg)}
 
-      .tg-bar{position:relative;z-index:2;align-self:center;min-height:16px;border-radius:3px;display:flex;align-items:center;padding:0 6px 0 8px;font-size:9px;font-weight:500;overflow:hidden;border:1px solid transparent;cursor:default}
-      .tg-bar.tg-editing{position:relative;z-index:5;flex-direction:column;align-items:flex-start;padding:6px 8px;overflow:visible;min-height:auto}
+      /* ---- bars ---- */
+      .tg-bar{position:relative;z-index:2;align-self:center;height:22px;min-height:22px;
+        border-radius:7px;display:flex;align-items:center;padding:0 9px;font-size:11.5px;
+        font-weight:500;overflow:hidden;border:none;cursor:default}
+      .tg-bar.tg-editing{position:relative;z-index:5;flex-direction:column;align-items:flex-start;
+        padding:6px 9px;overflow:visible;height:auto;min-height:auto}
       .tg-bar.tg-draggable{cursor:grab}
       .tg-bar.tg-draggable.tg-dragging{cursor:grabbing}
       /* Outline only in edit mode — in viewer mode a bar isn't a drag target,
        * so hover shouldn't advertise one. */
-      .tg-bar.tg-draggable:hover{outline:1.5px solid var(--border-accent);outline-offset:1px;z-index:3}
+      .tg-bar.tg-draggable:hover{outline:1.5px solid var(--ios-blue);outline-offset:1px;z-index:3}
       /* 6px grab strips, only rendered in edit mode; revealed on bar hover. */
-      .tg-bar-resize{position:absolute;top:0;bottom:0;width:6px;cursor:col-resize;z-index:11;opacity:0;background:var(--text);transition:opacity 120ms ease}
-      .tg-bar:hover .tg-bar-resize{opacity:.3}
-      .tg-bar-resize:hover{opacity:.6}
-      .tg-bar-resize-left{left:0;border-radius:3px 0 0 3px}
-      .tg-bar-resize-right{right:0;border-radius:0 3px 3px 0}
-      .tg-bar-selected{outline:1.5px solid var(--border-accent);outline-offset:1px;z-index:3}
+      .tg-bar-resize{position:absolute;top:0;bottom:0;width:6px;cursor:col-resize;z-index:11;
+        opacity:0;background:var(--ios-label);transition:opacity 120ms ease}
+      .tg-bar:hover .tg-bar-resize{opacity:.2}
+      .tg-bar-resize:hover{opacity:.4}
+      .tg-bar-resize-left{left:0;border-radius:7px 0 0 7px}
+      .tg-bar-resize-right{right:0;border-radius:0 7px 7px 0}
+      .tg-bar-selected{z-index:3}
 
-      /* right-side editor panel */
-      .tg-side-panel{position:fixed;top:0;right:0;bottom:0;width:var(--tg-panel-w,200px);z-index:60;display:flex;flex-direction:column;gap:2px;
-        padding:14px 12px;overflow-y:auto;background:var(--card);border-left:1px solid var(--border);
-        box-shadow:-8px 0 24px rgba(0,0,0,.18);transform:translateX(100%);transition:transform 200ms ease}
+      /* Progress: the filled part of the bar. It also carries the label once it
+       * is wide enough, and clips it at its own edge (overflow:hidden), which
+       * is what keeps one ink colour valid for the whole string. */
+      .tg-bar-fill{position:absolute;left:0;top:0;bottom:0;border-radius:7px 0 0 7px;
+        background:var(--ios-blue-fill);display:flex;align-items:center;
+        padding-left:9px;overflow:hidden}
+      .tg-bar-label{position:relative;z-index:1;white-space:nowrap;overflow:hidden;
+        text-overflow:ellipsis;color:var(--ios-label)}
+
+      .tg-active{background:var(--ios-blue-tint)}
+      .tg-active .tg-bar-label{color:#fff}
+      /* Under ~35% the label no longer fits on the fill and sits on the tint,
+       * where white would be unreadable — AA needs the tint's own ink. */
+      .tg-active .tg-bar-label-tint{color:var(--ios-blue-text)}
+      .tg-overdue{background:var(--ios-orange-tint)}
+      .tg-overdue .tg-bar-fill{background:var(--ios-orange)}
+      /* White on iOS orange is 2.2:1 — the label goes near-black instead. */
+      .tg-overdue .tg-bar-label{color:var(--ios-orange-ink)}
+      .tg-overdue .tg-bar-label-tint{color:var(--ios-orange-text)}
+      .tg-queued{background:transparent;border:1.5px dashed var(--ios-fill3)}
+      .tg-queued .tg-bar-label{color:var(--ios-label3)}
+      .tg-continuous{background:var(--ios-continuous)}
+      .tg-continuous .tg-bar-label{color:var(--ios-label2)}
+      .tg-done{background:var(--ios-green-tint)}
+      .tg-done .tg-bar-label{color:var(--ios-green-text)}
+      .tg-bar-error{background:var(--ios-orange-tint);color:var(--ios-orange-text);
+        cursor:help;max-width:220px}
+      .tg-bar-error .tg-bar-label{color:var(--ios-orange-text)}
+      .tg-bar-pending{outline:2px dashed var(--ios-blue);outline-offset:1px}
+      .tg-pending-badge{position:relative;z-index:1;margin-left:8px;font-size:10px;font-weight:600;
+        background:var(--ios-blue-fill);color:#fff;border-radius:8px;padding:1px 7px;white-space:nowrap}
+      .tg-dep-warn{position:relative;z-index:1;margin-left:6px;font-size:11px;color:var(--ios-orange-text)}
+
+      /* ---- right-side editor panel ---- */
+      .tg-side-panel{position:fixed;top:0;right:0;bottom:0;width:var(--tg-panel-w,200px);z-index:60;
+        display:flex;flex-direction:column;gap:2px;padding:16px 14px;overflow-y:auto;
+        background:var(--ios-card);border-left:0.5px solid var(--ios-sep);
+        box-shadow:-8px 0 24px rgba(0,0,0,.10);transform:translateX(100%);transition:transform 200ms ease}
       .tg-side-panel.open{transform:translateX(0)}
       /* Left-edge resize grip. Sits above the panel's own content but below the
        * modals (z 60 stacking context), and stays inside panelRef so grabbing
        * it never trips the click-outside-to-close handler. */
       .tg-sp-resize{position:absolute;left:0;top:0;bottom:0;width:4px;cursor:col-resize;
         z-index:5;background:transparent;display:flex;align-items:center;justify-content:center}
-      /* 30% tint via an overlay rather than color-mix, and on ::before rather
-       * than the handle itself so the grip keeps its own opacity. */
-      .tg-sp-resize::before{content:"";position:absolute;inset:0;background:var(--border-strong);
+      .tg-sp-resize::before{content:"";position:absolute;inset:0;background:var(--ios-fill3);
         opacity:0;transition:opacity 120ms ease}
-      .tg-sp-resize:hover::before{opacity:.3}
+      .tg-sp-resize:hover::before{opacity:.5}
       /* Three stacked dots: the centre one plus two box-shadow copies 5px out. */
-      .tg-sp-grip{position:relative;width:2px;height:2px;border-radius:1px;color:var(--text-muted);
-        background:currentColor;opacity:.35;transition:opacity 120ms ease;
+      .tg-sp-grip{position:relative;width:2px;height:2px;border-radius:1px;color:var(--ios-label3);
+        background:currentColor;opacity:.5;transition:opacity 120ms ease;
         box-shadow:0 -5px 0 currentColor, 0 5px 0 currentColor}
-      /* Faintly visible at rest so the edge reads as draggable at all, and
-       * brighter on hover once the pointer finds it. */
-      .tg-sp-resize:hover .tg-sp-grip{opacity:.85}
+      .tg-sp-resize:hover .tg-sp-grip{opacity:.9}
       .tg-sp-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}
-      .tg-sp-title{font-size:13px;font-weight:700;color:var(--text)}
-      .tg-sp-close{border:none;background:none;color:var(--muted);font-size:20px;line-height:1;cursor:pointer;padding:0 2px}
-      .tg-sp-label{font-size:11px;font-weight:600;color:var(--muted);margin-top:10px;margin-bottom:4px}
-      .tg-sp-input{width:100%;box-sizing:border-box;padding:6px 8px;border-radius:6px;border:1px solid var(--border);
-        background:var(--surface-0);color:var(--text);font-size:12.5px;font-family:inherit}
-      .tg-sp-range{width:100%;margin:2px 0}
-      /* var(--text) is this project's primary text token — there is no
-       * --text-primary defined anywhere, so naming one would render the
-       * textarea with an inherited colour. */
-      .tg-sp-textarea{width:100%;box-sizing:border-box;font-family:inherit;font-size:11px;
-        line-height:1.45;padding:6px 8px;border:0.5px solid var(--border-strong);
-        border-radius:var(--radius);background:var(--surface-1);color:var(--text);
-        resize:vertical;min-height:60px}
-      .tg-sp-textarea::placeholder{color:var(--text-muted)}
+      .tg-sp-title{font-size:17px;font-weight:700;color:var(--ios-label);letter-spacing:-.2px}
+      .tg-sp-close{border:none;background:none;color:var(--ios-label3);font-size:20px;line-height:1;
+        cursor:pointer;padding:0 2px}
+      .tg-sp-label{font-size:12px;font-weight:600;color:var(--ios-label3);margin-top:12px;margin-bottom:4px}
+      .tg-sp-input,.tg-sp-select{width:100%;box-sizing:border-box;padding:7px 10px;border-radius:9px;
+        border:none;background:var(--ios-bg);color:var(--ios-label);font-size:13px;font-family:inherit}
+      .tg-sp-input:focus,.tg-sp-select:focus{outline:2px solid var(--ios-blue);outline-offset:-1px}
+      .tg-sp-range{width:100%;margin:2px 0;accent-color:var(--ios-blue)}
+      .tg-sp-textarea{width:100%;box-sizing:border-box;font-family:inherit;font-size:13px;
+        line-height:1.45;padding:8px 10px;border:none;border-radius:9px;background:var(--ios-bg);
+        color:var(--ios-label);resize:vertical;min-height:60px}
+      .tg-sp-textarea::placeholder{color:var(--ios-label3)}
       .tg-sp-assignee{display:flex;align-items:center;gap:6px}
       .tg-sp-assignee .tg-sp-select{flex:1;min-width:0}
-      .tg-sp-assignee-ro{font-size:12.5px;color:var(--text);padding:6px 0}
-      .tg-sp-status{display:flex;flex-wrap:wrap;gap:4px}
-      .tg-sp-status button{flex:1 1 auto;padding:4px 6px;border-radius:999px;border:1px solid var(--border);background:var(--surface-0);
-        color:var(--muted);font-size:10.5px;font-weight:600;cursor:pointer;font-family:inherit}
-      .tg-sp-status button.on{background:var(--text);color:var(--card);border-color:var(--text)}
-      .tg-sp-actions{display:flex;gap:6px;margin-top:16px}
-      .tg-sp-actions .tg-btn{flex:1;padding:7px 8px;text-align:center}
-      .tg-sp-delete{color:var(--danger);border-color:var(--danger)}
-      .tg-bar-fillwrap{position:absolute;inset:0;display:flex}
-      .tg-bar-fill{height:100%}
-      .tg-bar-rest{height:100%;opacity:.25}
-      /* Thin progress strip along the bottom edge, on top of the engineer-colour
-       * fill — reads as progress even when the bar is only a few columns wide. */
-      .tg-bar-progress{position:absolute;bottom:0;left:0;height:2px;background:rgba(255,255,255,.35);border-radius:0 0 0 3px;z-index:1;pointer-events:none}
-      .tg-bar-label{position:relative;z-index:1;color:var(--on-accent);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-      .tg-active .tg-bar-label{color:var(--on-accent)}
-      .tg-active.tg-overdue{outline:1.5px solid #e8a838;outline-offset:1px}
-      .tg-overdue-tag{position:relative;z-index:1;margin-left:6px;font-size:9px;background:#e8a838;color:#4a2800;border-radius:20px;padding:0 6px}
-      .tg-dep-warn{position:relative;z-index:1;margin-left:6px;font-size:10px;color:var(--warning)}
-      .tg-continuous{border:1px solid var(--border)}
-      .tg-continuous .tg-bar-label{color:var(--text)}
-      .tg-done{border:1px solid var(--border)}
-      .tg-done .tg-bar-label{color:var(--text-muted)}
-      .tg-idle{background:transparent;border:1px dashed var(--danger);color:var(--danger)}
-      .tg-idle .tg-bar-label{color:var(--danger)}
-      .tg-queued{background:transparent;border:1px dashed var(--border-strong)}
-      .tg-queued .tg-bar-label{color:var(--text-secondary)}
-      .tg-bar-error{background:rgba(245,158,11,.12);border:1.5px solid var(--warning);color:var(--warning);cursor:help;max-width:220px}
-      .tg-bar-error .tg-bar-label{color:var(--warning)}
-      .tg-bar-pending{outline:2px dashed var(--accent1);outline-offset:1px}
-      .tg-pending-badge{position:relative;z-index:1;margin-left:8px;font-size:9px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;background:var(--accent1);color:var(--on-accent);border-radius:8px;padding:1px 6px;white-space:nowrap}
+      .tg-sp-assignee-ro{font-size:13px;color:var(--ios-label);padding:6px 0}
+      /* The status row is a segmented control like the toolbar's. */
+      .tg-sp-status{display:flex;flex-wrap:wrap;gap:2px;background:var(--ios-sep);
+        border-radius:9px;padding:2px}
+      .tg-sp-status button{flex:1 1 auto;padding:5px 6px;border-radius:7px;border:none;
+        background:none;color:var(--ios-label);font-size:11.5px;font-weight:500;cursor:pointer;
+        font-family:inherit}
+      .tg-sp-status button.on{background:var(--ios-card);font-weight:600;box-shadow:var(--ios-shadow-btn)}
+      .tg-sp-actions{display:flex;gap:8px;margin-top:18px}
+      .tg-sp-actions .tg-btn{flex:1;justify-content:center;height:34px}
+      .tg-sp-apply{background:var(--ios-blue-fill);color:#fff}
+      .tg-sp-delete{color:var(--ios-orange-text)}
 
+      /* ---- inline bar editor ---- */
       .tg-editor{position:relative;z-index:10;display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-top:6px}
       .tg-editor input,.tg-editor button{position:relative;z-index:10}
-      .tg-editor input{font-family:inherit;font-size:11px;border-radius:6px;border:1px solid var(--border);background:var(--card);color:var(--text);padding:3px 6px}
+      .tg-editor input{font-family:inherit;font-size:12px;border-radius:8px;border:none;
+        background:var(--ios-bg);color:var(--ios-label);padding:4px 8px}
       .tg-e-project{width:120px}
       .tg-e-est{width:44px}
       .tg-e-date{width:120px}
-      .tg-e-percent{display:flex;align-items:center;gap:4px;font-size:11px}
-      .tg-e-percent button{width:18px;height:18px;border-radius:5px;border:1px solid var(--border);background:var(--card);color:var(--text);cursor:pointer;font-size:11px;line-height:1}
+      .tg-e-percent{display:flex;align-items:center;gap:4px;font-size:12px;color:var(--ios-label)}
+      .tg-e-percent button{width:20px;height:20px;border-radius:6px;border:none;
+        background:var(--ios-bg);color:var(--ios-blue-ink);cursor:pointer;font-size:12px;line-height:1}
       .tg-e-status{display:flex;gap:2px}
-      .tg-e-status button{width:20px;height:20px;border-radius:5px;border:1px solid var(--border);background:var(--card);color:var(--muted);cursor:pointer;font-size:10px;font-weight:700}
-      .tg-e-status button.on{background:var(--accent1);color:var(--on-accent);border-color:var(--accent1)}
-      .tg-e-del{width:20px;height:20px;border-radius:5px;border:1px solid var(--danger);background:none;color:var(--danger);cursor:pointer;font-size:10px}
-      .tg-e-detail{width:20px;height:20px;border-radius:5px;border:1px solid var(--border);background:var(--card);color:var(--accent1);cursor:pointer;font-size:11px;line-height:1}
+      .tg-e-status button{width:22px;height:22px;border-radius:6px;border:none;
+        background:var(--ios-bg);color:var(--ios-label2);cursor:pointer;font-size:10px;font-weight:700}
+      .tg-e-status button.on{background:var(--ios-blue-fill);color:#fff}
+      .tg-e-del{width:22px;height:22px;border-radius:6px;border:none;background:var(--ios-bg);
+        color:var(--ios-orange-text);cursor:pointer;font-size:10px}
+      .tg-e-detail{width:22px;height:22px;border-radius:6px;border:none;background:var(--ios-bg);
+        color:var(--ios-blue-ink);cursor:pointer;font-size:11px;line-height:1}
 
-      .tg-e-depends{display:flex;align-items:center;gap:6px;font-size:11px;color:var(--muted);width:100%}
+      .tg-e-depends{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--ios-label2);width:100%}
       .tg-e-depends-label{white-space:nowrap}
-      .tg-e-depends-name{font-weight:600;color:var(--text)}
-      .tg-e-depends button{background:none;border:1px solid var(--border);border-radius:6px;color:var(--accent1);font-size:11px;padding:2px 8px;cursor:pointer;font-family:inherit}
-      .tg-e-depends-hint{color:var(--accent1);font-style:italic}
-      .tg-e-snap-warn{display:flex;align-items:center;gap:8px;flex-wrap:wrap;width:100%;font-size:11px;color:var(--warning);background:rgba(245,158,11,.1);border-radius:6px;padding:4px 8px}
-      .tg-e-snap-warn button{background:var(--warning);border:none;border-radius:6px;color:var(--on-accent);font-size:10.5px;font-weight:600;padding:3px 9px;cursor:pointer;font-family:inherit}
+      .tg-e-depends-name{font-weight:600;color:var(--ios-label)}
+      .tg-e-depends button{background:var(--ios-bg);border:none;border-radius:8px;
+        color:var(--ios-blue-ink);font-size:12px;padding:3px 9px;cursor:pointer;font-family:inherit}
+      .tg-e-depends-hint{color:var(--ios-blue-ink);font-style:italic}
+      .tg-e-snap-warn{display:flex;align-items:center;gap:8px;flex-wrap:wrap;width:100%;font-size:12px;
+        color:var(--ios-orange-text);background:var(--ios-orange-tint);border-radius:9px;padding:5px 9px}
+      .tg-e-snap-warn button{background:var(--ios-orange);border:none;border-radius:8px;
+        color:var(--ios-orange-ink);font-size:11.5px;font-weight:600;padding:3px 10px;cursor:pointer;font-family:inherit}
 
-      .tg-lane-drop{position:relative;z-index:8;border-radius:6px}
-      .tg-lane-drop-over{background:rgba(0,207,255,.14);outline:2px dashed var(--accent1);outline-offset:-2px}
+      .tg-lane-drop{position:relative;z-index:8;border-radius:10px}
+      .tg-lane-drop-over{background:var(--ios-blue-tint);outline:2px dashed var(--ios-blue);outline-offset:-2px}
 
-      /* Bottom dock: fixed share of the shell, with its own inner scrollport so
-   * the board above keeps the rest of the height. */
+      /* ---- bottom dock: its own card, same treatment as the board ---- */
       /* flex:0 0 auto against the board's flex:1 — whatever the dock gives up
        * when it collapses is taken by the timeline automatically. */
       .bl-section{flex:0 0 auto;display:flex;flex-direction:column;max-height:38vh;min-height:0;
-        border-top:0.5px solid var(--border-strong);background:var(--surface-1);padding:6px 12px 0}
-      /* Collapsed: the header IS the dock — a fixed 36px strip at the bottom. */
-      .bl-section.bl-collapsed{height:36px;max-height:36px;padding:0 12px;overflow:hidden}
-      .bl-section.bl-collapsed .bl-head-row{height:36px;margin:0;flex-wrap:nowrap;cursor:pointer}
+        margin:0 16px 10px;border-radius:14px;background:var(--ios-card);
+        box-shadow:var(--ios-shadow);padding:8px 14px 0;overflow:hidden}
+      /* Collapsed: the header IS the dock — a fixed 40px strip at the bottom. */
+      .bl-section.bl-collapsed{height:40px;max-height:40px;padding:0 14px}
+      .bl-section.bl-collapsed .bl-head-row{height:40px;margin:0;flex-wrap:nowrap;cursor:pointer}
       .bl-section.bl-collapsed .bl-head-row:hover .bl-title,
-      .bl-section.bl-collapsed .bl-head-row:hover .bl-chevron{color:var(--text-accent)}
-      .bl-head-row{flex:0 0 auto;display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:6px}
-      .bl-collapse-btn{background:none;border:none;color:var(--text-muted);font-size:11px;cursor:pointer;padding:0 2px;font-family:inherit;line-height:1}
-      .bl-collapse-btn:hover{color:var(--text-accent)}
+      .bl-section.bl-collapsed .bl-head-row:hover .bl-chevron{color:var(--ios-blue-ink)}
+      .bl-head-row{flex:0 0 auto;display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:8px}
+      .bl-collapse-btn{background:none;border:none;color:var(--ios-label3);font-size:12px;cursor:pointer;
+        padding:0 2px;font-family:inherit;line-height:1}
+      .bl-collapse-btn:hover{color:var(--ios-blue-ink)}
       .bl-collapse-end{margin-left:auto}
       /* One glyph for both states — rotating it reads as the section opening,
        * rather than swapping to a different arrow. */
       .bl-chevron{display:inline-block;transition:transform 140ms ease}
       .bl-chevron.on{transform:rotate(90deg)}
-      .bl-title{font-size:12px;font-weight:600;margin:0;letter-spacing:-.01em}
-      .bl-count{font-size:10px;color:var(--text-muted);white-space:nowrap}
+      .bl-title{font-size:15px;font-weight:700;margin:0;letter-spacing:-.2px;color:var(--ios-label)}
+      .bl-count{font-size:12px;color:var(--ios-label3);white-space:nowrap}
       .bl-filters{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-left:auto}
-      .bl-filter-search{font-family:inherit;font-size:11.5px;border-radius:6px;border:1px solid var(--border);background:var(--card);color:var(--text);padding:4px 8px;width:140px}
-      .bl-filter-priorities{display:flex;gap:4px}
-      .bl-filter-chip{border:1px solid transparent;font-family:inherit;cursor:pointer;opacity:.5}
-      .bl-filter-chip:hover{opacity:.8}
-      .bl-filter-chip-active{opacity:1;border-color:currentColor}
-      .bl-filter-owner{font-family:inherit;font-size:11.5px;border-radius:6px;border:1px solid var(--border);background:var(--card);color:var(--text);padding:3px 6px;max-width:160px}
-      .bl-filter-reset{background:none;border:none;color:var(--accent1);font-size:11px;cursor:pointer;font-family:inherit;text-decoration:underline;padding:0}
-      .bl-filter-hint{font-size:10.5px;color:var(--warning);margin:-4px 0 8px}
-      .bl-source-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:11px;color:var(--muted);margin-bottom:12px}
-      .bl-url-display{color:var(--text);font-family:monospace;font-size:10.5px}
-      .bl-url-edit-btn{background:none;border:1px solid var(--border);border-radius:6px;color:var(--accent1);font-size:11px;padding:1px 6px;cursor:pointer;font-family:inherit}
-      .bl-url-input{font-family:inherit;font-size:11px;border-radius:6px;border:1px solid var(--border);background:var(--card);color:var(--text);padding:3px 8px;width:min(360px,60vw)}
-      .bl-url-btn{background:none;border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:11px;padding:2px 8px;cursor:pointer;font-family:inherit}
+      .bl-filter-search{font-family:inherit;font-size:12.5px;border-radius:9px;border:none;
+        background:var(--ios-bg);color:var(--ios-label);padding:5px 10px;width:150px}
+      .bl-filter-search:focus{outline:2px solid var(--ios-blue);outline-offset:-1px}
+      /* Priority filters as a segmented control, like the Active|Done tabs. */
+      .bl-filter-priorities{display:flex;gap:2px;background:var(--ios-sep);border-radius:9px;padding:2px}
+      .bl-filter-chip{border:none;background:none;font-family:inherit;cursor:pointer;opacity:1;
+        border-radius:7px;color:var(--ios-label2)}
+      .bl-filter-chip:hover{color:var(--ios-label)}
+      .bl-filter-chip-active{background:var(--ios-card);box-shadow:var(--ios-shadow-btn)}
+      .bl-filter-owner{font-family:inherit;font-size:12.5px;border-radius:9px;border:none;
+        background:var(--ios-bg);color:var(--ios-label);padding:5px 8px;max-width:160px}
+      .bl-filter-reset{background:none;border:none;color:var(--ios-blue-ink);font-size:12.5px;
+        cursor:pointer;font-family:inherit;padding:0}
+      .bl-filter-hint{font-size:11.5px;color:var(--ios-orange-text);margin:-4px 0 8px}
+      .bl-source-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:12px;
+        color:var(--ios-label2);margin-bottom:12px}
+      .bl-url-display{color:var(--ios-label);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11.5px}
+      .bl-url-edit-btn{background:var(--ios-bg);border:none;border-radius:8px;color:var(--ios-blue-ink);
+        font-size:12px;padding:2px 8px;cursor:pointer;font-family:inherit}
+      .bl-url-input{font-family:inherit;font-size:12px;border-radius:9px;border:none;
+        background:var(--ios-bg);color:var(--ios-label);padding:4px 10px;width:min(360px,60vw)}
+      .bl-url-btn{background:var(--ios-bg);border:none;border-radius:8px;color:var(--ios-blue-ink);
+        font-size:12px;padding:3px 10px;cursor:pointer;font-family:inherit}
       .bl-last-sync{white-space:nowrap}
 
-      .bl-table-scroll{flex:1 1 auto;min-height:0;overflow:auto;border:1px solid var(--border);
-        border-radius:var(--radius) var(--radius) 0 0;background:var(--surface-0)}
-      .bl-table{width:100%;border-collapse:collapse;font-size:11px;min-width:820px}
-      .bl-table thead th{position:sticky;top:0;background:var(--surface-1);z-index:2;text-align:left;font-size:10px;font-weight:500;text-transform:uppercase;letter-spacing:.06em;color:var(--text-muted);padding:5px 10px;border-bottom:1px solid var(--border);white-space:nowrap}
-      .bl-table td{padding:8px 10px;border-bottom:1px solid var(--border);vertical-align:top}
+      .bl-table-scroll{flex:1 1 auto;min-height:0;overflow:auto;border:none;
+        border-radius:10px 10px 0 0;background:var(--ios-card)}
+      .bl-table{width:100%;border-collapse:collapse;font-size:12.5px;min-width:820px}
+      .bl-table thead th{position:sticky;top:0;background:var(--ios-card);z-index:2;text-align:left;
+        font-size:11px;font-weight:500;color:var(--ios-label3);padding:6px 10px;
+        border-bottom:0.5px solid var(--ios-sep);white-space:nowrap}
+      .bl-table td{padding:8px 10px;border-bottom:0.5px solid var(--ios-sep);vertical-align:top;color:var(--ios-label)}
       .bl-table tbody tr:last-child td{border-bottom:none}
       .bl-th-grip,.bl-td-grip{width:20px;padding-right:0}
-      .bl-th-num,.bl-td-num{width:28px;color:var(--muted);font-weight:600}
+      .bl-th-num,.bl-td-num{width:28px;color:var(--ios-label3);font-weight:600}
       .bl-td-title{font-weight:600;white-space:nowrap;max-width:200px;overflow:hidden;text-overflow:ellipsis}
       .bl-td-result{max-width:280px}
-      .bl-clamp{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;color:var(--muted)}
-      .bl-td-owner{max-width:120px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--text)}
-      .bl-td-status{max-width:160px;color:var(--muted);font-size:11.5px}
-      .bl-td-source{max-width:180px;color:var(--muted);font-size:11.5px}
-      .bl-ist{font-size:10.5px;color:var(--accent1)}
-      .bl-empty{text-align:center;color:var(--muted);padding:24px 0}
-      .bl-group-header td{padding:4px 10px;background:var(--panel2, rgba(127,127,127,.08));color:var(--muted);font-size:10.5px;font-weight:700;letter-spacing:.04em;text-transform:uppercase}
-      .bl-grip{color:var(--muted);font-size:13px;line-height:1}
+      .bl-clamp{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;color:var(--ios-label2)}
+      .bl-td-owner{max-width:120px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--ios-label)}
+      .bl-td-status{max-width:160px;color:var(--ios-label2)}
+      .bl-td-source{max-width:180px;color:var(--ios-label2)}
+      .bl-ist{font-size:11.5px;color:var(--ios-blue-ink)}
+      .bl-empty{text-align:center;color:var(--ios-label3);padding:24px 0}
+      .bl-group-header td{padding:5px 10px;background:var(--ios-bg);color:var(--ios-label2);
+        font-size:11px;font-weight:700;letter-spacing:.04em;text-transform:uppercase}
+      .bl-grip{color:var(--ios-label3);font-size:13px;line-height:1}
       .bl-row{cursor:pointer}
+      .bl-row:hover td{background:var(--ios-bg)}
       .bl-row[draggable="true"]{cursor:grab}
       .bl-row[draggable="true"]:active{cursor:grabbing}
       .bl-row-dragging{opacity:.4}
-      .bl-row-pending{box-shadow:inset 3px 0 0 var(--accent1)}
+      .bl-row-pending{box-shadow:inset 3px 0 0 var(--ios-blue)}
       .bl-pending-badge{margin-left:8px}
-      .bl-row-drop-above{box-shadow:inset 0 2px 0 var(--accent1)}
-      .bl-row-drop-below{box-shadow:inset 0 -2px 0 var(--accent1)}
-      .bl-row-add td{background:rgba(0,207,255,.05)}
-      .bl-add-input{font-family:inherit;font-size:12px;border-radius:6px;border:1px solid var(--border);background:var(--card);color:var(--text);padding:4px 8px;width:100%}
-      .bl-add-select{font-family:inherit;font-size:11.5px;border-radius:6px;border:1px solid var(--border);background:var(--card);color:var(--text);padding:3px 6px}
-      .bl-add-btn{background:none;border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:11px;padding:3px 9px;cursor:pointer;font-family:inherit;margin-right:6px}
-      .bl-add-hours{font-family:inherit;font-size:11.5px;font-variant-numeric:tabular-nums;border-radius:6px;border:1px solid var(--border);background:var(--card);color:var(--text);padding:3px 6px;width:64px}
+      .bl-row-drop-above{box-shadow:inset 0 2px 0 var(--ios-blue)}
+      .bl-row-drop-below{box-shadow:inset 0 -2px 0 var(--ios-blue)}
+      .bl-row-add td{background:var(--ios-blue-tint)}
+      .bl-add-input{font-family:inherit;font-size:13px;border-radius:9px;border:none;
+        background:var(--ios-bg);color:var(--ios-label);padding:5px 10px;width:100%}
+      .bl-add-select{font-family:inherit;font-size:12.5px;border-radius:9px;border:none;
+        background:var(--ios-bg);color:var(--ios-label);padding:4px 8px}
+      .bl-add-btn{background:var(--ios-bg);border:none;border-radius:8px;color:var(--ios-blue-ink);
+        font-size:12.5px;padding:4px 10px;cursor:pointer;font-family:inherit;margin-right:6px}
+      .bl-add-hours{font-family:inherit;font-size:12.5px;font-variant-numeric:tabular-nums;
+        border-radius:9px;border:none;background:var(--ios-bg);color:var(--ios-label);padding:4px 8px;width:64px}
 
       .bl-th-esth,.bl-td-esth{width:60px;font-variant-numeric:tabular-nums}
-      .bl-esth-static{color:var(--text)}
-      .bl-esth-display{background:none;border:1px solid transparent;border-radius:6px;color:var(--text);font-family:inherit;font-size:12px;font-variant-numeric:tabular-nums;padding:2px 6px;cursor:pointer}
-      .bl-esth-display:hover{border-color:var(--border)}
+      .bl-esth-static{color:var(--ios-label)}
+      .bl-esth-display{background:none;border:none;border-radius:7px;color:var(--ios-label);
+        font-family:inherit;font-size:13px;font-variant-numeric:tabular-nums;padding:2px 7px;cursor:pointer}
+      .bl-esth-display:hover{background:var(--ios-bg)}
       .bl-esth-edit{position:relative;display:inline-block}
-      .bl-esth-input{font-family:inherit;font-size:12px;font-variant-numeric:tabular-nums;border-radius:6px;border:1px solid var(--accent1);background:var(--card);color:var(--text);padding:2px 6px;width:56px}
-      .bl-esth-err{position:absolute;top:100%;left:0;white-space:nowrap;background:var(--danger);color:#fff;font-size:10px;padding:2px 6px;border-radius:4px;margin-top:2px;z-index:5}
+      .bl-esth-input{font-family:inherit;font-size:13px;font-variant-numeric:tabular-nums;
+        border-radius:8px;border:none;background:var(--ios-bg);color:var(--ios-label);
+        padding:3px 7px;width:56px;outline:2px solid var(--ios-blue);outline-offset:-1px}
+      .bl-esth-err{position:absolute;top:100%;left:0;white-space:nowrap;background:var(--ios-orange);
+        color:var(--ios-orange-ink);font-size:11px;padding:2px 7px;border-radius:6px;margin-top:2px;z-index:5}
 
-      .bl-chip{display:inline-block;font-size:10.5px;font-weight:700;padding:2px 8px;border-radius:10px;white-space:nowrap;letter-spacing:.02em}
-      .bl-chip-p0{background:rgba(239,68,68,.14);color:var(--danger)}
-      .bl-chip-p1{background:rgba(245,158,11,.14);color:var(--warning)}
-      .bl-chip-p2{background:rgba(120,120,140,.16);color:var(--muted)}
-      .bl-chip-enabler{background:rgba(0,207,255,.14);color:var(--accent1)}
-      .bl-chip-gated{background:rgba(120,120,140,.3);color:var(--text)}
-      .bl-chip-btn{border:1px solid transparent;font-family:inherit;cursor:pointer}
-      .bl-chip-btn:hover{border-color:currentColor}
-      .bl-priority-select{font-family:inherit;font-size:10.5px;font-weight:700;letter-spacing:.02em;border-radius:10px;border:1px solid currentColor;padding:2px 6px;cursor:pointer}
+      .bl-chip{display:inline-block;font-size:11px;font-weight:600;padding:2px 9px;border-radius:9px;
+        white-space:nowrap;letter-spacing:.01em}
+      .bl-chip-p0{background:var(--ios-orange-tint);color:var(--ios-orange-text)}
+      .bl-chip-p1{background:var(--ios-orange-tint);color:var(--ios-orange-text)}
+      .bl-chip-p2{background:var(--ios-sep);color:var(--ios-label2)}
+      .bl-chip-enabler{background:var(--ios-blue-tint);color:var(--ios-blue-text)}
+      .bl-chip-gated{background:var(--ios-sep);color:var(--ios-label2)}
+      .bl-chip-btn{border:none;font-family:inherit;cursor:pointer}
+      .bl-priority-select{font-family:inherit;font-size:11px;font-weight:600;letter-spacing:.01em;
+        border-radius:9px;border:none;padding:2px 7px;cursor:pointer;background:var(--ios-bg);color:var(--ios-label)}
 
       .bl-th-assign,.bl-td-assign{width:130px}
-      .bl-assign-select{font-family:inherit;font-size:11.5px;border-radius:6px;border:1px solid var(--border);background:var(--card);color:var(--text);padding:3px 6px;width:100%}
+      .bl-assign-select{font-family:inherit;font-size:12.5px;border-radius:9px;border:none;
+        background:var(--ios-bg);color:var(--ios-label);padding:4px 8px;width:100%}
       .bl-th-del,.bl-td-del{width:24px}
-      .bl-del-btn{background:none;border:1px solid var(--border);border-radius:6px;color:var(--danger);font-size:12px;padding:2px 8px;cursor:pointer;font-family:inherit;line-height:1}
-      .bl-del-btn.warn{background:var(--danger);color:#fff;border-color:var(--danger)}
+      .bl-del-btn{background:var(--ios-bg);border:none;border-radius:8px;color:var(--ios-orange-text);
+        font-size:12px;padding:3px 9px;cursor:pointer;font-family:inherit;line-height:1}
+      .bl-del-btn.warn{background:var(--ios-orange);color:var(--ios-orange-ink)}
       .bl-confirm-del{display:flex;align-items:center;gap:6px;white-space:nowrap}
-      .bl-confirm-text{font-size:10.5px;color:var(--warning)}
+      .bl-confirm-text{font-size:11.5px;color:var(--ios-orange-text)}
 
-      .bl-modal-backdrop{position:fixed;inset:0;background:rgba(6,9,26,.55);display:flex;align-items:flex-start;justify-content:center;padding:60px 20px;z-index:60;overflow-y:auto}
-      .bl-modal{position:relative;width:100%;max-width:640px;max-height:80vh;display:flex;flex-direction:column;padding:20px;overflow:hidden}
-      .bl-modal-close{position:absolute;top:12px;right:12px;width:28px;height:28px;border-radius:8px;border:1px solid var(--border);background:var(--card);color:var(--muted);cursor:pointer;font-size:15px;line-height:1}
+      .bl-modal-backdrop{position:fixed;inset:0;background:rgba(0,0,0,.4);display:flex;
+        align-items:flex-start;justify-content:center;padding:60px 20px;z-index:60;overflow-y:auto}
+      .bl-modal{position:relative;width:100%;max-width:640px;max-height:80vh;display:flex;
+        flex-direction:column;padding:22px;overflow:hidden;background:var(--ios-card);border:none;
+        border-radius:14px;box-shadow:0 12px 40px rgba(0,0,0,.18)}
+      .bl-modal-close{position:absolute;top:12px;right:12px;width:30px;height:30px;border-radius:9px;
+        border:none;background:var(--ios-bg);color:var(--ios-label3);cursor:pointer;font-size:15px;line-height:1}
       .bl-modal-head{display:flex;align-items:center;gap:10px;padding-right:36px;margin-bottom:14px}
-      .bl-modal-title{font-size:18px;font-weight:800;margin:0;letter-spacing:-.01em}
-      .bl-modal-title-input{font-size:16px;font-weight:700;font-family:inherit;flex:1;border-radius:8px;border:1px solid var(--border);background:var(--card);color:var(--text);padding:6px 10px}
+      .bl-modal-title{font-size:20px;font-weight:700;margin:0;letter-spacing:-.3px;color:var(--ios-label)}
+      .bl-modal-title-input{font-size:17px;font-weight:700;font-family:inherit;flex:1;border-radius:9px;
+        border:none;background:var(--ios-bg);color:var(--ios-label);padding:7px 11px}
       .bl-modal-body{overflow-y:auto;flex:1}
-      .bl-modal-desc{font-size:13px;line-height:1.5;color:var(--text);margin-bottom:16px;white-space:pre-wrap}
+      .bl-modal-desc{font-size:14px;line-height:1.5;color:var(--ios-label);margin-bottom:16px;white-space:pre-wrap}
       .bl-modal-desc-line{min-height:1.5em}
-      .bl-modal-desc-input{width:100%;font-family:inherit;font-size:13px;line-height:1.5;border-radius:8px;border:1px solid var(--border);background:var(--card);color:var(--text);padding:8px 10px;resize:vertical;margin-bottom:16px}
-      .bl-modal-meta{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:10px 20px;border-top:1px solid var(--border);padding-top:14px}
-      .bl-modal-meta-label{display:block;font-size:9.5px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin-bottom:2px}
-      .bl-modal-footer{display:flex;gap:8px;justify-content:flex-end;margin-top:16px;padding-top:14px;border-top:1px solid var(--border)}
+      .bl-modal-desc-input{width:100%;font-family:inherit;font-size:14px;line-height:1.5;border-radius:9px;
+        border:none;background:var(--ios-bg);color:var(--ios-label);padding:9px 11px;resize:vertical;margin-bottom:16px}
+      .bl-modal-meta{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:10px 20px;
+        border-top:0.5px solid var(--ios-sep);padding-top:14px}
+      .bl-modal-meta-label{display:block;font-size:11px;letter-spacing:.02em;color:var(--ios-label3);margin-bottom:2px}
+      .bl-modal-footer{display:flex;gap:8px;justify-content:flex-end;margin-top:16px;padding-top:14px;
+        border-top:0.5px solid var(--ios-sep)}
 
       .tg-modal-badge-wrap{display:flex;align-items:center;gap:8px}
-      .tg-status-chip{display:inline-block;font-size:10.5px;font-weight:700;padding:2px 8px;border-radius:10px;white-space:nowrap;letter-spacing:.02em;text-transform:uppercase}
-      .tg-status-active{background:rgba(0,207,255,.14);color:var(--accent1)}
-      .tg-status-queued{background:rgba(120,120,140,.16);color:var(--muted)}
-      .tg-status-continuous{background:rgba(0,207,255,.14);color:var(--accent1)}
-      .tg-status-done{background:rgba(34,197,94,.16);color:var(--success)}
-      .tg-modal-percent{font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums}
+      .tg-status-chip{display:inline-block;font-size:11px;font-weight:600;padding:2px 9px;border-radius:9px;
+        white-space:nowrap;letter-spacing:.01em}
+      .tg-status-active{background:var(--ios-blue-tint);color:var(--ios-blue-text)}
+      .tg-status-queued{background:var(--ios-sep);color:var(--ios-label2)}
+      .tg-status-continuous{background:var(--ios-continuous);color:var(--ios-label2)}
+      .tg-status-done{background:var(--ios-green-tint);color:var(--ios-green-text)}
+      .tg-modal-percent{font-size:13px;color:var(--ios-label2);font-variant-numeric:tabular-nums}
 
+      /* Phone: the toolbar wraps and the card keeps a narrower gutter, but the
+       * board itself still scrolls horizontally rather than reflowing. */
       @media(max-width:900px){
-        .tg-wrap{padding:8px 12px 64px}
+        .tg-head{flex-wrap:wrap;padding:12px 12px 8px;gap:8px}
+        .tg-title{font-size:20px}
+        .tg-controls{margin-left:0;width:100%}
+        /* Without this the edit-action group keeps one row and pushes the page
+         * into a horizontal scroll of its own, on top of the board's. */
+        .tg-actions{flex-wrap:wrap}
+        .tg-card,.bl-section{margin:0 10px 8px}
+        .tg-statusbar,.tg-hintbar{padding-left:14px;padding-right:14px}
       }
     `}</style>
   );

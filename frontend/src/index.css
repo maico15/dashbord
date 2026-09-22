@@ -38,6 +38,44 @@
    * defined, so those sticky columns and inputs rendered transparent.
    * Aliased rather than find-replaced so all three pages are fixed at once. */
   --bg: var(--surface-0);
+
+  /* ── iOS palette (TeamGantt) ──────────────────────────
+   * Apple's system colours. Three values deviate from stock iOS because every
+   * text/background pair on that board has to clear WCAG AA (4.5:1), and the
+   * stock ones do not:
+   *   --ios-label3  #8E8E93 on white is 3.26:1 → darkened to #6D6D72 (5.15:1)
+   *   --ios-blue-fill / --ios-blue-ink  white on #007AFF is 4.02:1, and #007AFF
+   *     as text on white is the same → #0A6CE0 (4.96:1) carries anything with
+   *     text on or in it, while --ios-blue stays stock for chrome that holds no
+   *     text (today line, dots, borders, the selected segment's tint).
+   *   --ios-orange-ink  white on #FF9500 is 2.20:1, so the overdue bar's label
+   *     is near-black over the fill (6.75:1). */
+  --ios-bg: #F2F2F7;
+  --ios-card: #FFFFFF;
+  --ios-sep: #E5E5EA;
+  --ios-label: #1C1C1E;
+  --ios-label2: #636366;
+  --ios-label3: #6D6D72;
+  --ios-fill3: #C7C7CC;
+  --ios-blue: #007AFF;
+  --ios-blue-fill: #0A6CE0;
+  /* One step darker than the fill: blue text also appears on --ios-bg (the
+   * back arrow), where #0A6CE0 is 4.44:1 — just under AA. */
+  --ios-blue-ink: #0A63D2;
+  --ios-blue-tint: #D6E6FF;
+  --ios-blue-text: #0A3D91;
+  --ios-orange: #FF9500;
+  --ios-orange-tint: #FFE5CC;
+  --ios-orange-text: #7A3E00;
+  --ios-orange-ink: #3D2100;
+  --ios-green: #34C759;
+  --ios-green-tint: #E3F6E8;
+  --ios-green-text: #1E7A3A;
+  --ios-weekend: #FAFAFB;
+  --ios-continuous: #E5E5EA;
+  --ios-shadow: 0 1px 3px rgba(0,0,0,.06);
+  --ios-shadow-btn: 0 1px 2px rgba(0,0,0,.08);
+  --ios-font: -apple-system, "SF Pro Text", "Segoe UI", Inter, system-ui, sans-serif;
 }
 
 /* ── Dark theme override ─────────────────────────────── */
@@ -74,6 +112,35 @@
   --text-success: #00ff9d;
   --radius: 6px;
   --bg: var(--surface-0);
+
+  /* iOS dark palette — same AA rule as the light set: white on #0A84FF is
+   * 3.65:1, so --ios-blue-fill darkens to #0A6FD8 (4.91:1) for the filled bar,
+   * while --ios-blue-ink can stay stock here (#0A84FF on the dark card is
+   * 4.66:1). --ios-label3 needs no shift on a dark surface (5.22:1). */
+  --ios-bg: #000000;
+  --ios-card: #1C1C1E;
+  --ios-sep: #38383A;
+  --ios-label: #F2F2F7;
+  --ios-label2: #AEAEB2;
+  --ios-label3: #8E8E93;
+  --ios-fill3: #48484A;
+  --ios-blue: #0A84FF;
+  --ios-blue-fill: #0A6FD8;
+  --ios-blue-ink: #0A84FF;
+  --ios-blue-tint: #0A2A52;
+  --ios-blue-text: #BFD7FF;
+  --ios-orange: #FF9F0A;
+  --ios-orange-tint: #4A2A00;
+  --ios-orange-text: #FFD9A8;
+  --ios-orange-ink: #2B1800;
+  --ios-green: #30D158;
+  --ios-green-tint: #0E3A1F;
+  --ios-green-text: #9EE6B0;
+  --ios-weekend: #111111;
+  --ios-continuous: #2C2C2E;
+  --ios-shadow: 0 1px 3px rgba(0,0,0,.5);
+  --ios-shadow-btn: 0 1px 2px rgba(0,0,0,.4);
+  --ios-font: -apple-system, "SF Pro Text", "Segoe UI", Inter, system-ui, sans-serif;
 }
 
 /* ── Smooth theme transitions ────────────────────────── */
