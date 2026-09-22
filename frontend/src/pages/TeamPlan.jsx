@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { api } from "../api/client";
+import PasswordPrompt from "../components/PasswordPrompt";
+import AppFooter from "../components/AppFooter";
 import { useTheme, toggleTheme } from "../hooks/useTheme";
 
 const DAY_COLS = 42;
@@ -446,6 +448,9 @@ export default function TeamPlan() {
   const [saveError, setSaveError] = useState(null);
   const [toast, setToast] = useState("");
   const pwRef = useRef(""); // read from stable-closure window listeners (drag) — never stale
+  // Action waiting on the password, stored as a function (hence the extra arrow
+  // in setPwPrompt(() => run) — React would call a bare function).
+  const [pwPrompt, setPwPrompt] = useState(null);
   const [pwError, setPwError] = useState("");
   const tempCounterRef = useRef(0);
   const nextTempId = () => `tmp-${++tempCounterRef.current}`;
@@ -488,11 +493,20 @@ export default function TeamPlan() {
 
   useEffect(() => { load() }, []);
 
-  const ensurePassword = () => {
-    if (pwRef.current) return pwRef.current;
-    const entered = window.prompt("Admin password:");
-    if (entered) { pwRef.current = entered; setPwError("") }
-    return entered || "";
+  /* Masked modal rather than window.prompt, which showed the password as plain
+   * text. The pending action runs once the password verifies. */
+  const withPassword = (run) => {
+    if (pwRef.current) { run(pwRef.current); return; }
+    setPwPrompt(() => run);
+  };
+
+  const grantPassword = (entered) => {
+    pwRef.current = entered;
+    sessionStorage.setItem("admin_pw", entered);
+    setPwError("");
+    const run = pwPrompt;
+    setPwPrompt(null);
+    if (run) run(entered);
   };
 
   function toggleEditMode() {
@@ -503,8 +517,7 @@ export default function TeamPlan() {
       setEditMode(false);
       setSelection(null);
     } else {
-      const p = ensurePassword();
-      if (p) setEditMode(true);
+      withPassword(() => setEditMode(true));
     }
   }
 
@@ -544,10 +557,12 @@ export default function TeamPlan() {
     setSaveError(null);
   }
 
-  async function saveChanges() {
+  function saveChanges() {
     if (changeQueue.length === 0) return;
-    const p = ensurePassword();
-    if (!p) return;
+    withPassword((p) => saveChangesWith(p));
+  }
+
+  async function saveChangesWith(p) {
     setSaving(true);
     try {
       const res = await api.post("/gantt/apply-changes", { changes: changeQueue }, p);
@@ -1189,6 +1204,11 @@ export default function TeamPlan() {
           </section>
         </aside>
       </main>
+
+      {pwPrompt && (
+        <PasswordPrompt onCancel={() => setPwPrompt(null)} onGranted={grantPassword} />
+      )}
+      <AppFooter />
     </div>
   );
 }

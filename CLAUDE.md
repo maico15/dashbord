@@ -266,6 +266,85 @@ August 2026 was imported this way and its source file deleted.
 
 Editing is API-only for now — an Admin panel section is not built yet.
 
+## IT Requests (intake, status, triage)
+
+Four routes, three of them public:
+
+| Route | Who | What |
+|---|---|---|
+| `/it-requests` | anyone | The intake form. Linked from the Dashboard tab bar as "IT request" / "Заявка в IT" |
+| `/it-requests/status/:ref` | anyone with the ref | Five-step progress, the thread with IT, comment / confirm / reopen |
+| `/it-requests/mine?email=` | anyone with the address | Everything one address has sent |
+| `/it-requests/admin` | admin password | Triage: queue, KPIs, detail panel. **Not** in the tab bar — footer's Admin group and the direct URL only |
+
+Two tables, both created in `conn.step("it_requests")`: `it_requests` (the form's
+answers plus the triage columns — owner, priority, due_date, estimate, gantt_id,
+backlog_id, reject_reason, confirmed_at, auto_closed) and `it_request_events`,
+an append-only log that is also the thread the requester and IT talk in.
+
+| Method | Path | Auth | Purpose |
+|---|---|---|---|
+| POST | `/api/it-requests` | — | Create. Validates the six required fields, assigns `IT-0001`-style `ref`, returns `{ref, status_url}` |
+| GET | `/api/it-requests/ref/{ref}` | — | One request plus its events |
+| GET | `/api/it-requests/by-email?email=` | — | That address's requests, newest first |
+| POST | `/api/it-requests/ref/{ref}/comment` | — | Requester comment |
+| POST | `/api/it-requests/ref/{ref}/confirm` | — | Only from `done`; stamps `confirmed_at` |
+| POST | `/api/it-requests/ref/{ref}/reopen` | — | Body required; back to `in_progress`, clears the confirmation |
+| GET | `/api/it-requests` | pw | Queue, filters: `status` (`closed` means done+rejected), `system`, `impact`, `q` |
+| GET | `/api/it-requests/stats` | pw | New, unanswered > 24 h, avg hours to accept (30 d), created/rejected (30 d) |
+| PATCH | `/api/it-requests/{id}` | pw | Partial triage write; a status move stamps `status_changed_at` and logs an event; `rejected` needs `reject_reason` |
+| POST | `/api/it-requests/{id}/reply` | pw | IT reply → event + Slack |
+| POST | `/api/it-requests/autoclose` | pw | The 03:00 UTC job on demand |
+
+Creation is rate-limited per email in process (5 creates, 20 comments per hour)
+— enough to blunt a double-submit, not an audited control.
+
+**Triage helpers** run on create and only ever suggest: the owner for the chosen
+system (passport/apollo/techapp → Andrey Pogrebnyak, fos → Andrey Brunetkin,
+websites → Yevhenii Shevchenko, ghl_n8n/telephony → Dmitry Minin) goes into the
+`created` event, and a word-overlap match against `gantt_assignments.project` and
+`it_backlog_items.title` is logged as a `system` event. Nothing is auto-assigned.
+
+**Slack** reuses `slack_bot_token` and posts to `slack_requests_channel_id` —
+**empty by default**, and an empty value means "post nothing" rather than fail:
+a dashboard without Slack still takes requests. The requester is DM'd by email
+lookup, falling back to a handle match. Every call is wrapped and its outcome
+written as a `notify` event (the public status page filters those out; triage
+sees them).
+
+**Auto-close**: 03:00 UTC daily, `status='done'` with no `confirmed_at` for three
+working days → `auto_closed=1` plus a `system` event. The status stays `done` —
+the flag only records that nobody signed it off.
+
+**Language**: `frontend/src/i18n/itRequests.js` holds every string in `{en, ru}`
+with identical keys; components carry no literals. The reader's choice lives in
+`localStorage.it_requests_lang`, shared by all four routes — the public pages
+default to EN, triage to RU. Free text (summaries, replies, comments) is never
+translated. Dates read "30 Sep 2026" / "30 сент. 2026".
+
+**Style**: the `--ios-*` tokens from the Gantt restyle, in
+`frontend/src/pages/itRequestsStyle.jsx` along with the segmented control, chip
+row and status pill all four pages share. Dark theme comes free with the tokens.
+
+## Passwords in the UI
+
+Every admin password field is `<input type="password">` with an eye toggle whose
+`aria-label` comes from the dictionary — `frontend/src/components/PasswordField.jsx`.
+`PasswordPrompt.jsx` is the modal that replaced `window.prompt("Admin password:")`
+on the Gantt and Team Plan pages, where the password used to render as plain
+text; it verifies against `/api/admin/verify` and then runs the action that
+needed it, so the click is not lost.
+
+## Footer
+
+`frontend/src/components/AppFooter.jsx` renders on every route: three link
+groups (team, requests, admin — the admin group is always visible but muted,
+since those pages ask for the password themselves), the org line, and a health
+dot that turns green when `GET /api/overview` answered on page load. Labels come
+from the same dictionary and follow the page's EN/RU toggle where there is one.
+`/review/latest` resolves the newest published month, so the footer's link keeps
+working as months are added.
+
 ## IT Backlog (hidden page)
 
 `/it-backlog` — `frontend/src/pages/ITBacklog.jsx`, a standalone page deliberately

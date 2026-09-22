@@ -1,6 +1,9 @@
 import { useState, useEffect, useMemo, useCallback } from 'react'
 import DOMPurify from 'dompurify'
 import { api } from '../api/client'
+import AppFooter from '../components/AppFooter'
+import PasswordField from '../components/PasswordField'
+import { I18N, readLang } from '../i18n/itRequests'
 import { useTheme, toggleTheme } from '../hooks/useTheme'
 
 /* IT backlog — a hidden page. It is deliberately not linked from the tab bar,
@@ -14,6 +17,10 @@ const STATUSES = [
   { key: 'done',        label: 'Сделано',  bar: 'var(--success)' },
 ]
 const STATUS_LABEL = Object.fromEntries(STATUSES.map(s => [s.key, s.label]))
+
+// This page is Russian, but the eye button's aria-label follows the reader's
+// stored language like everywhere else.
+const PW_TEXT = (I18N[readLang('ru')] || I18N.ru).common
 
 /* The block above the sections: decisions that are waiting on the reader rather
  * than on an engineer. Static for now (the spec calls for hard-coded text that
@@ -267,8 +274,13 @@ export default function ITBacklog() {
             <span className="itb-pwbar-text">
               Пароль администратора — чтобы менять статусы и ответственных
             </span>
-            <input type="password" className="itb-pwinput" value={pwInput}
-              onChange={e => setPwInput(e.target.value)} placeholder="Пароль" />
+            <PasswordField
+              className="itb-pwfield"
+              value={pwInput}
+              onChange={e => setPwInput(e.target.value)}
+              placeholder={PW_TEXT.password}
+              labels={{ show: PW_TEXT.showPassword, hide: PW_TEXT.hidePassword }}
+            />
             <button type="submit" className="itb-pwbtn">Войти</button>
             {pwError && <span className="itb-pwerr">{pwError}</span>}
           </form>
@@ -327,6 +339,7 @@ export default function ITBacklog() {
           </section>
         ))}
       </main>
+      <AppFooter />
     </div>
   )
 }
@@ -465,9 +478,7 @@ const CSS = `
 .itb-pwbar{display:flex;align-items:center;flex-wrap:wrap;gap:10px;margin-bottom:18px;
   padding:10px 14px;border:1px solid var(--border);border-radius:10px;background:var(--card)}
 .itb-pwbar-text{font-size:12.5px;color:var(--muted)}
-.itb-pwinput{height:30px;padding:0 10px;border-radius:8px;border:1px solid var(--border);
-  background:var(--card2);color:var(--text);font-family:inherit;font-size:13px;width:180px}
-.itb-pwinput:focus{outline:none;border-color:var(--accent1)}
+.itb-pwfield{width:190px;flex:0 0 190px}
 .itb-pwbtn{height:30px;padding:0 14px;border-radius:8px;border:1px solid var(--accent1);
   background:var(--accent1);color:var(--on-accent);font-family:inherit;font-size:12.5px;
   font-weight:600;cursor:pointer}

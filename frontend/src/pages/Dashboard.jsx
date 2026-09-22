@@ -11,8 +11,14 @@ import WeeklyReportTab from './WeeklyReportTab'
 import TrendsTab from './TrendsTab'
 import DailyReportTab from './DailyReportTab'
 import LoadingSpinner from '../components/LoadingSpinner'
+import AppFooter from '../components/AppFooter'
+import { readLang } from '../i18n/itRequests'
 
 const IT_DEPT_ID = 1
+
+// The requests pages carry their own EN/RU toggle; the tab follows the reader's
+// stored choice so the label matches the page it opens.
+const REQUESTS_TAB_LABEL = { en: '📨 IT request', ru: '📨 Заявка в IT' }
 
 const TABS_IT = [
   { key: 'ai',           label: '⬡ AI Usage' },
@@ -290,6 +296,8 @@ export default function Dashboard() {
     return localStorage.getItem('leaderboard_scoring') || 'github'
   })
   const [reviewPath, setReviewPath] = useState(FALLBACK_REVIEW_PATH)
+  const requestsLang = readLang('en')
+  const requestsTabLabel = REQUESTS_TAB_LABEL[requestsLang] || REQUESTS_TAB_LABEL.en
 
   // The Monthly Review tab is highlighted while a review page is open — the tab
   // bar renders on / today, but this keeps the rule true if it is ever reused.
@@ -411,6 +419,9 @@ export default function Dashboard() {
             />
           ))}
           {activeDept === IT_DEPT_ID && <Tab label="📅 Gantt" to="/team-gantt" />}
+          {/* The public intake form. Triage stays out of the tab bar — it is in
+            * the footer's Admin group and at its own URL, like /it-backlog. */}
+          <Tab label={requestsTabLabel} to="/it-requests" />
           {activeDept === IT_DEPT_ID && (
             <Tab label="Team Plan" subtitle="in development" to="/team-plan" />
           )}
@@ -465,6 +476,7 @@ export default function Dashboard() {
           </a>
         </footer>
       </div>
+      <AppFooter />
     </>
   )
 }

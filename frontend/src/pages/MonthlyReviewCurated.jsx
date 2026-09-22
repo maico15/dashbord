@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { useTheme, toggleTheme } from '../hooks/useTheme'
 import { api } from '../api/client'
+import AppFooter from '../components/AppFooter'
 import LangToggle from '../components/LangToggle'
 
 /**
@@ -268,14 +269,17 @@ function TaskRow({ task, lang, t, last }) {
 }
 
 /** Loading / error / empty state, styled as the page rather than bare text. */
-function Notice({ title, text }) {
+function Notice({ title, text, lang }) {
   return (
-    <div style={{ minHeight: '100vh', background: 'var(--bg)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 40 }}>
+    <div style={{ minHeight: '100vh', background: 'var(--bg)', display: 'flex', flexDirection: 'column' }}>
+      <div style={{ flex: '1 1 auto', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 40 }}>
       <div style={{ background: 'var(--card)', border: '1px solid var(--border)', borderRadius: 12, padding: '28px 32px', maxWidth: 460, textAlign: 'center' }}>
         {title && <div style={{ fontSize: 15, fontWeight: 600, marginBottom: 8 }}>{title}</div>}
         <div style={{ fontSize: 13, color: 'var(--muted)', lineHeight: 1.6 }}>{text}</div>
         <Link to="/" style={{ display: 'inline-block', marginTop: 18, fontSize: 13, color: 'var(--accent1)', textDecoration: 'none' }}>← Dashboard</Link>
+        </div>
       </div>
+      <AppFooter lang={lang === 'ru' ? 'ru' : 'en'} />
     </div>
   )
 }
@@ -346,10 +350,16 @@ export default function MonthlyReviewCurated() {
   const previousReview = PREVIOUS_REVIEW[`${reviewYear}-${reviewMonth}`]?.[lang]
 
   // The page is a network read now, so it has three states before content.
-  if (!review && !loadError) return <Notice text={t.loading} />
-  if (loadError) return <Notice title={t.errorTitle} text={t.errorBody} />
+  if (!review && !loadError) return <Notice text={t.loading} lang={lang} />
+  if (loadError) return <Notice title={t.errorTitle} text={t.errorBody} lang={lang} />
   if (!engineers.length && !summary.length) {
-    return <Notice title={t.emptyTitle} text={t.emptyBody(monthYearInProse(reviewYear, reviewMonth, lang))} />
+    return (
+      <Notice
+        title={t.emptyTitle}
+        text={t.emptyBody(monthYearInProse(reviewYear, reviewMonth, lang))}
+        lang={lang}
+      />
+    )
   }
 
   return (
@@ -477,6 +487,9 @@ export default function MonthlyReviewCurated() {
         </div>
 
       </div>
+      {/* Shared footer — the page's own line above is about this review; this
+        * one is the site's address list. It follows the page's EN/RU choice. */}
+      <AppFooter lang={lang === 'ru' ? 'ru' : 'en'} />
     </div>
   )
 }

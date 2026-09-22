@@ -2,6 +2,8 @@ import { Fragment, useState, useEffect, useLayoutEffect, useMemo, useRef } from 
 import { Link } from "react-router-dom";
 import { useTheme, toggleTheme } from "../hooks/useTheme";
 import { api } from "../api/client";
+import AppFooter from "../components/AppFooter";
+import PasswordPrompt from "../components/PasswordPrompt";
 
 /**
  * TeamGantt — standing per-engineer load view: current project (day X of ~Y),
@@ -1524,6 +1526,9 @@ export default function TeamGantt() {
   // Purely a filter over the data already in state — switching never refetches.
   const [view, setView] = useState("active");
   const pwRef = useRef(""); // read from stable-closure window listeners (drag) — never stale
+  // The action waiting on a password, or null. Stored as a function, hence the
+  // extra arrow in setPwPrompt(() => run) — React would otherwise call it.
+  const [pwPrompt, setPwPrompt] = useState(null);
   const [pwError, setPwError] = useState("");
   const [syncMsg, setSyncMsg] = useState("");
   const dragRef = useRef(null);
@@ -1634,17 +1639,24 @@ export default function TeamGantt() {
     return () => clearTimeout(t);
   }, [blSearch]);
 
-  const ensurePassword = () => {
-    if (pwRef.current) return pwRef.current;
-    const entered = window.prompt("Admin password:");
-    if (entered) { pwRef.current = entered; setPwError("") }
-    return entered || "";
+  /* The password is asked for in a masked modal, never window.prompt — that
+   * rendered it as plain text. The action that needed it is handed to the
+   * prompt and runs once the password checks out, so the click is not lost. */
+  const withPassword = (run) => {
+    if (pwRef.current) { run(pwRef.current); return; }
+    setPwPrompt(() => run);
   };
 
-  const enableEdit = () => {
-    const p = ensurePassword();
-    if (p) setEditMode(true);
+  const grantPassword = (entered) => {
+    pwRef.current = entered;
+    sessionStorage.setItem("admin_pw", entered);
+    setPwError("");
+    const run = pwPrompt;
+    setPwPrompt(null);
+    if (run) run(entered);
   };
+
+  const enableEdit = () => withPassword(() => setEditMode(true));
 
   // Every editing action below stages a change instead of writing to the
   // backend — nothing is sent until Save (see saveChanges). editMode itself
@@ -1681,9 +1693,8 @@ export default function TeamGantt() {
       },
     });
   }
-  async function syncFromReports() {
-    const p = ensurePassword();
-    if (!p) return;
+  function syncFromReports() {
+    withPassword(async (p) => {
     try {
       const res = await api.post("/gantt/sync-from-reports", {}, p);
       setPwError("");
@@ -1693,6 +1704,7 @@ export default function TeamGantt() {
       setPwError(err.message || "Sync failed — check the admin password");
     }
     setTimeout(() => setSyncMsg(""), 5000);
+    });
   }
 
   // Same draft-queue path as every other edit-mode action below — never a
@@ -1728,17 +1740,17 @@ export default function TeamGantt() {
   }
 
   // Password-protected — changing the source is an admin action.
-  async function saveSheetUrl(url) {
-    const p = ensurePassword();
-    if (!p) return;
-    try {
-      await api.put("/config", { backlog_sheet_csv_url: url }, p);
-      setPwError("");
-      setEditingSheetUrl(false);
-      await load();
-    } catch (err) {
-      setPwError(err.message || "Failed to save CSV URL — check the admin password");
-    }
+  function saveSheetUrl(url) {
+    withPassword(async (p) => {
+      try {
+        await api.put("/config", { backlog_sheet_csv_url: url }, p);
+        setPwError("");
+        setEditingSheetUrl(false);
+        await load();
+      } catch (err) {
+        setPwError(err.message || "Failed to save CSV URL — check the admin password");
+      }
+    });
   }
 
   function createBacklogItem() {
@@ -1795,10 +1807,12 @@ export default function TeamGantt() {
     return rawMessage || "Save failed";
   }
 
-  async function saveChanges() {
+  function saveChanges() {
     if (changeQueue.length === 0) return;
-    const p = ensurePassword();
-    if (!p) return;
+    withPassword((p) => saveChangesWith(p));
+  }
+
+  async function saveChangesWith(p) {
     setSaving(true);
     if (import.meta.env.DEV) {
       console.log("[gantt] saving changeQueue:", JSON.stringify(changeQueue, null, 2));
@@ -3159,6 +3173,11 @@ export default function TeamGantt() {
           onSave={(patch) => updateAssignment(detailAssignmentInfo.assignment.id, { note: patch.body })}
         />
       )}
+      {pwPrompt && (
+        <PasswordPrompt onCancel={() => setPwPrompt(null)} onGranted={grantPassword} />
+      )}
+
+      <AppFooter />
     </div>
   );
 }
