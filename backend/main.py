@@ -135,6 +135,7 @@ async def lifespan(app):
     scheduler.add_job(_run_slack_reports_sync,'cron',     hour=20, minute=0,  id='slack_reports_sync', replace_existing=True)
     scheduler.add_job(_run_ai_usage_sync,    'cron',     hour=2,  minute=30, id='ai_usage_daily_sync', replace_existing=True)
     scheduler.add_job(_run_github_sync,      'interval', minutes=15,          id='github_interval_sync', replace_existing=True)
+    scheduler.add_job(_run_it_request_autoclose, 'cron',  hour=3,  minute=0,  id='it_request_autoclose', replace_existing=True)
     scheduler.add_job(
         _auto_advance_week,
         'cron',
@@ -678,6 +679,68 @@ def init_db():
         if rows:
             print(f"[init] Normalized {len(rows)} ai_tool_sessions tool name(s) to lowercase.")
 
+    # ── IT request intake (/it-requests) ─────────────────────────────────────
+    # Two tables: the request itself, and an append-only event log that doubles
+    # as the thread the requester and IT talk in. Timestamps are TEXT ISO-8601
+    # UTC like the rest of the schema.
+    with conn.step("it_requests"):
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS it_requests (
+                id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+                ref                TEXT UNIQUE,
+                created_at         TEXT,
+                lang               TEXT DEFAULT 'en',
+                requester_email    TEXT NOT NULL,
+                requester_slack    TEXT NOT NULL,
+                department         TEXT DEFAULT '',
+                kind               TEXT NOT NULL,
+                system             TEXT NOT NULL,
+                summary            TEXT NOT NULL,
+                current_workaround TEXT DEFAULT '',
+                business_value     TEXT DEFAULT '',
+                impact             TEXT NOT NULL,
+                people_affected    TEXT DEFAULT '',
+                desired_date       TEXT DEFAULT '',
+                links              TEXT DEFAULT '',
+                status             TEXT NOT NULL DEFAULT 'new',
+                owner              TEXT DEFAULT '',
+                priority           TEXT DEFAULT '',
+                due_date           TEXT DEFAULT '',
+                estimate           TEXT DEFAULT '',
+                gantt_id           INTEGER,
+                backlog_id         INTEGER,
+                reject_reason      TEXT DEFAULT '',
+                confirmed_at       TEXT,
+                auto_closed        INTEGER DEFAULT 0,
+                status_changed_at  TEXT,
+                updated_at         TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS it_request_events (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                request_id  INTEGER NOT NULL,
+                created_at  TEXT,
+                actor       TEXT NOT NULL DEFAULT 'system',
+                kind        TEXT NOT NULL,
+                from_status TEXT DEFAULT '',
+                to_status   TEXT DEFAULT '',
+                body        TEXT DEFAULT ''
+            );
+        """)
+
+    with conn.step("index idx_it_request_events"):
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_it_request_events "
+            "ON it_request_events(request_id, id)"
+        )
+
+    # Empty by default, and an empty value means "post nothing" — a dashboard
+    # without Slack configured must still take requests.
+    with conn.step("config slack_requests_channel_id"):
+        conn.execute(
+            "INSERT OR IGNORE INTO config (key, value) VALUES ('slack_requests_channel_id', '')"
+        )
+
     # ── IT backlog (hidden page at /it-backlog) ──────────────────────────────
     # Own step rather than the executescript block above so a database created
     # before this feature picks the table up on the next boot without a manual
@@ -765,6 +828,7 @@ def seed_data():
         ("jira_username_map",   "{}"),
         ("slack_bot_token",     os.environ.get("SLACK_BOT_TOKEN", "")),
         ("slack_reports_channel_id", "C08NK2SD5CK"),
+        ("slack_requests_channel_id", ""),
         ("anthropic_admin_key", os.environ.get("ANTHROPIC_ADMIN_KEY", "")),
         ("ai_auto_sync",        "0"),
         ("team_name",           "Engineering Squad"),
@@ -3447,6 +3511,7 @@ class ConfigUpdate(BaseModel):
     jira_username_map: Optional[str] = None
     slack_bot_token: Optional[str] = None
     slack_reports_channel_id: Optional[str] = None
+    slack_requests_channel_id: Optional[str] = None
     anthropic_admin_key: Optional[str] = None
     ai_auto_sync: Optional[str] = None
     team_name: Optional[str] = None
@@ -7474,6 +7539,691 @@ def seed_it_backlog(data: Any = Body(...), password: str = ""):
     conn.commit()
     conn.close()
     return {"ok": True, "seeded": True, "count": len(items)}
+
+
+# ── IT request intake (/it-requests) ─────────────────────────────────────────
+# A public form writes here, a public status page reads back, and the triage
+# page at /it-requests/admin is the only password-gated part. Every state change
+# appends to it_request_events, which is both the audit trail and the thread the
+# requester and IT talk in.
+
+IT_REQUEST_KINDS = ("broken", "change", "access", "data", "question")
+IT_REQUEST_SYSTEMS = (
+    "apollo", "passport", "techapp", "fos", "websites", "ghl_n8n", "telephony", "other",
+)
+IT_REQUEST_IMPACTS = ("blocked", "daily", "can_wait")
+IT_REQUEST_STATUSES = (
+    "new", "accepted", "in_progress", "waiting_requester", "done", "rejected",
+)
+# Who usually picks a system up. A suggestion only — it is written into the
+# 'created' event for triage to read, never into the owner column.
+IT_REQUEST_OWNER_BY_SYSTEM = {
+    "passport": "Andrey Pogrebnyak",
+    "apollo": "Andrey Pogrebnyak",
+    "techapp": "Andrey Pogrebnyak",
+    "fos": "Andrey Brunetkin",
+    "websites": "Yevhenii Shevchenko",
+    "ghl_n8n": "Dmitry Minin",
+    "telephony": "Dmitry Minin",
+}
+# PATCH touches these only; the requester's own words are never editable by IT.
+_IT_REQUEST_PATCHABLE = (
+    "status", "owner", "priority", "due_date", "estimate",
+    "gantt_id", "backlog_id", "reject_reason",
+)
+
+# Per-email throttle, in process. Deliberately not in the database: it exists to
+# blunt an accidental double-submit or a stuck retry loop, not to be an audited
+# security control, and a counter that dies with the worker is fine for that.
+_IT_REQUEST_RATE = {}
+_IT_REQUEST_RATE_LOCK = threading.Lock()
+_IT_RATE_LIMITS = {"create": (5, 3600), "comment": (20, 3600)}
+
+
+def _it_rate_check(action: str, email: str):
+    """Raise 429 when this email has used up its hourly allowance for `action`."""
+    limit, window = _IT_RATE_LIMITS[action]
+    key = (action, (email or "").strip().lower())
+    now = time_lib.time()
+    with _IT_REQUEST_RATE_LOCK:
+        hits = [t for t in _IT_REQUEST_RATE.get(key, []) if now - t < window]
+        if len(hits) >= limit:
+            wait_min = int((window - (now - hits[0])) // 60) + 1
+            raise HTTPException(429, f"Too many requests — try again in ~{wait_min} min")
+        hits.append(now)
+        _IT_REQUEST_RATE[key] = hits
+        # Keep the dict from growing without bound on a long-lived worker.
+        if len(_IT_REQUEST_RATE) > 5000:
+            for k in [k for k, v in _IT_REQUEST_RATE.items() if not v or now - v[-1] > window]:
+                _IT_REQUEST_RATE.pop(k, None)
+
+
+def _it_log_event(conn, request_id: int, actor: str, kind: str,
+                  body: str = "", from_status: str = "", to_status: str = "") -> int:
+    cur = conn.execute(
+        "INSERT INTO it_request_events "
+        "(request_id, created_at, actor, kind, from_status, to_status, body) "
+        "VALUES (?,?,?,?,?,?,?)",
+        (request_id, datetime.utcnow().isoformat(), actor, kind,
+         from_status or "", to_status or "", body or ""),
+    )
+    return cur.lastrowid
+
+
+def _it_next_ref(conn) -> str:
+    """IT-0001, IT-0002 … Derived from the highest ref already stored rather than
+    from a row count, so deleting a row never hands its number to a new request."""
+    row = conn.execute(
+        "SELECT ref FROM it_requests WHERE ref LIKE 'IT-%' ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    last = 0
+    if row and row["ref"]:
+        try:
+            last = int(str(row["ref"]).split("-", 1)[1])
+        except (IndexError, ValueError):
+            last = 0
+    highest = conn.execute("SELECT COUNT(*) AS n FROM it_requests").fetchone()["n"]
+    return f"IT-{max(last, int(highest)) + 1:04d}"
+
+
+_IT_STOPWORDS = {
+    "the", "a", "an", "and", "or", "for", "to", "in", "on", "of", "is", "are", "we",
+    "it", "with", "need", "needs", "please", "can", "not", "no", "that", "this",
+    "и", "в", "на", "не", "по", "для", "с", "что", "как", "это", "нужно", "надо",
+}
+
+
+def _it_similar_task(conn, summary: str):
+    """Best-matching existing task by word overlap with a Gantt project or a
+    backlog title. Cheap on purpose: these tables are small, and the result is a
+    hint in the event log, not a link."""
+    words = {
+        w for w in re.split(r"[^\wЀ-ӿ]+", (summary or "").lower())
+        if len(w) > 3 and w not in _IT_STOPWORDS
+    }
+    if not words:
+        return None
+    best = None
+    for table, col, label in (
+        ("gantt_assignments", "project", "gantt"),
+        ("it_backlog_items", "title", "backlog"),
+    ):
+        try:
+            rows = conn.execute(f"SELECT id, {col} AS title FROM {table}").fetchall()
+        except Exception:
+            continue  # table not created yet on an older database
+        for r in rows:
+            other = {
+                w for w in re.split(r"[^\wЀ-ӿ]+", str(r["title"] or "").lower())
+                if len(w) > 3 and w not in _IT_STOPWORDS
+            }
+            if not other:
+                continue
+            score = len(words & other)
+            if score and (best is None or score > best["score"]):
+                best = {"score": score, "source": label, "id": r["id"], "title": r["title"]}
+    return best
+
+
+# ── Slack notifications ──────────────────────────────────────────────────────
+# Everything here is best-effort: a request must be accepted even when Slack is
+# down, misconfigured or simply not set up, so every call is wrapped and the
+# outcome is written to the event log instead of raised.
+
+_IT_SLACK_USER_CACHE = {}
+
+
+def _slack_post(method: str, token: str, payload: dict) -> dict:
+    """POST a JSON body to the Slack Web API (chat.postMessage and friends want
+    a write method; _slack_request above is the read-side GET helper)."""
+    req = urllib.request.Request(
+        f"https://slack.com/api/{method}",
+        data=json_lib.dumps(payload).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json; charset=utf-8",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        data = json_lib.loads(resp.read())
+    if not data.get("ok"):
+        raise ValueError(f"Slack error: {data.get('error', 'unknown')}")
+    return data
+
+
+def _slack_user_id(token: str, email: str, handle: str):
+    """Resolve the requester to a Slack user id — by email first (one cheap call),
+    falling back to a handle match over users.list."""
+    cache_key = (email or "").lower() or (handle or "").lower()
+    if cache_key in _IT_SLACK_USER_CACHE:
+        return _IT_SLACK_USER_CACHE[cache_key]
+    uid = None
+    if email:
+        try:
+            uid = _slack_request("users.lookupByEmail", token, {"email": email})["user"]["id"]
+        except Exception:
+            uid = None
+    if not uid and handle:
+        want = handle.lstrip("@").lower()
+        try:
+            for m in _slack_request("users.list", token, {"limit": 500}).get("members", []):
+                prof = m.get("profile") or {}
+                names = {
+                    str(m.get("name") or "").lower(),
+                    str(prof.get("display_name") or "").lower(),
+                    str(prof.get("display_name_normalized") or "").lower(),
+                }
+                if want in names:
+                    uid = m.get("id")
+                    break
+        except Exception:
+            uid = None
+    if uid:
+        _IT_SLACK_USER_CACHE[cache_key] = uid
+    return uid
+
+
+_IT_SLACK_TEXT = {
+    "en": {
+        "created": "New IT request", "status": "Request updated",
+        "reply": "IT replied", "done": "Request done",
+        "status_label": "Status", "owner": "Owner", "due": "Due",
+        "open": "Open", "unassigned": "unassigned", "none": "—",
+    },
+    "ru": {
+        "created": "Новая заявка в IT", "status": "Статус заявки изменён",
+        "reply": "Ответ от IT", "done": "Заявка выполнена",
+        "status_label": "Статус", "owner": "Исполнитель", "due": "Срок",
+        "open": "Открыть", "unassigned": "не назначен", "none": "—",
+    },
+}
+
+IT_STATUS_TEXT = {
+    "en": {
+        "new": "New", "accepted": "Accepted", "in_progress": "In progress",
+        "waiting_requester": "Waiting for you", "done": "Done", "rejected": "Rejected",
+    },
+    "ru": {
+        "new": "Новая", "accepted": "Принята", "in_progress": "В работе",
+        "waiting_requester": "Ждёт вас", "done": "Сделано", "rejected": "Отклонена",
+    },
+}
+
+
+def _it_status_url(conn, ref: str) -> str:
+    """Absolute when public_base_url is configured, relative otherwise — a path
+    still tells the reader where to look even without the host."""
+    base = (_get_config_value(conn, "public_base_url") or "").strip().rstrip("/")
+    return f"{base}/it-requests/status/{ref}" if base else f"/it-requests/status/{ref}"
+
+
+def _it_slack_message(conn, req: dict, event: str, extra: str = "") -> str:
+    lang = req.get("lang") if req.get("lang") in ("en", "ru") else "en"
+    t = _IT_SLACK_TEXT[lang]
+    st = IT_STATUS_TEXT[lang].get(req.get("status"), req.get("status"))
+    lines = [
+        f"*{t.get(event, t['status'])}* · {req['ref']}",
+        req.get("summary") or "",
+        f"{t['status_label']}: {st} · {t['owner']}: {req.get('owner') or t['unassigned']}"
+        f" · {t['due']}: {req.get('due_date') or t['none']}",
+    ]
+    if extra:
+        lines.append(extra)
+    lines.append(f"{t['open']}: {_it_status_url(conn, req['ref'])}")
+    return "\n".join(x for x in lines if x)
+
+
+def _it_notify(conn, req: dict, event: str, extra: str = ""):
+    """Post to the requests channel and DM the requester. Never raises; the
+    result (sent / skipped / failed) lands in the event log as kind='notify'."""
+    try:
+        token = (_get_config_value(conn, "slack_bot_token") or "").strip()
+        channel = (_get_config_value(conn, "slack_requests_channel_id") or "").strip()
+        if not token or not channel:
+            # Not configured is a normal state, not an error — say so once and stop.
+            _it_log_event(conn, req["id"], "system", "notify",
+                          body="Slack not configured — notification skipped")
+            return
+        text = _it_slack_message(conn, req, event, extra)
+        sent, failed = [], []
+        try:
+            _slack_post("chat.postMessage", token, {"channel": channel, "text": text})
+            sent.append("channel")
+        except Exception as ex:
+            failed.append(f"channel: {ex}")
+        try:
+            uid = _slack_user_id(token, req.get("requester_email"), req.get("requester_slack"))
+            if uid:
+                _slack_post("chat.postMessage", token, {"channel": uid, "text": text})
+                sent.append("requester DM")
+            else:
+                failed.append("requester DM: user not found")
+        except Exception as ex:
+            failed.append(f"requester DM: {ex}")
+        body = "Slack: " + (", ".join(f"sent to {s}" for s in sent) if sent else "nothing sent")
+        if failed:
+            body += " · failed — " + "; ".join(failed)
+        _it_log_event(conn, req["id"], "system", "notify", body=body)
+    except Exception as ex:  # belt and braces: notification can never fail a request
+        try:
+            _it_log_event(conn, req["id"], "system", "notify", body=f"Slack failed: {ex}")
+        except Exception:
+            pass
+
+
+# ── serialisation ────────────────────────────────────────────────────────────
+
+def _it_request_public(row) -> dict:
+    """The row as the public pages see it. Nothing here is secret — the status
+    page is reachable by ref — but reject_reason and the triage fields are only
+    meaningful once set, so they travel as-is."""
+    return dict(row)
+
+
+def _it_events_for(conn, request_id: int) -> list:
+    rows = conn.execute(
+        "SELECT * FROM it_request_events WHERE request_id=? ORDER BY id", (request_id,)
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def _it_get_by_ref(conn, ref: str):
+    return conn.execute(
+        "SELECT * FROM it_requests WHERE ref=?", (str(ref or "").strip().upper(),)
+    ).fetchone()
+
+
+def _it_touch(conn, request_id: int, **fields):
+    fields["updated_at"] = datetime.utcnow().isoformat()
+    sets = ", ".join(f"{k}=?" for k in fields)
+    conn.execute(
+        f"UPDATE it_requests SET {sets} WHERE id=?", (*fields.values(), request_id)
+    )
+
+
+# ── public endpoints ─────────────────────────────────────────────────────────
+
+@app.post("/api/it-requests")
+def create_it_request(data: dict):
+    data = data or {}
+    email = str(data.get("requester_email") or "").strip()
+    slack = str(data.get("requester_slack") or "").strip()
+    kind = str(data.get("kind") or "").strip()
+    system = str(data.get("system") or "").strip()
+    summary = str(data.get("summary") or "").strip()
+    impact = str(data.get("impact") or "").strip()
+
+    missing = [n for n, v in (
+        ("requester_email", email), ("requester_slack", slack), ("kind", kind),
+        ("system", system), ("summary", summary), ("impact", impact),
+    ) if not v]
+    if missing:
+        raise HTTPException(422, f"Missing required field(s): {', '.join(missing)}")
+    if not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", email):
+        raise HTTPException(422, "requester_email is not a valid email address")
+    if kind not in IT_REQUEST_KINDS:
+        raise HTTPException(422, f"kind must be one of {', '.join(IT_REQUEST_KINDS)}")
+    if system not in IT_REQUEST_SYSTEMS:
+        raise HTTPException(422, f"system must be one of {', '.join(IT_REQUEST_SYSTEMS)}")
+    if impact not in IT_REQUEST_IMPACTS:
+        raise HTTPException(422, f"impact must be one of {', '.join(IT_REQUEST_IMPACTS)}")
+
+    _it_rate_check("create", email)
+
+    lang = "ru" if str(data.get("lang") or "").lower() == "ru" else "en"
+    now = datetime.utcnow().isoformat()
+    conn = get_db()
+    ref = _it_next_ref(conn)
+    cur = conn.execute(
+        "INSERT INTO it_requests (ref, created_at, lang, requester_email, requester_slack,"
+        " department, kind, system, summary, current_workaround, business_value, impact,"
+        " people_affected, desired_date, links, status, status_changed_at, updated_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'new',?,?)",
+        (ref, now, lang, email,
+         slack if slack.startswith("@") else f"@{slack}",
+         str(data.get("department") or ""), kind, system, summary,
+         str(data.get("current_workaround") or ""), str(data.get("business_value") or ""),
+         impact, str(data.get("people_affected") or ""), str(data.get("desired_date") or ""),
+         str(data.get("links") or ""), now, now),
+    )
+    request_id = cur.lastrowid
+
+    suggested = IT_REQUEST_OWNER_BY_SYSTEM.get(system)
+    _it_log_event(
+        conn, request_id, "requester", "created", to_status="new",
+        body=(f"Suggested owner for {system}: {suggested}" if suggested
+              else f"No default owner for {system} — triage to assign"),
+    )
+    hint = _it_similar_task(conn, summary)
+    if hint:
+        _it_log_event(
+            conn, request_id, "system", "system",
+            body=f"Possible duplicate — {hint['source']} #{hint['id']}: {hint['title']}",
+        )
+    conn.commit()
+
+    req = dict(conn.execute("SELECT * FROM it_requests WHERE id=?", (request_id,)).fetchone())
+    _it_notify(conn, req, "created")
+    conn.commit()
+    status_url = _it_status_url(conn, ref)
+    conn.close()
+    return {"ok": True, "ref": ref, "status_url": status_url}
+
+
+@app.get("/api/it-requests/ref/{ref}")
+def get_it_request_by_ref(ref: str):
+    conn = get_db()
+    row = _it_get_by_ref(conn, ref)
+    if not row:
+        conn.close()
+        raise HTTPException(404, "Not found")
+    out = {"request": _it_request_public(row), "events": _it_events_for(conn, row["id"])}
+    conn.close()
+    return out
+
+
+@app.get("/api/it-requests/by-email")
+def list_it_requests_by_email(email: str = ""):
+    email = str(email or "").strip()
+    if not email:
+        raise HTTPException(422, "email is required")
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT * FROM it_requests WHERE LOWER(requester_email)=? ORDER BY id DESC",
+        (email.lower(),),
+    ).fetchall()
+    out = [_it_request_public(r) for r in rows]
+    conn.close()
+    return {"email": email, "requests": out}
+
+
+@app.post("/api/it-requests/ref/{ref}/comment")
+def comment_it_request(ref: str, data: dict):
+    body = str((data or {}).get("body") or "").strip()
+    if not body:
+        raise HTTPException(422, "body is required")
+    conn = get_db()
+    row = _it_get_by_ref(conn, ref)
+    if not row:
+        conn.close()
+        raise HTTPException(404, "Not found")
+    _it_rate_check("comment", row["requester_email"])
+    _it_log_event(conn, row["id"], "requester", "comment", body=body)
+    _it_touch(conn, row["id"])
+    conn.commit()
+    req = dict(conn.execute("SELECT * FROM it_requests WHERE id=?", (row["id"],)).fetchone())
+    _it_notify(conn, req, "status", extra=body)
+    conn.commit()
+    events = _it_events_for(conn, row["id"])
+    conn.close()
+    return {"ok": True, "events": events}
+
+
+@app.post("/api/it-requests/ref/{ref}/confirm")
+def confirm_it_request(ref: str, data: dict = None):
+    conn = get_db()
+    row = _it_get_by_ref(conn, ref)
+    if not row:
+        conn.close()
+        raise HTTPException(404, "Not found")
+    if row["status"] != "done":
+        conn.close()
+        raise HTTPException(409, "Only a request that IT marked done can be confirmed")
+    now = datetime.utcnow().isoformat()
+    _it_touch(conn, row["id"], confirmed_at=now)
+    _it_log_event(conn, row["id"], "requester", "confirm",
+                  body=str((data or {}).get("body") or ""), from_status="done", to_status="done")
+    conn.commit()
+    out = dict(conn.execute("SELECT * FROM it_requests WHERE id=?", (row["id"],)).fetchone())
+    events = _it_events_for(conn, row["id"])
+    conn.close()
+    return {"ok": True, "request": out, "events": events}
+
+
+@app.post("/api/it-requests/ref/{ref}/reopen")
+def reopen_it_request(ref: str, data: dict):
+    body = str((data or {}).get("body") or "").strip()
+    if not body:
+        raise HTTPException(422, "body is required — say what is still wrong")
+    conn = get_db()
+    row = _it_get_by_ref(conn, ref)
+    if not row:
+        conn.close()
+        raise HTTPException(404, "Not found")
+    _it_rate_check("comment", row["requester_email"])
+    now = datetime.utcnow().isoformat()
+    _it_touch(conn, row["id"], status="in_progress", status_changed_at=now,
+              confirmed_at=None, auto_closed=0)
+    _it_log_event(conn, row["id"], "requester", "reopen", body=body,
+                  from_status=row["status"], to_status="in_progress")
+    conn.commit()
+    req = dict(conn.execute("SELECT * FROM it_requests WHERE id=?", (row["id"],)).fetchone())
+    _it_notify(conn, req, "status", extra=body)
+    conn.commit()
+    events = _it_events_for(conn, req["id"])
+    conn.close()
+    return {"ok": True, "request": req, "events": events}
+
+
+# ── admin endpoints ──────────────────────────────────────────────────────────
+
+@app.get("/api/it-requests")
+def list_it_requests(password: str = "", status: str = "", system: str = "",
+                     impact: str = "", q: str = ""):
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    where, params = [], []
+    if status:
+        # "closed" is the queue's own grouping, not a stored status.
+        wanted = ["done", "rejected"] if status == "closed" else [s for s in status.split(",") if s]
+        if wanted:
+            where.append("status IN (" + ",".join("?" for _ in wanted) + ")")
+            params += wanted
+    if system:
+        where.append("system=?")
+        params.append(system)
+    if impact:
+        where.append("impact=?")
+        params.append(impact)
+    if q:
+        where.append("(LOWER(summary) LIKE ? OR LOWER(requester_email) LIKE ? OR LOWER(ref) LIKE ?)")
+        like = f"%{q.lower()}%"
+        params += [like, like, like]
+    sql = "SELECT * FROM it_requests"
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY id DESC"
+    conn = get_db()
+    rows = [dict(r) for r in conn.execute(sql, tuple(params)).fetchall()]
+    conn.close()
+    return {"generated": datetime.utcnow().isoformat(), "requests": rows}
+
+
+@app.get("/api/it-requests/stats")
+def it_request_stats(password: str = ""):
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    conn = get_db()
+    rows = [dict(r) for r in conn.execute("SELECT * FROM it_requests").fetchall()]
+    now = datetime.utcnow()
+    day30 = (now - timedelta(days=30)).isoformat()
+
+    def _parse(ts):
+        try:
+            return datetime.fromisoformat(str(ts))
+        except (TypeError, ValueError):
+            return None
+
+    new_count = sum(1 for r in rows if r["status"] == "new")
+    overdue = 0
+    for r in rows:
+        created = _parse(r["created_at"])
+        if r["status"] == "new" and created and (now - created) > timedelta(hours=24):
+            overdue += 1
+
+    # Time to accept, measured from the 'created' row to the first status event
+    # that moved the request off `new`.
+    waits = []
+    for r in rows:
+        created = _parse(r["created_at"])
+        if not created or created < _parse(day30):
+            continue
+        ev = conn.execute(
+            "SELECT created_at FROM it_request_events WHERE request_id=? AND kind='status' "
+            "AND from_status='new' ORDER BY id LIMIT 1", (r["id"],)
+        ).fetchone()
+        moved = _parse(ev["created_at"]) if ev else None
+        if moved:
+            waits.append((moved - created).total_seconds() / 3600)
+    conn.close()
+    return {
+        "new_count": new_count,
+        "overdue_response_count": overdue,
+        "avg_hours_to_accept_30d": round(sum(waits) / len(waits), 1) if waits else None,
+        "created_30d": sum(1 for r in rows if str(r["created_at"] or "") >= day30),
+        "rejected_30d": sum(
+            1 for r in rows
+            if r["status"] == "rejected" and str(r["status_changed_at"] or "") >= day30
+        ),
+    }
+
+
+@app.patch("/api/it-requests/{request_id}")
+def patch_it_request(request_id: int, data: dict, password: str = ""):
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    fields = {k: v for k, v in (data or {}).items() if k in _IT_REQUEST_PATCHABLE}
+    if not fields:
+        raise HTTPException(
+            422, f"nothing to update — send one of: {', '.join(_IT_REQUEST_PATCHABLE)}"
+        )
+    new_status = fields.get("status")
+    if new_status is not None and new_status not in IT_REQUEST_STATUSES:
+        raise HTTPException(422, f"status must be one of {', '.join(IT_REQUEST_STATUSES)}")
+
+    conn = get_db()
+    row = conn.execute("SELECT * FROM it_requests WHERE id=?", (request_id,)).fetchone()
+    if not row:
+        conn.close()
+        raise HTTPException(404, "Not found")
+    if new_status == "rejected":
+        reason = str(fields.get("reject_reason") or row["reject_reason"] or "").strip()
+        if not reason:
+            conn.close()
+            raise HTTPException(422, "reject_reason is required to reject a request")
+        fields["reject_reason"] = reason
+
+    now = datetime.utcnow().isoformat()
+    update = {}
+    for key, value in fields.items():
+        if key in ("gantt_id", "backlog_id"):
+            update[key] = int(value) if str(value or "").strip() not in ("", "None") else None
+        else:
+            update[key] = str(value or "")
+    status_moved = new_status is not None and new_status != row["status"]
+    if status_moved:
+        update["status_changed_at"] = now
+        if new_status != "done":
+            # Leaving done invalidates any confirmation that was already given.
+            update["confirmed_at"] = None
+            update["auto_closed"] = 0
+    _it_touch(conn, request_id, **update)
+    if status_moved:
+        _it_log_event(conn, request_id, "it", "status",
+                      from_status=row["status"], to_status=new_status,
+                      body=update.get("reject_reason", "") if new_status == "rejected" else "")
+    conn.commit()
+
+    req = dict(conn.execute("SELECT * FROM it_requests WHERE id=?", (request_id,)).fetchone())
+    if status_moved:
+        _it_notify(conn, req, "done" if new_status == "done" else "status")
+        conn.commit()
+    events = _it_events_for(conn, request_id)
+    conn.close()
+    return {"ok": True, "request": req, "events": events}
+
+
+@app.post("/api/it-requests/{request_id}/reply")
+def reply_it_request(request_id: int, data: dict, password: str = ""):
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    body = str((data or {}).get("body") or "").strip()
+    if not body:
+        raise HTTPException(422, "body is required")
+    conn = get_db()
+    row = conn.execute("SELECT * FROM it_requests WHERE id=?", (request_id,)).fetchone()
+    if not row:
+        conn.close()
+        raise HTTPException(404, "Not found")
+    _it_log_event(conn, request_id, "it", "reply", body=body)
+    _it_touch(conn, request_id)
+    conn.commit()
+    req = dict(conn.execute("SELECT * FROM it_requests WHERE id=?", (request_id,)).fetchone())
+    _it_notify(conn, req, "reply", extra=body)
+    conn.commit()
+    events = _it_events_for(conn, request_id)
+    conn.close()
+    return {"ok": True, "events": events}
+
+
+# ── auto-close ───────────────────────────────────────────────────────────────
+
+def _it_working_days_since(ts: str, now: datetime = None) -> float:
+    """Working days between `ts` and now, weekends excluded. Returns a float so
+    the caller can compare against a threshold without rounding surprises."""
+    now = now or datetime.utcnow()
+    try:
+        start = datetime.fromisoformat(str(ts))
+    except (TypeError, ValueError):
+        return 0.0
+    if start >= now:
+        return 0.0
+    days, cursor = 0.0, start
+    guard = 0
+    while cursor < now and guard < 400:
+        guard += 1
+        nxt = min(cursor + timedelta(days=1), now)
+        if cursor.weekday() < 5:  # Mon-Fri
+            days += (nxt - cursor).total_seconds() / 86400
+        cursor = nxt
+    return days
+
+
+def _run_it_request_autoclose() -> dict:
+    """Close out work the requester never came back to confirm. It stays `done`
+    — auto_closed just records that nobody signed it off."""
+    conn = get_db()
+    closed = 0
+    try:
+        rows = conn.execute(
+            "SELECT * FROM it_requests WHERE status='done' AND confirmed_at IS NULL "
+            "AND (auto_closed IS NULL OR auto_closed=0)"
+        ).fetchall()
+        for r in rows:
+            if _it_working_days_since(r["status_changed_at"] or r["updated_at"]) < 3:
+                continue
+            _it_touch(conn, r["id"], auto_closed=1)
+            _it_log_event(
+                conn, r["id"], "system", "system",
+                body="Auto-closed: done for 3 working days with no confirmation",
+            )
+            closed += 1
+        conn.commit()
+        print(f"[autoclose] it_requests: closed {closed}")
+    except Exception as ex:
+        conn.rollback()
+        print(f"[autoclose] it_requests failed: {ex}")
+    finally:
+        conn.close()
+    return {"closed": closed}
+
+
+@app.post("/api/it-requests/autoclose")
+def run_it_request_autoclose(password: str = ""):
+    """Same job the scheduler runs at 03:00 UTC, exposed so triage can force it."""
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    return _run_it_request_autoclose()
 
 
 if __name__ == "__main__":

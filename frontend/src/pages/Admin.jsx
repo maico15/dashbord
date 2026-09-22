@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
 import { Link } from 'react-router-dom'
 import { api } from '../api/client'
+import { I18N, readLang } from '../i18n/itRequests'
 import LoadingSpinner from '../components/LoadingSpinner'
 import RichTextEditor from '../components/RichTextEditor'
 import { splitWeeklyTasks, joinWeeklyTasks } from '../lib/weeklyTasks'
@@ -29,6 +30,10 @@ const METRIC_FIELDS = {
     { key: 'projects_total', label: 'Projects total', type: 'number' },
   ],
 }
+
+// The eye button's aria-label, in whichever language the reader last chose on
+// the pages that carry the EN/RU toggle.
+const PW_LABELS = (I18N[readLang('en')] || I18N.en).common
 
 // ── PasswordInput ────────────────────────────────────────────────────────────
 
@@ -67,6 +72,9 @@ function PasswordInput({ value, onChange, placeholder, autoComplete, onKeyDown, 
       <button
         type="button"
         tabIndex={-1}
+        aria-label={show ? PW_LABELS.hidePassword : PW_LABELS.showPassword}
+        aria-pressed={show}
+        title={show ? PW_LABELS.hidePassword : PW_LABELS.showPassword}
         onClick={() => setShow(s => !s)}
         style={{
           position: 'absolute', right: 8, top: '50%', transform: 'translateY(-50%)',
