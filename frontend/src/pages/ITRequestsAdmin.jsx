@@ -2,6 +2,8 @@ import { useState, useEffect, useCallback, useMemo } from 'react'
 import { api } from '../api/client'
 import AppFooter from '../components/AppFooter'
 import PasswordField from '../components/PasswordField'
+import Combobox from '../components/Combobox'
+import CreateGanttTaskModal from '../components/CreateGanttTaskModal'
 import { I18N, readLang, fmt, formatDate, formatDateTime, withZone } from '../i18n/itRequests'
 import { RequestsStyle, PageHead, Segmented, StatusPill } from './itRequestsStyle'
 
@@ -24,6 +26,9 @@ export default function ITRequestsAdmin() {
 
   const [rows, setRows] = useState([])
   const [stats, setStats] = useState(null)
+  // The owner picker searches this list client-side — it is ~10 people, and a
+  // round trip per keystroke would be slower than the typing.
+  const [team, setTeam] = useState([])
   const [queue, setQueue] = useState('new')
   const [system, setSystem] = useState('')
   const [q, setQ] = useState('')
@@ -47,6 +52,11 @@ export default function ITRequestsAdmin() {
   }, [pw])
 
   useEffect(() => { load() }, [load])
+
+  useEffect(() => {
+    api.get('/team').then((d) => setTeam(Array.isArray(d) ? d : (d.members || [])))
+      .catch(() => setTeam([]))
+  }, [])
 
   // The detail panel reads the full record — the list row carries everything
   // already, but the events only come with the by-ref read.
@@ -141,6 +151,23 @@ export default function ITRequestsAdmin() {
           <Kpi label={t.admin.kpiCreated} value={stats ? stats.created_30d : '—'} />
         </section>
 
+        {stats && stats.by_owner && stats.by_owner.some((b) => b.open || b.closed_30d) && (
+          <section className="itr-card itr-load">
+            <h2 className="itr-card-title">{t.admin.load}</h2>
+            <div className="itr-load-rows">
+              {stats.by_owner.filter((b) => b.open || b.closed_30d).map((b) => (
+                <span key={b.engineer_id ?? b.name} className="itr-load-row">
+                  <i className="itr-owner-dot"
+                    style={{ background: b.color || 'var(--ios-fill3,#C7C7CC)' }} />
+                  <b>{b.name}</b>
+                  <span className="itr-load-open">{b.open} {t.admin.loadOpen}</span>
+                  <span className="itr-load-closed">{b.closed_30d} {t.admin.loadClosed}</span>
+                </span>
+              ))}
+            </div>
+          </section>
+        )}
+
         {error && <div className="itr-card itr-err">{error}</div>}
 
         <div className="itr-admin-grid">
@@ -179,6 +206,13 @@ export default function ITRequestsAdmin() {
                   <span className="itr-qrow-tags">
                     <span className="itr-tag">{t.system[r.system]}</span>
                     <span className="itr-tag">{t.kind[r.kind]}</span>
+                    {r.owner_name && (
+                      <span className="itr-qrow-owner">
+                        <i className="itr-owner-dot"
+                          style={{ background: r.owner_color || 'var(--ios-fill3,#C7C7CC)' }} />
+                        {r.owner_name}
+                      </span>
+                    )}
                     <span className="itr-qrow-email">{r.requester_email}</span>
                   </span>
                 </span>
@@ -197,6 +231,7 @@ export default function ITRequestsAdmin() {
                 lang={lang}
                 t={t}
                 pw={pw}
+                team={team}
                 onApplied={(res) => { applied(res.request); setDetail(res); load() }}
               />
             )}
@@ -229,11 +264,12 @@ function Age({ request, t }) {
   return <span className={`itr-age${late ? ' late' : ''}`}>{text}</span>
 }
 
-function Detail({ data, lang, t, pw, onApplied }) {
+function Detail({ data, lang, t, pw, team, onApplied }) {
   const req = data.request
   const [form, setForm] = useState({
     status: req.status,
-    owner: req.owner || '',
+    owner_engineer_id: req.owner_engineer_id ?? null,
+    owner_external: req.owner_external || '',
     priority: req.priority || '',
     due_date: req.due_date || '',
     estimate: req.estimate || '',
@@ -246,15 +282,26 @@ function Detail({ data, lang, t, pw, onApplied }) {
   const [err, setErr] = useState('')
   const [rejecting, setRejecting] = useState(false)
   const [rejectReason, setRejectReason] = useState(req.reject_reason || '')
-  const [linked, setLinked] = useState({ gantt: null, backlog: null })
+  const [linked, setLinked] = useState({ gantt: null, backlog: null, ganttDone: false })
+
+  // owner picker
+  const [ownerQuery, setOwnerQuery] = useState('')
+  const [ownerExternalMode, setOwnerExternalMode] = useState(!!req.owner_external)
+  // link picker
+  const [linkQuery, setLinkQuery] = useState('')
+  const [linkResults, setLinkResults] = useState([])
+  const [creating, setCreating] = useState(false)
 
   const set = (key) => (ev) => {
     setForm((f) => ({ ...f, [key]: ev.target ? ev.target.value : ev }))
     setSaved(false)
   }
 
+  const ownerEngineer = team.find((m) => m.id === form.owner_engineer_id) || null
+
   // Titles for whatever this request is linked to, read from the boards' own
-  // APIs so a renamed task never shows a stale name here.
+  // APIs so a renamed task never shows a stale name here. The Gantt task's own
+  // state comes with it — that is what the "finished" banner watches.
   useEffect(() => {
     let alive = true
     if (form.gantt_id) {
@@ -262,9 +309,13 @@ function Detail({ data, lang, t, pw, onApplied }) {
         if (!alive) return
         const all = (d.engineers || []).flatMap((e) => e.assignments || [])
         const hit = all.find((a) => String(a.id) === String(form.gantt_id))
-        setLinked((l) => ({ ...l, gantt: hit ? hit.project : null }))
+        setLinked((l) => ({
+          ...l,
+          gantt: hit ? hit.project : null,
+          ganttDone: !!hit && (hit.status === 'done' || Number(hit.percent) >= 100),
+        }))
       }).catch(() => {})
-    } else setLinked((l) => ({ ...l, gantt: null }))
+    } else setLinked((l) => ({ ...l, gantt: null, ganttDone: false }))
     if (form.backlog_id) {
       api.get('/it-backlog').then((d) => {
         if (!alive) return
@@ -274,6 +325,29 @@ function Detail({ data, lang, t, pw, onApplied }) {
     } else setLinked((l) => ({ ...l, backlog: null }))
     return () => { alive = false }
   }, [form.gantt_id, form.backlog_id])
+
+  // Task search, debounced. An empty box still asks: the endpoint answers with
+  // the most recent tasks, which is a useful starting list.
+  useEffect(() => {
+    let alive = true
+    const handle = setTimeout(() => {
+      api.get(`/search/tasks?password=${encodeURIComponent(pw)}&q=${encodeURIComponent(linkQuery)}&limit=10`)
+        .then((d) => { if (alive) setLinkResults(d.results || []) })
+        .catch(() => { if (alive) setLinkResults([]) })
+    }, 180)
+    return () => { alive = false; clearTimeout(handle) }
+  }, [linkQuery, pw])
+
+  /* The duplicate hint the backend logged when the request arrived — worth
+   * offering before anything is typed, since it is usually the right link. */
+  const suggestion = useMemo(() => {
+    const ev = (data.events || []).find(
+      (e) => e.kind === 'system' && String(e.body || '').includes('Possible duplicate')
+    )
+    if (!ev) return null
+    const m = String(ev.body).match(/(gantt|backlog)\s+#(\d+):\s*(.+)$/i)
+    return m ? { source: m[1].toLowerCase(), id: Number(m[2]), title: m[3].trim() } : null
+  }, [data.events])
 
   const save = async (patch) => {
     setSaving(true)
@@ -336,29 +410,147 @@ function Detail({ data, lang, t, pw, onApplied }) {
       </div>
 
       <div className="itr-row itr-triage-row">
-        <input className="itr-input" value={form.owner} onChange={set('owner')}
-          placeholder={t.admin.ownerPlaceholder} aria-label={t.statusPage.owner} />
-        <input className="itr-input" value={form.priority} onChange={set('priority')}
-          placeholder={t.admin.priorityPlaceholder} aria-label={t.statusPage.priority} />
+        <div className="itr-linkfield">
+          <span className="itr-linklabel">{t.admin.ownerLabel}</span>
+          {ownerExternalMode && !form.owner_engineer_id ? (
+            <>
+              <input className="itr-input" value={form.owner_external}
+                onChange={(e) => { set('owner_external')(e); }}
+                placeholder={t.admin.ownerExternal} autoFocus />
+              <span className="itr-hint">{t.admin.ownerExternalHint}</span>
+            </>
+          ) : (
+            <Combobox
+              value={ownerEngineer
+                ? { label: ownerEngineer.name, sublabel: ownerEngineer.position || '',
+                    color: ownerEngineer.avatar_color }
+                : (form.owner_external ? { label: form.owner_external, sublabel: '' } : null)}
+              query={ownerQuery}
+              onQuery={setOwnerQuery}
+              placeholder={t.admin.ownerSearch}
+              emptyText={t.admin.ownerNoMatch}
+              options={team
+                .filter((m) => m.name.toLowerCase().includes(ownerQuery.trim().toLowerCase()))
+                .map((m) => ({
+                  key: `eng-${m.id}`, id: m.id, label: m.name,
+                  sublabel: m.position || '', color: m.avatar_color,
+                }))}
+              footer={{
+                label: t.admin.ownerOutside,
+                onSelect: () => {
+                  setOwnerExternalMode(true)
+                  setForm((f) => ({ ...f, owner_engineer_id: null, owner_external: '' }))
+                  setSaved(false)
+                },
+              }}
+              onSelect={(row) => {
+                setOwnerExternalMode(false)
+                setOwnerQuery('')
+                setForm((f) => ({ ...f, owner_engineer_id: row.id, owner_external: '' }))
+                setSaved(false)
+              }}
+              onClear={() => {
+                setOwnerExternalMode(false)
+                setForm((f) => ({ ...f, owner_engineer_id: null, owner_external: '' }))
+                setSaved(false)
+              }}
+            />
+          )}
+        </div>
+        <div className="itr-linkfield">
+          <span className="itr-linklabel">{t.statusPage.priority}</span>
+          <input className="itr-input" value={form.priority} onChange={set('priority')}
+            placeholder={t.admin.priorityPlaceholder} aria-label={t.statusPage.priority} />
+        </div>
       </div>
       <div className="itr-row itr-triage-row">
-        <input className="itr-input" value={form.due_date} onChange={set('due_date')}
-          placeholder={t.admin.duePlaceholder} aria-label={t.statusPage.due} />
-        <input className="itr-input" value={form.estimate} onChange={set('estimate')}
-          placeholder={t.admin.estimatePlaceholder} aria-label={t.admin.estimatePlaceholder} />
+        <div className="itr-linkfield">
+          <span className="itr-linklabel">{t.statusPage.due}</span>
+          <input className="itr-input" value={form.due_date} onChange={set('due_date')}
+            placeholder={t.admin.duePlaceholder} aria-label={t.statusPage.due} />
+        </div>
+        <div className="itr-linkfield">
+          <span className="itr-linklabel">{t.admin.createEst}</span>
+          <input className="itr-input" value={form.estimate} onChange={set('estimate')}
+            placeholder={t.admin.estimatePlaceholder} aria-label={t.admin.estimatePlaceholder} />
+        </div>
       </div>
-      <div className="itr-row itr-triage-row">
-        <label className="itr-linkfield">
-          <span className="itr-linklabel">{t.admin.ganttId}</span>
-          <input className="itr-input" value={form.gantt_id} onChange={set('gantt_id')} inputMode="numeric" />
-          {linked.gantt && <span className="itr-hint">{t.admin.linked}: {linked.gantt}</span>}
-        </label>
-        <label className="itr-linkfield">
-          <span className="itr-linklabel">{t.admin.backlogId}</span>
-          <input className="itr-input" value={form.backlog_id} onChange={set('backlog_id')} inputMode="numeric" />
-          {linked.backlog && <span className="itr-hint">{t.admin.linked}: {linked.backlog}</span>}
-        </label>
+      {/* One control for both boards: what matters is which task, not which
+        * table it lives in, so the source is a label on the row. */}
+      <div className="itr-triage-row">
+        <span className="itr-linklabel">{t.admin.linkLabel}</span>
+        <Combobox
+          value={linkValue(form, linked, t)}
+          query={linkQuery}
+          onQuery={setLinkQuery}
+          placeholder={t.admin.linkSearch}
+          emptyText={t.admin.linkNoMatch}
+          groupLabels={{ gantt: t.admin.linkGantt, backlog: t.admin.linkBacklog,
+                         suggested: t.admin.linkSuggested }}
+          options={linkOptions(linkResults, suggestion, linkQuery)}
+          onSelect={(row) => {
+            setLinkQuery('')
+            setForm((f) => ({
+              ...f,
+              gantt_id: row.source === 'gantt' ? String(row.id) : '',
+              backlog_id: row.source === 'backlog' ? String(row.id) : '',
+            }))
+            setSaved(false)
+          }}
+          onClear={() => {
+            setForm((f) => ({ ...f, gantt_id: '', backlog_id: '' }))
+            setSaved(false)
+          }}
+        />
+        <div className="itr-actions itr-link-actions">
+          <button type="button" className="itr-btn itr-btn-sm" onClick={() => setCreating(true)}>
+            {t.admin.createTask}
+          </button>
+        </div>
       </div>
+
+      {/* Two-way hint, never a two-way write: the request closes when a person
+        * says so, because only they know the requester actually got what they
+        * asked for. */}
+      {linked.ganttDone && form.status !== 'done' && form.status !== 'rejected' && (
+        <div className="itr-sync">
+          <div>
+            <b>{t.admin.syncTitle}</b>
+            <span className="itr-sync-task"> · {linked.gantt}</span>
+            <div className="itr-sync-q">{t.admin.syncAction}</div>
+          </div>
+          <button type="button" className="itr-btn itr-btn-green itr-btn-sm"
+            disabled={saving}
+            onClick={() => { setForm((f) => ({ ...f, status: 'done' })); save({ ...form, status: 'done' }) }}>
+            {t.admin.syncButton}
+          </button>
+        </div>
+      )}
+
+      {creating && (
+        <CreateGanttTaskModal
+          request={req}
+          engineer={ownerEngineer}
+          ownerPatch={form.owner_engineer_id
+            ? { owner_engineer_id: form.owner_engineer_id }
+            : (form.owner_external ? { owner_external: form.owner_external } : null)}
+          t={t}
+          lang={lang}
+          pw={pw}
+          onClose={() => setCreating(false)}
+          onCreated={({ ganttId, request: updated }) => {
+            setCreating(false)
+            setForm((f) => ({
+              ...f,
+              gantt_id: String(ganttId),
+              status: updated.status,
+              owner_engineer_id: updated.owner_engineer_id ?? null,
+              owner_external: updated.owner_external || '',
+            }))
+            onApplied({ request: updated, events: data.events })
+          }}
+        />
+      )}
 
       <div className="itr-field itr-reply">
         <label className="itr-label">{t.admin.replyTitle}</label>
@@ -417,6 +609,46 @@ function Detail({ data, lang, t, pw, onApplied }) {
   )
 }
 
+/** The linked task as a chip, whichever board it came from. */
+function linkValue(form, linked, t) {
+  if (form.gantt_id) {
+    return { label: linked.gantt || `#${form.gantt_id}`, sublabel: t.admin.linkGantt }
+  }
+  if (form.backlog_id) {
+    return { label: linked.backlog || `#${form.backlog_id}`, sublabel: t.admin.linkBacklog }
+  }
+  return null
+}
+
+/** Search results, with the backend's duplicate hint pinned on top until the
+ *  reader starts typing their own search. */
+function linkOptions(results, suggestion, query) {
+  const rows = results.map((r) => ({
+    key: `${r.source}-${r.id}`,
+    source: r.source,
+    id: r.id,
+    group: r.source,
+    label: r.title,
+    sublabel: r.engineer_name || '',
+    meta: r.percent == null ? r.status : `${r.status} · ${r.percent}%`,
+    color: r.engineer_color || null,
+  }))
+  if (suggestion && !query.trim()) {
+    const already = rows.findIndex((r) => r.source === suggestion.source && r.id === suggestion.id)
+    if (already >= 0) rows.splice(already, 1)
+    rows.unshift({
+      key: `suggested-${suggestion.source}-${suggestion.id}`,
+      source: suggestion.source,
+      id: suggestion.id,
+      group: 'suggested',
+      label: suggestion.title,
+      sublabel: '',
+      meta: '',
+    })
+  }
+  return rows
+}
+
 function Fact({ label, value }) {
   if (!value) return null
   return (
@@ -463,6 +695,24 @@ const CSS = `
 .itr-age{flex:none;font-size:11.5px;color:var(--ios-label3,#6D6D72);font-variant-numeric:tabular-nums}
 .itr-age.late{color:#C4241C;font-weight:700}
 [data-theme="dark"] .itr-age.late{color:#FF9A93}
+
+.itr-load{padding:14px 16px}
+.itr-load-rows{display:flex;flex-wrap:wrap;gap:8px 18px}
+.itr-load-row{display:flex;align-items:center;gap:7px;font-size:12.5px;color:var(--ios-label2,#636366)}
+.itr-load-row b{font-weight:600;color:var(--ios-label,#1C1C1E)}
+.itr-load-open{font-variant-numeric:tabular-nums}
+.itr-load-closed{color:var(--ios-label3,#6D6D72);font-variant-numeric:tabular-nums}
+.itr-owner-dot{width:12px;height:12px;border-radius:50%;flex:none}
+.itr-qrow-owner{display:inline-flex;align-items:center;gap:5px;font-size:11.5px;
+  color:var(--ios-label2,#636366)}
+
+.itr-link-actions{margin-top:10px}
+.itr-sync{display:flex;align-items:center;gap:14px;flex-wrap:wrap;justify-content:space-between;
+  margin:14px 0 4px;padding:12px 14px;border-radius:12px;
+  background:var(--ios-green-tint,#E3F6E8);color:var(--ios-green-text,#1E7A3A);font-size:13px}
+.itr-sync-task{font-weight:600}
+.itr-sync-q{margin-top:3px;color:var(--ios-label2,#636366)}
+[data-theme="dark"] .itr-sync-q{color:var(--ios-green-text,#9EE6B0);opacity:.85}
 
 .itr-detail{min-height:280px}
 .itr-detail-head{display:flex;align-items:center;gap:10px;flex-wrap:wrap}

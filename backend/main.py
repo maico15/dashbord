@@ -728,6 +728,47 @@ def init_db():
             );
         """)
 
+    # An owner used to be a free-text name, which cannot be counted, filtered or
+    # followed to a person. These two columns make it a reference: an engineer id
+    # for the team, a free-text name for everyone else (Valeriia, HR, a vendor).
+    # `owner` stays as the display cache both paths write into, so every reader
+    # that only knows about it keeps working.
+    conn.add_column_if_missing("it_requests", "owner_engineer_id", "INTEGER")
+    conn.add_column_if_missing("it_requests", "owner_external", "TEXT")
+
+    # One-off backfill of the owners already typed in. Exact name first, then a
+    # unique surname match; anything ambiguous or unknown becomes external
+    # rather than being guessed onto the wrong person.
+    with conn.step("backfill it_requests.owner_engineer_id"):
+        rows = conn.execute(
+            "SELECT id, owner FROM it_requests "
+            "WHERE owner IS NOT NULL AND owner != '' "
+            "AND owner_engineer_id IS NULL AND (owner_external IS NULL OR owner_external = '')"
+        ).fetchall()
+        if rows:
+            members = [dict(r) for r in conn.execute(
+                "SELECT id, name FROM team_members").fetchall()]
+            by_name = {}
+            by_surname = {}
+            for m in members:
+                by_name.setdefault(str(m["name"]).strip().lower(), []).append(m["id"])
+                parts = str(m["name"]).split()
+                if len(parts) > 1:
+                    by_surname.setdefault(parts[-1].strip().lower(), []).append(m["id"])
+            matched = external = 0
+            for r in rows:
+                key = str(r["owner"]).strip().lower()
+                hit = by_name.get(key) or by_surname.get(key.split()[-1] if key else "")
+                if hit and len(hit) == 1:
+                    conn.execute("UPDATE it_requests SET owner_engineer_id=? WHERE id=?",
+                                 (hit[0], r["id"]))
+                    matched += 1
+                else:
+                    conn.execute("UPDATE it_requests SET owner_external=? WHERE id=?",
+                                 (r["owner"], r["id"]))
+                    external += 1
+            print(f"[init] owner backfill: {matched} matched to engineers, {external} external")
+
     with conn.step("index idx_it_request_events"):
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_it_request_events "
@@ -7568,9 +7609,12 @@ IT_REQUEST_OWNER_BY_SYSTEM = {
 }
 # PATCH touches these only; the requester's own words are never editable by IT.
 _IT_REQUEST_PATCHABLE = (
-    "status", "owner", "priority", "due_date", "estimate",
-    "gantt_id", "backlog_id", "reject_reason",
+    "status", "owner", "owner_engineer_id", "owner_external", "priority", "due_date",
+    "estimate", "gantt_id", "backlog_id", "reject_reason",
 )
+# The two owner columns are alternatives, never both: setting one clears the
+# other, and `owner` is derived from whichever won.
+_IT_OWNER_FIELDS = ("owner_engineer_id", "owner_external")
 
 # Per-email throttle, in process. Deliberately not in the database: it exists to
 # blunt an accidental double-submit or a stuck retry loop, not to be an audited
@@ -7813,11 +7857,64 @@ def _it_notify(conn, req: dict, event: str, extra: str = ""):
 
 # ── serialisation ────────────────────────────────────────────────────────────
 
-def _it_request_public(row) -> dict:
-    """The row as the public pages see it. Nothing here is secret — the status
-    page is reachable by ref — but reject_reason and the triage fields are only
-    meaningful once set, so they travel as-is."""
-    return dict(row)
+def _it_engineer_index(conn) -> dict:
+    """id -> {name, avatar_color} for resolving owners. One read per request."""
+    return {
+        r["id"]: {"name": r["name"], "avatar_color": r["avatar_color"]}
+        for r in conn.execute(
+            "SELECT id, name, avatar_color FROM team_members").fetchall()
+    }
+
+
+def _it_request_public(row, engineers: dict = None) -> dict:
+    """The row as every page sees it. Nothing here is secret — the status page is
+    reachable by ref — but the owner is resolved here so no caller has to join
+    team_members itself: owner_name is the display name whichever column it came
+    from, owner_color only exists for an engineer."""
+    out = dict(row)
+    eng = (engineers or {}).get(out.get("owner_engineer_id"))
+    if eng:
+        out["owner_name"] = eng["name"]
+        out["owner_color"] = eng["avatar_color"]
+    else:
+        out["owner_name"] = out.get("owner_external") or out.get("owner") or ""
+        out["owner_color"] = None
+    return out
+
+
+def _it_resolve_owner(conn, update: dict):
+    """Apply the owner half of a PATCH: the two columns are alternatives, and
+    `owner` is the display cache both of them write. Raises on an unknown id —
+    an owner nobody can open is worse than no owner."""
+    if "owner_engineer_id" in update:
+        value = update["owner_engineer_id"]
+        if value in (None, "", "null"):
+            update["owner_engineer_id"] = None
+            if "owner_external" not in update:
+                update["owner_external"] = None
+                update["owner"] = ""
+        else:
+            row = conn.execute(
+                "SELECT name FROM team_members WHERE id=?", (int(value),)).fetchone()
+            if not row:
+                raise HTTPException(422, "Unknown owner_engineer_id")
+            update["owner_engineer_id"] = int(value)
+            update["owner_external"] = None
+            update["owner"] = row["name"]
+    if "owner_external" in update and update.get("owner_engineer_id") is None:
+        name = str(update["owner_external"] or "").strip()
+        update["owner_external"] = name or None
+        update["owner"] = name
+        if name:
+            update["owner_engineer_id"] = None
+    # A bare `owner` string (older clients, scripts) still works and is treated
+    # as an external name, so it cannot silently masquerade as an engineer.
+    if "owner" in update and "owner_engineer_id" not in update and "owner_external" not in update:
+        name = str(update["owner"] or "").strip()
+        update["owner"] = name
+        update["owner_external"] = name or None
+        update["owner_engineer_id"] = None
+    return update
 
 
 def _it_events_for(conn, request_id: int) -> list:
@@ -7917,7 +8014,9 @@ def get_it_request_by_ref(ref: str):
     if not row:
         conn.close()
         raise HTTPException(404, "Not found")
-    out = {"request": _it_request_public(row), "events": _it_events_for(conn, row["id"])}
+    engineers = _it_engineer_index(conn)
+    out = {"request": _it_request_public(row, engineers),
+           "events": _it_events_for(conn, row["id"])}
     conn.close()
     return out
 
@@ -7932,7 +8031,8 @@ def list_it_requests_by_email(email: str = ""):
         "SELECT * FROM it_requests WHERE LOWER(requester_email)=? ORDER BY id DESC",
         (email.lower(),),
     ).fetchall()
-    out = [_it_request_public(r) for r in rows]
+    engineers = _it_engineer_index(conn)
+    out = [_it_request_public(r, engineers) for r in rows]
     conn.close()
     return {"email": email, "requests": out}
 
@@ -8034,7 +8134,8 @@ def list_it_requests(password: str = "", status: str = "", system: str = "",
         sql += " WHERE " + " AND ".join(where)
     sql += " ORDER BY id DESC"
     conn = get_db()
-    rows = [dict(r) for r in conn.execute(sql, tuple(params)).fetchall()]
+    engineers = _it_engineer_index(conn)
+    rows = [_it_request_public(r, engineers) for r in conn.execute(sql, tuple(params)).fetchall()]
     conn.close()
     return {"generated": datetime.utcnow().isoformat(), "requests": rows}
 
@@ -8075,10 +8176,41 @@ def it_request_stats(password: str = ""):
         moved = _parse(ev["created_at"]) if ev else None
         if moved:
             waits.append((moved - created).total_seconds() / 3600)
+    # Per-owner load. Engineers with nothing open are still listed, at zero:
+    # "who has capacity" is as much the question as "who is buried".
+    engineers = _it_engineer_index(conn)
+    by_owner = {}
+    for eid, eng in engineers.items():
+        by_owner[eid] = {"engineer_id": eid, "name": eng["name"],
+                         "color": eng["avatar_color"], "open": 0, "closed_30d": 0}
+    external = {}
+    for r in rows:
+        eid = r.get("owner_engineer_id")
+        if eid in by_owner:
+            bucket = by_owner[eid]
+        elif r.get("owner_external"):
+            bucket = external.setdefault(
+                r["owner_external"],
+                {"engineer_id": None, "name": r["owner_external"], "color": None,
+                 "open": 0, "closed_30d": 0},
+            )
+        else:
+            continue
+        if r["status"] in ("done", "rejected"):
+            if str(r.get("status_changed_at") or "") >= day30:
+                bucket["closed_30d"] += 1
+        else:
+            bucket["open"] += 1
+    owner_rows = sorted(
+        list(by_owner.values()) + list(external.values()),
+        key=lambda b: (-b["open"], -b["closed_30d"], b["name"]),
+    )
+
     conn.close()
     return {
         "new_count": new_count,
         "overdue_response_count": overdue,
+        "by_owner": owner_rows,
         "avg_hours_to_accept_30d": round(sum(waits) / len(waits), 1) if waits else None,
         "created_30d": sum(1 for r in rows if str(r["created_at"] or "") >= day30),
         "rejected_30d": sum(
@@ -8086,6 +8218,64 @@ def it_request_stats(password: str = ""):
             if r["status"] == "rejected" and str(r["status_changed_at"] or "") >= day30
         ),
     }
+
+
+@app.get("/api/search/tasks")
+def search_tasks(password: str = "", q: str = "", limit: int = 10):
+    """Type-ahead over the two places a request can be linked to: Gantt
+    assignments and IT backlog items. Case-insensitive substring — these tables
+    are small enough that anything cleverer would be harder to predict than to
+    type past. Gantt first: linking to live work is the common case."""
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    term = str(q or "").strip().lower()
+    limit = max(1, min(50, int(limit or 10)))
+    conn = get_db()
+    engineers = _it_engineer_index(conn)
+    like = f"%{term}%"
+
+    results = []
+    rows = conn.execute(
+        "SELECT id, project, engineer_id, status, percent FROM gantt_assignments "
+        + ("WHERE LOWER(project) LIKE ? " if term else "")
+        + "ORDER BY id DESC LIMIT ?",
+        ((like, limit * 3) if term else (limit * 3,)),
+    ).fetchall()
+    for r in rows:
+        eng = engineers.get(r["engineer_id"]) or {}
+        results.append({
+            "source": "gantt", "id": r["id"], "title": r["project"],
+            "engineer_name": eng.get("name", ""), "engineer_color": eng.get("avatar_color"),
+            "status": r["status"], "percent": r["percent"],
+        })
+
+    try:
+        rows = conn.execute(
+            "SELECT id, title, owner, status FROM it_backlog_items "
+            + ("WHERE LOWER(title) LIKE ? " if term else "")
+            + "ORDER BY sort_order, id LIMIT ?",
+            ((like, limit * 3) if term else (limit * 3,)),
+        ).fetchall()
+    except Exception:
+        rows = []  # table not created yet on an older database
+    for r in rows:
+        results.append({
+            "source": "backlog", "id": r["id"], "title": r["title"],
+            "engineer_name": r["owner"] or "", "engineer_color": None,
+            "status": r["status"], "percent": None,
+        })
+    conn.close()
+
+    # Relevance within each source: a title that starts with the term beats one
+    # that merely contains it, and a shorter title beats a longer one.
+    def rank(item):
+        title = str(item["title"] or "").lower()
+        return (0 if item["source"] == "gantt" else 1,
+                0 if term and title.startswith(term) else 1,
+                len(title))
+
+    results.sort(key=rank)
+    return {"query": q, "results": results[:limit]}
 
 
 @app.patch("/api/it-requests/{request_id}")
@@ -8118,8 +8308,16 @@ def patch_it_request(request_id: int, data: dict, password: str = ""):
     for key, value in fields.items():
         if key in ("gantt_id", "backlog_id"):
             update[key] = int(value) if str(value or "").strip() not in ("", "None") else None
+        elif key in _IT_OWNER_FIELDS:
+            update[key] = value          # resolved below, where both halves are visible
         else:
             update[key] = str(value or "")
+    if any(k in update for k in _IT_OWNER_FIELDS) or "owner" in update:
+        try:
+            update = _it_resolve_owner(conn, update)
+        except HTTPException:
+            conn.close()
+            raise
     status_moved = new_status is not None and new_status != row["status"]
     if status_moved:
         update["status_changed_at"] = now
@@ -8132,9 +8330,15 @@ def patch_it_request(request_id: int, data: dict, password: str = ""):
         _it_log_event(conn, request_id, "it", "status",
                       from_status=row["status"], to_status=new_status,
                       body=update.get("reject_reason", "") if new_status == "rejected" else "")
+    if "owner" in update and update["owner"] != (row["owner"] or ""):
+        _it_log_event(conn, request_id, "it", "system",
+                      body=f"Owner: {row['owner'] or '—'} → {update['owner'] or '—'}")
     conn.commit()
 
-    req = dict(conn.execute("SELECT * FROM it_requests WHERE id=?", (request_id,)).fetchone())
+    req = _it_request_public(
+        conn.execute("SELECT * FROM it_requests WHERE id=?", (request_id,)).fetchone(),
+        _it_engineer_index(conn),
+    )
     if status_moved:
         _it_notify(conn, req, "done" if new_status == "done" else "status")
         conn.commit()
