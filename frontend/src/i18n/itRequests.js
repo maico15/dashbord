@@ -203,6 +203,45 @@ const en = {
     passwordHint: 'Triage needs the admin password.',
     passwordSubmit: 'Enter',
     passwordWrong: 'Wrong password',
+
+    ownerLabel: 'Owner',
+    ownerSearch: 'Search the team…',
+    ownerNone: 'Not assigned',
+    ownerOutside: 'Outside engineering…',
+    ownerExternal: 'Name (outside engineering)',
+    ownerExternalHint: 'Anyone who is not on the engineering team — ops, HR, a vendor.',
+    ownerNoMatch: 'Nobody matches',
+    load: 'Load',
+    loadOpen: 'open',
+    loadClosed: 'closed 30 d',
+
+    linkLabel: 'Linked task',
+    linkSearch: 'Search the Gantt and the backlog…',
+    linkNone: 'Not linked',
+    linkNoMatch: 'Nothing found',
+    linkGantt: 'Gantt',
+    linkBacklog: 'IT Backlog',
+    linkSuggested: 'Suggested',
+    unlink: 'Unlink',
+
+    createTask: 'Create task on the Gantt',
+    createTitle: 'New Gantt task from the request',
+    createProject: 'Task name',
+    createEngineer: 'Engineer',
+    createEngineerMissing: 'Pick an owner first — the task needs an engineer.',
+    createStart: 'Start date',
+    createEst: 'Est. days',
+    createWhat: 'What we change',
+    createWhatHint: 'Goes into the WHAT line of the note; may be left empty.',
+    createNote: 'Note (bilingual, editable)',
+    createAlsoBacklog: 'Also add to IT Backlog',
+    createSubmit: 'Create',
+    createSubmitting: 'Creating…',
+    createDone: 'Task created',
+
+    syncTitle: 'The linked task is finished',
+    syncAction: 'Mark the request done?',
+    syncButton: 'Mark done and ask the requester to confirm',
   },
 
   // ── shared ──────────────────────────────────────────────────────────────
@@ -214,6 +253,12 @@ const en = {
     back: 'Back',
     copy: 'Copy',
     copied: 'Copied',
+  },
+
+  notFound: {
+    title: 'Page not found',
+    text: 'This address does not exist in the dashboard. If it used to work, the page may be newer than the deployed build — reload, or pick one of the links below.',
+    home: 'Go to the dashboard',
   },
 
   footer: {
@@ -423,6 +468,45 @@ const ru = {
     passwordHint: 'Для разбора заявок нужен пароль администратора.',
     passwordSubmit: 'Войти',
     passwordWrong: 'Неверный пароль',
+
+    ownerLabel: 'Исполнитель',
+    ownerSearch: 'Поиск по команде…',
+    ownerNone: 'Не назначен',
+    ownerOutside: 'Вне инженерной команды…',
+    ownerExternal: 'Имя (вне инженерной команды)',
+    ownerExternalHint: 'Тот, кого нет в инженерной команде: ops, HR, подрядчик.',
+    ownerNoMatch: 'Никто не найден',
+    load: 'Загрузка',
+    loadOpen: 'в работе',
+    loadClosed: 'закрыто за 30 д',
+
+    linkLabel: 'Связанная задача',
+    linkSearch: 'Поиск по Ганту и бэклогу…',
+    linkNone: 'Не связана',
+    linkNoMatch: 'Ничего не найдено',
+    linkGantt: 'Гант',
+    linkBacklog: 'IT Backlog',
+    linkSuggested: 'Подсказка',
+    unlink: 'Отвязать',
+
+    createTask: 'Создать задачу на Ганте',
+    createTitle: 'Новая задача на Ганте из заявки',
+    createProject: 'Название задачи',
+    createEngineer: 'Инженер',
+    createEngineerMissing: 'Сначала выберите исполнителя — задаче нужен инженер.',
+    createStart: 'Дата старта',
+    createEst: 'Оценка, дней',
+    createWhat: 'Что меняем',
+    createWhatHint: 'Идёт в строку ЧТО в заметке, можно оставить пустым.',
+    createNote: 'Заметка (двуязычная, редактируется)',
+    createAlsoBacklog: 'Также добавить в IT Backlog',
+    createSubmit: 'Создать',
+    createSubmitting: 'Создаём…',
+    createDone: 'Задача создана',
+
+    syncTitle: 'Связанная задача закрыта',
+    syncAction: 'Перевести заявку в «Сделано»?',
+    syncButton: 'Закрыть заявку и попросить подтверждение',
   },
 
   common: {
@@ -433,6 +517,12 @@ const ru = {
     back: 'Назад',
     copy: 'Скопировать',
     copied: 'Скопировано',
+  },
+
+  notFound: {
+    title: 'Страница не найдена',
+    text: 'Такого адреса в дашборде нет. Если он раньше работал, страница может быть новее развёрнутой сборки — обновите страницу или выберите ссылку ниже.',
+    home: 'На дашборд',
   },
 
   footer: {

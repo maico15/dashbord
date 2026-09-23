@@ -316,6 +316,34 @@ sees them).
 working days → `auto_closed=1` plus a `system` event. The status stays `done` —
 the flag only records that nobody signed it off.
 
+**Owner is a reference, not a name.** `owner_engineer_id` points at
+`team_members`, `owner_external` holds everyone else (ops, HR, a vendor), and the
+old `owner` TEXT column stays as the display cache both paths write — so readers
+that only know about it keep working. Setting one clears the other; a bare
+`owner` string still works and is stored as external, so it can never pretend to
+be an engineer. `init_db` backfills the strings already stored (exact name, then
+a unique surname; anything ambiguous becomes external) and every GET resolves
+`owner_name` / `owner_color` so no caller joins `team_members` itself. An owner
+change is logged as a `system` event. `GET /api/it-requests/stats` returns
+`by_owner` — `{engineer_id, name, color, open, closed_30d}`, engineers with
+nothing open included, which is what the triage page's load strip shows.
+
+**Linking and creating work**: `GET /api/search/tasks?q=&limit=` (pw) is a
+type-ahead over `gantt_assignments.project` and `it_backlog_items.title`,
+case-insensitive substring, Gantt first, then prefix matches, then shorter
+titles. The triage panel's owner and link controls are both
+`frontend/src/components/Combobox.jsx` (arrows/Enter/Esc, chip with ×; the first
+ArrowDown keeps the already-highlighted first row rather than skipping it), and
+the link list is pre-seeded with the duplicate hint the backend logged on create.
+"Create task on the Gantt" (`components/CreateGanttTaskModal.jsx`) prefills from
+the request — title trimmed to 70 chars, est_days from the numeric part of
+`estimate`, the bilingual TASK/WHAT/BENEFIT/SOURCE/CUSTOMER note ending in a link
+back to the request — then POSTs the task and PATCHes the request with
+`gantt_id`, the owner as picked, and `in_progress` if it was still new/accepted.
+When a linked Gantt task is done, the panel offers a one-click "close the
+request"; the status never changes on its own, because only a person knows the
+requester actually got what they asked for.
+
 **Language**: `frontend/src/i18n/itRequests.js` holds every string in `{en, ru}`
 with identical keys; components carry no literals. The reader's choice lives in
 `localStorage.it_requests_lang`, shared by all four routes — the public pages
