@@ -8,8 +8,13 @@ import { I18N, readLang } from '../i18n/itRequests'
  *
  * `lang` comes from pages that carry an EN/RU toggle; the rest pass nothing and
  * get whatever language the reader last chose (the toggle's stored value), so
- * the footer never contradicts the interface above it. */
-export default function AppFooter({ lang }) {
+ * the footer never contradicts the interface above it.
+ *
+ * `compact` is for the viewport-locked pages (the Gantt): there
+ * the footer is not something you scroll to, it is a permanent tenant of the
+ * screen, and three columns of links would cost the board ~200px of timeline.
+ * Same addresses, one line. */
+export default function AppFooter({ lang, compact }) {
   const active = lang || readLang('en')
   const t = (I18N[active] || I18N.en).footer
   // null while the probe is in flight — the dot only turns green on a real answer.
@@ -58,6 +63,25 @@ export default function AppFooter({ lang }) {
     },
   ]
 
+  if (compact) {
+    return (
+      <footer className="appf appf-compact">
+        <div className="appf-strip">
+          {groups.map((g) => (
+            <span key={g.key} className={`appf-set${g.muted ? ' appf-group-muted' : ''}`}>
+              {g.links.map((l) => <Link key={l.to} to={l.to}>{l.label}</Link>)}
+            </span>
+          ))}
+          <span className="appf-health">
+            <i className={`appf-dot${health ? ' on' : ''}`} />
+            {health ? t.healthOk : t.healthDown}
+          </span>
+        </div>
+        <style>{CSS}</style>
+      </footer>
+    )
+  }
+
   return (
     <footer className="appf">
       <div className="appf-groups">
@@ -102,10 +126,28 @@ const CSS = `
 .appf-health{display:flex;align-items:center;gap:6px;margin-left:auto}
 .appf-dot{width:7px;height:7px;border-radius:50%;background:var(--ios-fill3,#C7C7CC)}
 .appf-dot.on{background:var(--ios-green,#34C759)}
+/* Compact: one row, groups kept apart by a hairline rather than a heading. */
+.appf-compact{padding:0 16px;border-top:0.5px solid var(--ios-sep,#E5E5EA);min-height:34px;
+  display:flex;align-items:center}
+.appf-strip{display:flex;align-items:center;gap:6px 14px;flex-wrap:wrap;width:100%;
+  padding:7px 0;font-size:11.5px}
+/* The rule goes on the left of every group but the first, so the health
+ * readout at the end never gets one in front of it. */
+.appf-set{display:flex;align-items:center;gap:12px}
+.appf-set + .appf-set{padding-left:14px;border-left:0.5px solid var(--ios-sep,#E5E5EA)}
+.appf-set a{color:var(--ios-label2,#636366);text-decoration:none;white-space:nowrap}
+.appf-set a:hover{color:var(--ios-blue-ink,#0A63D2)}
+.appf-compact .appf-group-muted a{color:var(--ios-label3,#6D6D72)}
+.appf-compact .appf-health{margin-left:auto;white-space:nowrap}
+
 @media(max-width:640px){
   .appf{padding:18px 16px 22px}
   .appf-groups{flex-direction:column;gap:18px}
   .appf-bottom{margin-top:14px}
   .appf-health{margin-left:0}
+  /* Room is the scarce thing here too, so the strip wraps rather than
+   * scrolling sideways, and the health line takes its own row. */
+  .appf-compact .appf-health{margin-left:0}
+  .appf-set + .appf-set{border-left:none;padding-left:0}
 }
 `

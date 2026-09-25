@@ -16,6 +16,16 @@ const DAY_COLS = 42; // 6 weeks
 // buildEngineerBars), so this is the only thing deciding what sits where.
 const KIND_RANK = { continuous: 0, active: 1, queued: 2, done: 3, error: 4, idle: 5 };
 const BACKLOG_COLLAPSED_KEY = "gantt-backlog-collapsed";
+const BACKLOG_HEIGHT_KEY = "gantt-backlog-height";
+const BACKLOG_MIN_H = 120;
+// What the board keeps no matter how far up the dock is dragged: the sticky
+// week/day header plus a couple of lanes, so the timeline never becomes a strip.
+const BOARD_MIN_H = 180;
+/* The two cards share one flex column, so whatever the dock takes the board
+ * gives up — their sum is the space available, and measuring it beats guessing
+ * from window.innerHeight, which knows nothing of the toolbar or the footer. */
+const clampBacklogHeight = (h, availableH) =>
+  Math.max(BACKLOG_MIN_H, Math.min(Math.round(h), Math.max(BACKLOG_MIN_H, availableH - BOARD_MIN_H)));
 const PANEL_WIDTH_KEY = "gantt-panel-width";
 const PANEL_MIN_W = 200;
 const PANEL_MAX_W = 520;
@@ -1586,6 +1596,16 @@ export default function TeamGantt() {
       return true;
     }
   });
+  // Dock height in px, or null for the CSS default (38vh). Stored, because how
+  // much timeline versus backlog someone wants to see is a lasting preference.
+  const [blHeight, setBlHeight] = useState(() => {
+    try {
+      const saved = Number(localStorage.getItem(BACKLOG_HEIGHT_KEY));
+      return Number.isFinite(saved) && saved > 0 ? saved : null;
+    } catch {
+      return null;
+    }
+  });
   const [blSearch, setBlSearch] = useState("");
   const [blSearchDebounced, setBlSearchDebounced] = useState("");
   const [blPriorityFilter, setBlPriorityFilter] = useState([]); // selected priority chip values; [] = all
@@ -2329,6 +2349,103 @@ export default function TeamGantt() {
 
   const toggleBacklog = () => setBlCollapsed((v) => !v);
 
+  /* ---------------- dock height: drag the divider above the backlog ----------------
+   * Pointer events rather than mouse, so a trackpad, a touch screen and a pen
+   * all reach it. Height is committed on every move (the board takes whatever
+   * is left over) but persisted once, on release, rather than per frame. */
+  const blSectionRef = useRef(null);
+  const tgCardRef = useRef(null);
+  const blResizeRef = useRef(null);
+  const blHeightRef = useRef(blHeight);
+  blHeightRef.current = blHeight;
+
+  /* What the divider has to divide: the locked-height shell minus everything
+   * that is not the board or the dock (toolbar, status bar, footer). Measured
+   * rather than summing the two cards — once a stored height is too tall for a
+   * shrunken window the board is already crushed to 0, and their sum would then
+   * report the overflow as room. Fixed-position children (the side panel, the
+   * modals) float over the board and take nothing from it. */
+  const dockSpace = () => {
+    const dock = blSectionRef.current;
+    const wrap = dock?.parentElement;
+    if (!wrap) return window.innerHeight;
+    let taken = 0;
+    for (const el of wrap.children) {
+      const cs = getComputedStyle(el);
+      if (cs.position === "fixed" || cs.position === "absolute") continue;
+      // The divider's negative top margin cancels its own height, so it costs
+      // nothing; the two cards cost only their margins.
+      if (el === dock || el === tgCardRef.current) {
+        taken += parseFloat(cs.marginTop) + parseFloat(cs.marginBottom);
+      } else if (!el.classList.contains("bl-resizer")) {
+        taken += el.getBoundingClientRect().height
+          + parseFloat(cs.marginTop) + parseFloat(cs.marginBottom);
+      }
+    }
+    return Math.max(BACKLOG_MIN_H + BOARD_MIN_H, wrap.clientHeight - taken);
+  };
+
+  // A window that shrank below the stored height would leave the board with
+  // nothing; clamp to what still fits rather than waiting for the next drag.
+  useEffect(() => {
+    function onWindowResize() {
+      setBlHeight((h) => (h == null ? h : clampBacklogHeight(h, dockSpace())));
+    }
+    window.addEventListener("resize", onWindowResize);
+    return () => window.removeEventListener("resize", onWindowResize);
+  }, []);
+
+  const persistBacklogHeight = (h) => {
+    try {
+      if (h == null) localStorage.removeItem(BACKLOG_HEIGHT_KEY);
+      else localStorage.setItem(BACKLOG_HEIGHT_KEY, String(h));
+    } catch { /* storage unavailable */ }
+  };
+
+  function beginBacklogResize(e) {
+    e.preventDefault();
+    const startH = blSectionRef.current
+      ? blSectionRef.current.getBoundingClientRect().height
+      : blHeight || BACKLOG_MIN_H;
+    blResizeRef.current = { startY: e.clientY, startH, space: dockSpace() };
+    try { e.currentTarget.setPointerCapture(e.pointerId) } catch { /* older pen/touch stacks */ }
+    document.body.style.userSelect = "none";
+    document.body.style.cursor = "row-resize";
+  }
+
+  function moveBacklogResize(e) {
+    const r = blResizeRef.current;
+    if (!r) return;
+    // Dragging up (a smaller clientY) makes the dock taller.
+    setBlHeight(clampBacklogHeight(r.startH + (r.startY - e.clientY), r.space));
+  }
+
+  function endBacklogResize(e) {
+    if (!blResizeRef.current) return;
+    blResizeRef.current = null;
+    try { e.currentTarget.releasePointerCapture(e.pointerId) } catch { /* never captured */ }
+    document.body.style.userSelect = "";
+    document.body.style.cursor = "";
+    persistBacklogHeight(blHeightRef.current);
+  }
+
+  // Double-click hands the divider back to the 38vh default.
+  function resetBacklogHeight() {
+    setBlHeight(null);
+    persistBacklogHeight(null);
+  }
+
+  function onBacklogResizeKey(e) {
+    if (e.key !== "ArrowUp" && e.key !== "ArrowDown") return;
+    e.preventDefault();
+    const current = blSectionRef.current
+      ? blSectionRef.current.getBoundingClientRect().height
+      : blHeight || BACKLOG_MIN_H;
+    const next = clampBacklogHeight(current + (e.key === "ArrowUp" ? 24 : -24), dockSpace());
+    setBlHeight(next);
+    persistBacklogHeight(next);
+  }
+
   // The header doubles as the expand target, but it also hosts the filters,
   // "+ item" and Sync — so a click that landed on any control is left alone.
   function handleBacklogHeaderClick(e) {
@@ -2639,7 +2756,7 @@ export default function TeamGantt() {
 
       {/* Header row and every lane share one rounded surface; the legend is
         * the card's footer rather than a strip floating under the page. */}
-      <div className="tg-card">
+      <div className="tg-card" ref={tgCardRef}>
       <div className="tg-scroll" ref={scrollRef}>
         <div
           ref={gridRef}
@@ -2820,7 +2937,30 @@ export default function TeamGantt() {
       </div>
       </div>
 
-      <div className={`bl-section${blCollapsed ? " bl-collapsed" : ""}`}>
+      {!blCollapsed && (
+        <div
+          className="bl-resizer"
+          role="separator"
+          aria-orientation="horizontal"
+          aria-label="Resize the backlog"
+          title="Drag to resize · double-click to reset"
+          tabIndex={0}
+          onPointerDown={beginBacklogResize}
+          onPointerMove={moveBacklogResize}
+          onPointerUp={endBacklogResize}
+          onPointerCancel={endBacklogResize}
+          onDoubleClick={resetBacklogHeight}
+          onKeyDown={onBacklogResizeKey}
+        >
+          <span className="bl-resizer-grip" aria-hidden="true" />
+        </div>
+      )}
+
+      <div
+        ref={blSectionRef}
+        className={`bl-section${blCollapsed ? " bl-collapsed" : ""}`}
+        style={!blCollapsed && blHeight ? { height: `${blHeight}px`, maxHeight: "none" } : undefined}
+      >
         <div
           className="bl-head-row"
           onClick={handleBacklogHeaderClick}
@@ -3177,7 +3317,7 @@ export default function TeamGantt() {
         <PasswordPrompt onCancel={() => setPwPrompt(null)} onGranted={grantPassword} />
       )}
 
-      <AppFooter />
+      <AppFooter compact />
     </div>
   );
 }
@@ -3545,6 +3685,17 @@ function Style() {
       .tg-lane-drop{position:relative;z-index:8;border-radius:10px}
       .tg-lane-drop-over{background:var(--ios-blue-tint);outline:2px dashed var(--ios-blue);outline-offset:-2px}
 
+      /* Divider between the board and the dock. It lives in the 10px gutter the
+       * two cards already leave between them (the negative top margin cancels
+       * its own height), so making the dock draggable costs no layout. */
+      .bl-resizer{flex:0 0 auto;height:10px;margin:-10px 16px 0;cursor:row-resize;
+        display:flex;align-items:center;justify-content:center;position:relative;z-index:9}
+      .bl-resizer-grip{width:38px;height:4px;border-radius:2px;background:var(--ios-fill3);
+        opacity:.55;transition:opacity 120ms ease,width 120ms ease}
+      .bl-resizer:hover .bl-resizer-grip,
+      .bl-resizer:focus-visible .bl-resizer-grip{opacity:.95;width:60px}
+      .bl-resizer:focus-visible{outline:2px solid var(--ios-blue);outline-offset:-1px;border-radius:5px}
+
       /* ---- bottom dock: its own card, same treatment as the board ---- */
       /* flex:0 0 auto against the board's flex:1 — whatever the dock gives up
        * when it collapses is taken by the timeline automatically. */
@@ -3707,6 +3858,8 @@ function Style() {
          * into a horizontal scroll of its own, on top of the board's. */
         .tg-actions{flex-wrap:wrap}
         .tg-card,.bl-section{margin:0 10px 8px}
+        /* Same gutter as the cards; the gap it sits in is 8px here. */
+        .bl-resizer{margin:-8px 10px 0;height:8px}
         .tg-statusbar,.tg-hintbar{padding-left:14px;padding-right:14px}
       }
     `}</style>
