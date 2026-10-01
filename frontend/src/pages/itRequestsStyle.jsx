@@ -127,6 +127,9 @@ const CSS = `
   padding:9px 11px}
 .itr-textarea{resize:vertical;min-height:86px;line-height:1.5}
 .itr-input:focus,.itr-textarea:focus,.itr-select:focus{outline:2px solid var(--ios-blue,#007AFF);outline-offset:-1px}
+/* The browser's own placeholder grey lands at 4.1:1 on these fields, under the
+ * 4.5:1 every other string here meets; opacity:1 because Firefox dims its own. */
+.itr-input::placeholder,.itr-textarea::placeholder{color:var(--ios-label3,#6D6D72);opacity:1}
 .itr-input-err{outline:2px solid #FF3B30;outline-offset:-1px}
 .itr-row{display:flex;gap:12px;flex-wrap:wrap}
 .itr-row>*{flex:1 1 180px;min-width:0}

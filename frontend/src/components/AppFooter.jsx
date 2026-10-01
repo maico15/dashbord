@@ -43,6 +43,7 @@ export default function AppFooter({ lang, compact }) {
       key: 'requests',
       title: t.requests,
       links: [
+        { to: '/it-requests/home', label: t.home },
         { to: '/it-requests', label: t.submit },
         { to: '/it-requests/status', label: t.check },
         { to: '/it-requests/mine', label: t.mine },
