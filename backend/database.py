@@ -24,6 +24,13 @@ if not DATABASE_URL:
 # Render and older Heroku use postgres://, SQLAlchemy needs postgresql://
 if DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+# Name the driver instead of taking SQLAlchemy's default for a bare
+# postgresql:// URL: 2.1 switched that default from psycopg2 to psycopg 3, and
+# an unpinned install took production down with "No module named 'psycopg'".
+# psycopg2-binary is what requirements.txt installs. A URL that already names a
+# driver (postgresql+psycopg://…) is left alone.
+if DATABASE_URL.startswith("postgresql://"):
+    DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+psycopg2://", 1)
 
 IS_POSTGRES = DATABASE_URL.startswith("postgresql")
 
