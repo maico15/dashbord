@@ -82,6 +82,7 @@ const en = {
     websites: 'Websites',
     ghl_n8n: 'GHL / n8n',
     telephony: 'Telephony',
+    ai_tools: 'AI tools (Claude, ChatGPT…)',
     other: 'Other',
   },
   impact: {
@@ -256,6 +257,9 @@ const en = {
     unlink: 'Unlink',
 
     createTask: 'Create task on the Gantt',
+    addAiAccess: 'Add to AI access register',
+    addAiAccessDone: 'In the AI access register',
+    addAiAccessFailed: 'Could not add to the register',
     createTitle: 'New Gantt task from the request',
     createProject: 'Task name',
     createEngineer: 'Engineer',
@@ -306,6 +310,7 @@ const en = {
     mine: 'My requests',
     backlog: 'IT Backlog',
     triage: 'Requests triage',
+    aiAccess: 'AI access register',
     adminPanel: 'Admin panel',
     org: 'Engineering Dashboard · Home Alliance',
     healthOk: 'Backend online',
@@ -382,6 +387,7 @@ const ru = {
     websites: 'Сайты',
     ghl_n8n: 'GHL / n8n',
     telephony: 'Телефония',
+    ai_tools: 'AI-инструменты (Claude, ChatGPT…)',
     other: 'Другое',
   },
   impact: {
@@ -552,6 +558,9 @@ const ru = {
     unlink: 'Отвязать',
 
     createTask: 'Создать задачу на Ганте',
+    addAiAccess: 'Добавить в реестр AI-доступов',
+    addAiAccessDone: 'В реестре AI-доступов',
+    addAiAccessFailed: 'Не удалось добавить в реестр',
     createTitle: 'Новая задача на Ганте из заявки',
     createProject: 'Название задачи',
     createEngineer: 'Инженер',
@@ -601,6 +610,7 @@ const ru = {
     mine: 'Мои заявки',
     backlog: 'IT Backlog',
     triage: 'Разбор заявок',
+    aiAccess: 'Реестр AI-доступов',
     adminPanel: 'Админ-панель',
     org: 'Engineering Dashboard · Home Alliance',
     healthOk: 'Бэкенд на связи',
@@ -629,7 +639,7 @@ export function formatDate(value, lang) {
     day: 'numeric', month: 'short', year: 'numeric',
   }).formatToParts(d)
   const get = (type) => (parts.find((p) => p.type === type) || {}).value || ''
-  const month = get('month').replace(/^Sept$/, 'Sep').replace(/\s*г\.?$/, '')
+  const month = get('month').replace(/^Sept$/, 'Sep').replace(/\s+г\.?$/, '')
   return `${get('day')} ${month} ${get('year')}`
 }
 
