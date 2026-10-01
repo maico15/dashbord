@@ -86,7 +86,7 @@ Key helpers:
 
 **SQLite/PostgreSQL tables**:
 `team_members`, `dev_metrics`, `support_metrics`, `docs_metrics`, `score_rules`, `config`, `ai_usage_cache`, `weekly_tasks`, `sync_log`, `api_key_mapping`, `ai_usage`, `daily_reports`,
-`monthly_review_meta`, `monthly_review_summary`, `monthly_review_engineers`, `monthly_review_tasks`
+`monthly_review_meta`, `monthly_review_summary`, `monthly_review_engineers`, `monthly_review_tasks`, `ai_access`
 
 **Key endpoints**:
 
@@ -302,7 +302,7 @@ Creation is rate-limited per email in process (5 creates, 20 comments per hour)
 
 **Triage helpers** run on create and only ever suggest: the owner for the chosen
 system (passport/apollo/techapp → Andrey Pogrebnyak, fos → Andrey Brunetkin,
-websites → Yevhenii Shevchenko, ghl_n8n/telephony → Dmitry Minin) goes into the
+websites → Yevhenii Shevchenko, ghl_n8n/telephony → Dmitry Minin; ai_tools has none) goes into the
 `created` event, and a word-overlap match against `gantt_assignments.project` and
 `it_backlog_items.title` is logged as a `system` event. Nothing is auto-assigned.
 
@@ -385,6 +385,52 @@ dot that turns green when `GET /api/overview` answered on page load. Labels come
 from the same dictionary and follow the page's EN/RU toggle where there is one.
 `/review/latest` resolves the newest published month, so the footer's link keeps
 working as months are added.
+
+## AI Access Register (admin page)
+
+`/ai-access` — `frontend/src/pages/AIAccess.jsx`. Who in the company uses which AI
+tool, on whose approval, at what cost. Admin-only (the `sessionStorage.admin_pw`
+pattern, like `/it-backlog`), **not** in the tab bar — footer's Admin group and the
+direct URL only. Russian UI, `--ios-*` tokens via the shared `itRequestsStyle.jsx`.
+
+One table, `ai_access`, created in `conn.step("ai_access")`: person + email,
+department, manager, `employment` (`active` | `terminated` | `contractor` |
+`unknown`), `tool` (`claude` | `chatgpt` | `lovable` | `fireflies` | `openrouter` |
+`notion` | `abacus` | `other` + `tool_other`), `plan`, `cost_month` (NUMERIC,
+null = usage-based, explained in `cost_note`), `justification`, `approved_by` /
+`approved_at`, `request_ref`, `granted_at`, `last_used_at`, `last_verified_at`,
+`status` (`pending` | `active` | `to_revoke` | `revoked`, CHECK-constrained),
+`revoked_at` / `revoke_reason`, `notes`. Calendar dates are `YYYY-MM-DD` TEXT.
+
+| Method | Path | Auth | Purpose |
+|---|---|---|---|
+| GET | `/api/ai-access` | pw | Rows + flags; filters `status`, `tool`, `department`, `employment`, `q` (person, email, manager, department) |
+| GET | `/api/ai-access/stats` | pw | `seats_active`, `tools_active`, `cost_month_total`, `cost_year_total`, `no_approval`, `terminated_active`, `unused_30d`, `pending`, `by_tool[]` |
+| POST | `/api/ai-access` | pw | Create; a `request_ref` that exists logs "Added to AI access register #N" on that IT request |
+| PATCH | `/api/ai-access/{id}` | pw | Partial; moving into `revoked` stamps `revoked_at`, moving out clears it |
+| POST | `/api/ai-access/{id}/revoke` | pw | Body `{reason}` (required) → `revoked` + today |
+| DELETE | `/api/ai-access/{id}` | pw | Remove a row |
+| GET | `/api/ai-access/export.csv` | pw | Every column plus the flags, UTF-8 with BOM for Excel |
+
+**Flags are server-side** (`_ai_access_row`), so page, cards and CSV agree:
+`flag_no_approval` — not revoked and `approved_by` or `approved_at` empty;
+`flag_terminated` — `employment='terminated'` and `status='active'`;
+`flag_unused` — `status='active'` and the last use (or, with none recorded, the
+grant date) is more than 30 days old — an invitation nobody accepted counts.
+Amber row = no approval or unused; red = terminated with live access.
+
+**Cost** counts `active` + `to_revoke` seats (still billed until revoked);
+`pending` and `revoked` are excluded.
+
+"Согласовать" writes the name in the page's "Согласующий" field (kept in
+`localStorage.ai_access_approver` — there is no per-admin login) and today's date,
+and sets `active`. A new row whose email has filed an IT request is prefilled from
+it (name, department, ref, justification).
+
+**From triage**: an IT request with `kind='access'` and `system='ai_tools'` (a
+system added for this), or any system whose summary names a known tool
+(`frontend/src/lib/aiTools.js`), shows "Add to AI access register" on the triage
+panel; it creates a `pending` row and the button becomes "✓ In the register".
 
 ## IT Backlog (hidden page)
 

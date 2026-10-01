@@ -6,6 +6,7 @@ import Combobox from '../components/Combobox'
 import CreateGanttTaskModal from '../components/CreateGanttTaskModal'
 import { I18N, readLang, fmt, formatDate, formatDateTime, withZone } from '../i18n/itRequests'
 import { RequestsStyle, PageHead, Segmented, StatusPill } from './itRequestsStyle'
+import { isAiAccessRequest, guessAiTool } from '../lib/aiTools'
 
 /* Triage. Password-gated with the same sessionStorage.admin_pw pattern as
  * /it-backlog, and deliberately not linked from the tab bar — the footer's
@@ -13,7 +14,7 @@ import { RequestsStyle, PageHead, Segmented, StatusPill } from './itRequestsStyl
 
 const QUEUES = ['new', 'accepted', 'in_progress', 'waiting_requester', 'closed']
 const STATUSES = ['new', 'accepted', 'in_progress', 'waiting_requester', 'done', 'rejected']
-const SYSTEMS = ['apollo', 'passport', 'techapp', 'fos', 'websites', 'ghl_n8n', 'telephony', 'other']
+const SYSTEMS = ['apollo', 'passport', 'techapp', 'fos', 'websites', 'ghl_n8n', 'telephony', 'ai_tools', 'other']
 
 export default function ITRequestsAdmin() {
   // Triage opens in Russian — it is the IT team's working language.
@@ -291,6 +292,8 @@ function Detail({ data, lang, t, pw, team, onApplied }) {
   const [linkQuery, setLinkQuery] = useState('')
   const [linkResults, setLinkResults] = useState([])
   const [creating, setCreating] = useState(false)
+  const [aiAdding, setAiAdding] = useState(false)
+  const [aiErr, setAiErr] = useState('')
 
   const set = (key) => (ev) => {
     setForm((f) => ({ ...f, [key]: ev.target ? ev.target.value : ev }))
@@ -365,6 +368,36 @@ function Detail({ data, lang, t, pw, team, onApplied }) {
       setErr(String(e.message || ''))
     } finally {
       setSaving(false)
+    }
+  }
+
+  /* An access request for an AI tool goes into the register as a pending row.
+   * The backend logs "Added to AI access register #N" on this request, which is
+   * also how the button knows it has already been done. */
+  const aiRegistered = useMemo(() => (data.events || []).some(
+    (e) => String(e.body || '').startsWith('Added to AI access register')
+  ), [data.events])
+
+  const addToAiRegister = async () => {
+    setAiAdding(true)
+    setAiErr('')
+    try {
+      const email = String(req.requester_email || '')
+      await api.post('/ai-access', {
+        person_name: email.split('@')[0].replace(/[._-]+/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase()),
+        person_email: email,
+        department: req.department || '',
+        tool: guessAiTool(req.summary) || 'other',
+        justification: req.summary || '',
+        request_ref: req.ref,
+        status: 'pending',
+      }, pw)
+      const fresh = await api.get(`/it-requests/ref/${encodeURIComponent(req.ref)}`)
+      onApplied({ request: req, events: fresh.events })
+    } catch (e) {
+      setAiErr(`${t.admin.addAiAccessFailed}: ${String(e.message || '')}`)
+    } finally {
+      setAiAdding(false)
     }
   }
 
@@ -506,6 +539,14 @@ function Detail({ data, lang, t, pw, team, onApplied }) {
           <button type="button" className="itr-btn itr-btn-sm" onClick={() => setCreating(true)}>
             {t.admin.createTask}
           </button>
+          {isAiAccessRequest(req) && (aiRegistered ? (
+            <a className="itr-link itr-ai-done" href="/ai-access">✓ {t.admin.addAiAccessDone}</a>
+          ) : (
+            <button type="button" className="itr-btn itr-btn-sm" disabled={aiAdding}
+              onClick={addToAiRegister}>
+              {t.admin.addAiAccess}
+            </button>
+          ))}
         </div>
       </div>
 
@@ -586,6 +627,7 @@ function Detail({ data, lang, t, pw, team, onApplied }) {
         </div>
       )}
       {err && <div className="itr-err">{err}</div>}
+      {aiErr && <div className="itr-err">{aiErr}</div>}
 
       <h3 className="itr-card-title itr-triage-title">{t.admin.log}</h3>
       <ul className="itr-log">

@@ -59,6 +59,7 @@ export default function AppFooter({ lang, compact }) {
       links: [
         { to: '/it-backlog', label: t.backlog },
         { to: '/it-requests/admin', label: t.triage },
+        { to: '/ai-access', label: t.aiAccess },
         { to: '/admin', label: t.adminPanel },
       ],
     },

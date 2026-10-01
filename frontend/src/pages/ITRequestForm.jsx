@@ -10,7 +10,7 @@ import { readIdentity } from '../hooks/useRequesterIdentity'
  * and a link; everything after that happens on the status page. */
 
 const KINDS = ['broken', 'change', 'access', 'data', 'question']
-const SYSTEMS = ['apollo', 'passport', 'techapp', 'fos', 'websites', 'ghl_n8n', 'telephony', 'other']
+const SYSTEMS = ['apollo', 'passport', 'techapp', 'fos', 'websites', 'ghl_n8n', 'telephony', 'ai_tools', 'other']
 const IMPACTS = ['blocked', 'daily', 'can_wait']
 const CORPORATE_DOMAIN = 'homealliance.com'
 const DRAFT_KEY = 'it_request_draft'

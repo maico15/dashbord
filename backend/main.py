@@ -810,6 +810,44 @@ def init_db():
             );
         """)
 
+    # ── AI access register (admin page at /ai-access) ────────────────────────
+    # Who uses which AI tool, on whose approval, at what cost. Its own step so an
+    # existing database picks the table up on the next boot. Dates are TEXT like
+    # every other table here (YYYY-MM-DD for the calendar ones, ISO-8601 UTC for
+    # created/updated); cost_month is NUMERIC so a per-seat price stays exact.
+    with conn.step("ai_access"):
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS ai_access (
+                id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at       TEXT,
+                updated_at       TEXT,
+                person_name      TEXT NOT NULL,
+                person_email     TEXT NOT NULL,
+                department       TEXT DEFAULT '',
+                manager_name     TEXT DEFAULT '',
+                manager_email    TEXT DEFAULT '',
+                employment       TEXT DEFAULT 'active'
+                                 CHECK (employment IN ('active','terminated','contractor','unknown')),
+                tool             TEXT NOT NULL,
+                tool_other       TEXT DEFAULT '',
+                plan             TEXT DEFAULT '',
+                cost_month       NUMERIC,
+                cost_note        TEXT DEFAULT '',
+                justification    TEXT DEFAULT '',
+                approved_by      TEXT DEFAULT '',
+                approved_at      TEXT DEFAULT '',
+                request_ref      TEXT DEFAULT '',
+                granted_at       TEXT DEFAULT '',
+                last_used_at     TEXT DEFAULT '',
+                last_verified_at TEXT DEFAULT '',
+                status           TEXT NOT NULL DEFAULT 'pending'
+                                 CHECK (status IN ('pending','active','to_revoke','revoked')),
+                revoked_at       TEXT DEFAULT '',
+                revoke_reason    TEXT DEFAULT '',
+                notes            TEXT DEFAULT ''
+            );
+        """)
+
     conn.close()
 
 
@@ -7590,7 +7628,8 @@ def seed_it_backlog(data: Any = Body(...), password: str = ""):
 
 IT_REQUEST_KINDS = ("broken", "change", "access", "data", "question")
 IT_REQUEST_SYSTEMS = (
-    "apollo", "passport", "techapp", "fos", "websites", "ghl_n8n", "telephony", "other",
+    "apollo", "passport", "techapp", "fos", "websites", "ghl_n8n", "telephony", "ai_tools",
+    "other",
 )
 IT_REQUEST_IMPACTS = ("blocked", "daily", "can_wait")
 IT_REQUEST_STATUSES = (
@@ -8428,6 +8467,310 @@ def run_it_request_autoclose(password: str = ""):
     if password != ADMIN_PASSWORD:
         raise HTTPException(403, "Unauthorized")
     return _run_it_request_autoclose()
+
+
+# ── AI access register (/ai-access) ──────────────────────────────────────────
+# A register, not a list: every row says who approved the seat and when (the
+# 24 September policy needs that), what it costs, and when the person last used
+# it. Admin-only end to end — reads included, because it names people and money.
+
+AI_ACCESS_TOOLS = (
+    "claude", "chatgpt", "lovable", "fireflies", "openrouter", "notion", "abacus", "other",
+)
+AI_ACCESS_STATUSES = ("pending", "active", "to_revoke", "revoked")
+AI_ACCESS_EMPLOYMENT = ("active", "terminated", "contractor", "unknown")
+# Seats that are being paid for. A pending row is not provisioned yet and a
+# revoked one is gone, so neither counts toward the cost total.
+AI_ACCESS_BILLED = ("active", "to_revoke")
+AI_ACCESS_UNUSED_DAYS = 30
+
+# Every column the API writes, in CSV order. id/created_at/updated_at are the
+# server's; the rest are what create and PATCH accept.
+_AI_ACCESS_FIELDS = (
+    "person_name", "person_email", "department", "manager_name", "manager_email",
+    "employment", "tool", "tool_other", "plan", "cost_month", "cost_note",
+    "justification", "approved_by", "approved_at", "request_ref", "granted_at",
+    "last_used_at", "last_verified_at", "status", "revoked_at", "revoke_reason", "notes",
+)
+_AI_ACCESS_FLAGS = ("flag_no_approval", "flag_terminated", "flag_unused")
+
+
+def _ai_parse_date(value):
+    """'2026-09-24' or a full ISO timestamp → datetime, else None."""
+    s = str(value or "").strip()
+    if not s:
+        return None
+    for candidate in (s.replace("Z", ""), s[:10]):
+        try:
+            return datetime.fromisoformat(candidate)
+        except ValueError:
+            continue
+    return None
+
+
+def _ai_access_row(row, now: datetime = None) -> dict:
+    """The stored row plus the three flags the page tints by. Computed here so
+    the page, the stats and the CSV can never disagree about who is flagged."""
+    out = dict(row)
+    if out.get("cost_month") is not None:
+        out["cost_month"] = float(out["cost_month"])
+    now = now or datetime.utcnow()
+    live = out.get("status") == "active"
+    out["flag_no_approval"] = (
+        out.get("status") != "revoked"
+        and (not str(out.get("approved_by") or "").strip()
+             or not str(out.get("approved_at") or "").strip())
+    )
+    out["flag_terminated"] = live and out.get("employment") == "terminated"
+    # No recorded use counts from the grant date: an invitation nobody ever
+    # accepted (the Fireflies case) is exactly what this flag is for.
+    seen = _ai_parse_date(out.get("last_used_at")) or _ai_parse_date(out.get("granted_at"))
+    out["flag_unused"] = bool(
+        live and seen and (now - seen).days > AI_ACCESS_UNUSED_DAYS
+    )
+    return out
+
+
+def _ai_access_clean(data: dict, partial: bool) -> dict:
+    """Validate and normalise a create/PATCH body down to known columns."""
+    out = {}
+    for key in _AI_ACCESS_FIELDS:
+        if key not in data:
+            continue
+        value = data[key]
+        if key == "cost_month":
+            if value in (None, ""):
+                out[key] = None
+            else:
+                try:
+                    out[key] = round(float(str(value).replace(",", ".").replace("$", "")), 2)
+                except ValueError:
+                    raise HTTPException(422, "cost_month must be a number")
+                if out[key] < 0:
+                    raise HTTPException(422, "cost_month cannot be negative")
+        else:
+            out[key] = str(value if value is not None else "").strip()
+
+    if not partial:
+        for key in ("person_name", "person_email", "tool"):
+            if not out.get(key):
+                raise HTTPException(422, f"{key} is required")
+    else:
+        for key in ("person_name", "person_email", "tool"):
+            if key in out and not out[key]:
+                raise HTTPException(422, f"{key} cannot be empty")
+    if "person_email" in out:
+        out["person_email"] = out["person_email"].lower()
+        if not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", out["person_email"]):
+            raise HTTPException(422, "person_email is not a valid email address")
+    if "tool" in out and out["tool"] not in AI_ACCESS_TOOLS:
+        raise HTTPException(422, f"tool must be one of {', '.join(AI_ACCESS_TOOLS)}")
+    if "status" in out:
+        out["status"] = out["status"] or "pending"
+        if out["status"] not in AI_ACCESS_STATUSES:
+            raise HTTPException(422, f"status must be one of {', '.join(AI_ACCESS_STATUSES)}")
+    if "employment" in out:
+        out["employment"] = out["employment"] or "unknown"
+        if out["employment"] not in AI_ACCESS_EMPLOYMENT:
+            raise HTTPException(
+                422, f"employment must be one of {', '.join(AI_ACCESS_EMPLOYMENT)}")
+    if "request_ref" in out:
+        out["request_ref"] = out["request_ref"].upper()
+    return out
+
+
+def _ai_access_get(conn, access_id: int):
+    row = conn.execute("SELECT * FROM ai_access WHERE id=?", (access_id,)).fetchone()
+    if not row:
+        conn.close()
+        raise HTTPException(404, "Not found")
+    return row
+
+
+def _ai_access_log_request(conn, ref: str, body: str):
+    """Leave a line on the linked IT request's log so triage sees the seat was
+    registered. Best effort: a ref that does not exist is not an error here."""
+    if not ref:
+        return
+    req = _it_get_by_ref(conn, ref)
+    if req:
+        _it_log_event(conn, req["id"], "it", "system", body=body)
+
+
+@app.get("/api/ai-access")
+def list_ai_access(password: str = "", status: str = "", tool: str = "",
+                   department: str = "", employment: str = "", q: str = ""):
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    where, params = [], []
+    for col, raw in (("status", status), ("tool", tool), ("employment", employment)):
+        wanted = [v for v in str(raw or "").split(",") if v]
+        if wanted:
+            where.append(f"{col} IN (" + ",".join("?" for _ in wanted) + ")")
+            params += wanted
+    if department:
+        where.append("LOWER(department)=?")
+        params.append(department.strip().lower())
+    if q:
+        like = f"%{q.strip().lower()}%"
+        where.append(
+            "(LOWER(person_name) LIKE ? OR LOWER(person_email) LIKE ? "
+            "OR LOWER(manager_name) LIKE ? OR LOWER(department) LIKE ?)")
+        params += [like, like, like, like]
+    sql = "SELECT * FROM ai_access"
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY LOWER(person_name), tool, id"
+    conn = get_db()
+    now = datetime.utcnow()
+    rows = [_ai_access_row(r, now) for r in conn.execute(sql, tuple(params)).fetchall()]
+    conn.close()
+    return {"generated": now.isoformat(), "items": rows}
+
+
+@app.get("/api/ai-access/stats")
+def ai_access_stats(password: str = ""):
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    conn = get_db()
+    now = datetime.utcnow()
+    rows = [_ai_access_row(r, now) for r in conn.execute("SELECT * FROM ai_access").fetchall()]
+    conn.close()
+    billed = [r for r in rows if r["status"] in AI_ACCESS_BILLED]
+    cost = round(sum(r["cost_month"] or 0 for r in billed), 2)
+    by_tool = {}
+    for r in billed:
+        t = by_tool.setdefault(r["tool"], {"tool": r["tool"], "seats": 0, "cost_month": 0.0})
+        t["seats"] += 1
+        t["cost_month"] = round(t["cost_month"] + (r["cost_month"] or 0), 2)
+    return {
+        "seats_active": len(billed),
+        "tools_active": len(by_tool),
+        "cost_month_total": cost,
+        "cost_year_total": round(cost * 12, 2),
+        "no_approval": sum(1 for r in rows if r["flag_no_approval"]),
+        "terminated_active": sum(1 for r in rows if r["flag_terminated"]),
+        "unused_30d": sum(1 for r in rows if r["flag_unused"]),
+        "pending": sum(1 for r in rows if r["status"] == "pending"),
+        "by_tool": sorted(by_tool.values(), key=lambda t: (-t["cost_month"], -t["seats"])),
+    }
+
+
+@app.get("/api/ai-access/export.csv")
+def export_ai_access(password: str = ""):
+    """Every row and column, flags included, for HR and finance. UTF-8 with a
+    BOM so Excel opens the Cyrillic names correctly."""
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    from fastapi.responses import Response
+    conn = get_db()
+    now = datetime.utcnow()
+    rows = [_ai_access_row(r, now) for r in conn.execute(
+        "SELECT * FROM ai_access ORDER BY LOWER(person_name), tool, id").fetchall()]
+    conn.close()
+    cols = ("id",) + _AI_ACCESS_FIELDS + _AI_ACCESS_FLAGS + ("created_at", "updated_at")
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(cols)
+    for r in rows:
+        writer.writerow([
+            ("yes" if r.get(c) else "") if c in _AI_ACCESS_FLAGS
+            else ("" if r.get(c) is None else r.get(c))
+            for c in cols
+        ])
+    filename = f"ai-access-{now.strftime('%Y-%m-%d')}.csv"
+    return Response(
+        content="﻿" + buf.getvalue(),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@app.post("/api/ai-access")
+def create_ai_access(data: dict, password: str = ""):
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    fields = _ai_access_clean(data or {}, partial=False)
+    fields.setdefault("status", "pending")
+    fields.setdefault("employment", "active")
+    if fields["status"] == "revoked" and not fields.get("revoked_at"):
+        fields["revoked_at"] = datetime.utcnow().date().isoformat()
+    now = datetime.utcnow().isoformat()
+    fields["created_at"] = now
+    fields["updated_at"] = now
+    cols = list(fields)
+    conn = get_db()
+    cur = conn.execute(
+        f"INSERT INTO ai_access ({', '.join(cols)}) VALUES ({', '.join('?' for _ in cols)})",
+        tuple(fields[c] for c in cols),
+    )
+    new_id = cur.lastrowid
+    _ai_access_log_request(
+        conn, fields.get("request_ref", ""),
+        f"Added to AI access register #{new_id}: {fields['tool']} for {fields['person_email']}",
+    )
+    conn.commit()
+    row = _ai_access_row(conn.execute("SELECT * FROM ai_access WHERE id=?", (new_id,)).fetchone())
+    conn.close()
+    return {"ok": True, "id": new_id, "item": row}
+
+
+@app.patch("/api/ai-access/{access_id}")
+def patch_ai_access(access_id: int, data: dict, password: str = ""):
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    fields = _ai_access_clean(data or {}, partial=True)
+    if not fields:
+        raise HTTPException(422, f"nothing to update — send one of: {', '.join(_AI_ACCESS_FIELDS)}")
+    conn = get_db()
+    row = _ai_access_get(conn, access_id)
+    # Moving into revoked stamps the date the seat stopped costing money;
+    # moving back out clears it, so a restored seat is not reported as revoked.
+    if fields.get("status") == "revoked" and row["status"] != "revoked" and not fields.get("revoked_at"):
+        fields["revoked_at"] = datetime.utcnow().date().isoformat()
+    elif "status" in fields and fields["status"] != "revoked" and row["status"] == "revoked":
+        fields.setdefault("revoked_at", "")
+        fields.setdefault("revoke_reason", "")
+    fields["updated_at"] = datetime.utcnow().isoformat()
+    sets = ", ".join(f"{k}=?" for k in fields)
+    conn.execute(f"UPDATE ai_access SET {sets} WHERE id=?", (*fields.values(), access_id))
+    conn.commit()
+    out = _ai_access_row(conn.execute("SELECT * FROM ai_access WHERE id=?", (access_id,)).fetchone())
+    conn.close()
+    return {"ok": True, "item": out}
+
+
+@app.post("/api/ai-access/{access_id}/revoke")
+def revoke_ai_access(access_id: int, data: dict = Body(default={}), password: str = ""):
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    reason = str((data or {}).get("reason") or "").strip()
+    if not reason:
+        raise HTTPException(422, "reason is required to revoke access")
+    conn = get_db()
+    _ai_access_get(conn, access_id)
+    now = datetime.utcnow()
+    conn.execute(
+        "UPDATE ai_access SET status='revoked', revoked_at=?, revoke_reason=?, updated_at=? "
+        "WHERE id=?",
+        (now.date().isoformat(), reason, now.isoformat(), access_id),
+    )
+    conn.commit()
+    out = _ai_access_row(conn.execute("SELECT * FROM ai_access WHERE id=?", (access_id,)).fetchone())
+    conn.close()
+    return {"ok": True, "item": out}
+
+
+@app.delete("/api/ai-access/{access_id}")
+def delete_ai_access(access_id: int, password: str = ""):
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    conn = get_db()
+    _ai_access_get(conn, access_id)
+    conn.execute("DELETE FROM ai_access WHERE id=?", (access_id,))
+    conn.commit()
+    conn.close()
+    return {"ok": True}
 
 
 if __name__ == "__main__":
