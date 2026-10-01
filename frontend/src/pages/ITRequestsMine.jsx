@@ -4,6 +4,7 @@ import { api } from '../api/client'
 import AppFooter from '../components/AppFooter'
 import { I18N, readLang, formatDate } from '../i18n/itRequests'
 import { RequestsStyle, PageHead, StatusPill } from './itRequestsStyle'
+import { readIdentity } from '../hooks/useRequesterIdentity'
 
 /* Everything one address has sent. Public like the status page: the email in
  * the URL is the key, and it is the requester's own. */
@@ -12,7 +13,9 @@ export default function ITRequestsMine() {
   const [lang, setLang] = useState(() => readLang('en'))
   const t = I18N[lang]
 
-  const emailParam = params.get('email') || ''
+  // No address in the URL: fall back to the one the front door stored, so the
+  // footer's "My requests" link is not a dead end for someone who has one.
+  const emailParam = params.get('email') || readIdentity()?.email || ''
   const [email, setEmail] = useState(emailParam)
   const [rows, setRows] = useState(null)
   const [loading, setLoading] = useState(false)

@@ -4,6 +4,7 @@ import { api } from '../api/client'
 import AppFooter from '../components/AppFooter'
 import { I18N, readLang } from '../i18n/itRequests'
 import { RequestsStyle, PageHead, Segmented, Chips } from './itRequestsStyle'
+import { readIdentity } from '../hooks/useRequesterIdentity'
 
 /* Public intake form — no password, no account. The reader leaves with a ref
  * and a link; everything after that happens on the status page. */
@@ -30,11 +31,17 @@ export default function ITRequestForm() {
   // A half-written request survives a reload or a wrong tab — cleared only
   // once the server has actually taken it.
   const [form, setForm] = useState(() => {
+    // Whoever the front door already knows, so nobody types their own address
+    // twice; a saved draft still wins, since it is what they were writing.
+    const who = readIdentity()
+    const start = who
+      ? { ...EMPTY, requester_email: who.email, requester_slack: who.slack }
+      : EMPTY
     try {
       const saved = JSON.parse(localStorage.getItem(DRAFT_KEY) || 'null')
-      if (saved && typeof saved === 'object') return { ...EMPTY, ...saved }
+      if (saved && typeof saved === 'object') return { ...start, ...saved }
     } catch { /* corrupt draft — start clean */ }
-    return EMPTY
+    return start
   })
   const [errors, setErrors] = useState({})
   const [sending, setSending] = useState(false)

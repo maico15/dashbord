@@ -13,6 +13,7 @@ import TaskBoard from './pages/TaskBoard'
 import Roadmap from './pages/Roadmap'
 import NorthStar from './pages/NorthStar'
 import ITBacklog from './pages/ITBacklog'
+import ITRequestsHome from './pages/ITRequestsHome'
 import ITRequestForm from './pages/ITRequestForm'
 import ITRequestStatus from './pages/ITRequestStatus'
 import ITRequestsMine from './pages/ITRequestsMine'
@@ -46,6 +47,7 @@ export default function App() {
 
       {/* IT requests. The first three are public; /admin asks for the password
         * itself and, like /it-backlog, is not in the tab bar. */}
+      <Route path="/it-requests/home" element={<ITRequestsHome />} />
       <Route path="/it-requests" element={<ITRequestForm />} />
       <Route path="/it-requests/status" element={<ITRequestStatus />} />
       <Route path="/it-requests/status/:ref" element={<ITRequestStatus />} />

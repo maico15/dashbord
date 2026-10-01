@@ -268,11 +268,12 @@ Editing is API-only for now — an Admin panel section is not built yet.
 
 ## IT Requests (intake, status, triage)
 
-Four routes, three of them public:
+Five routes, four of them public:
 
 | Route | Who | What |
 |---|---|---|
-| `/it-requests` | anyone | The intake form. Linked from the Dashboard tab bar as "IT request" / "Заявка в IT" |
+| `/it-requests/home` | anyone | **The front door — the link to hand out.** Greets by stored identity, then: new request, your own requests, open one by ref. Linked from the Dashboard tab bar as "IT request" / "Заявка в IT" and first in the footer's Requests group |
+| `/it-requests` | anyone | The intake form, prefilled from the stored identity |
 | `/it-requests/status/:ref` | anyone with the ref | Five-step progress, the thread with IT, comment / confirm / reopen |
 | `/it-requests/mine?email=` | anyone with the address | Everything one address has sent |
 | `/it-requests/admin` | admin password | Triage: queue, KPIs, detail panel. **Not** in the tab bar — footer's Admin group and the direct URL only |
@@ -343,6 +344,18 @@ back to the request — then POSTs the task and PATCHes the request with
 When a linked Gantt task is done, the panel offers a one-click "close the
 request"; the status never changes on its own, because only a person knows the
 requester actually got what they asked for.
+
+**Who the requester is** (`frontend/src/hooks/useRequesterIdentity.js`): a work
+email and a Slack handle, asked once on the front door and kept in
+`localStorage.it_requests_identity`. It is a bridge until HA ID login exists and
+proves nothing — the request pages are public by design, and anyone with a ref
+can already read that request; it only saves retyping and lets the page greet
+someone. **Every page reads it through that one module**, which is also why
+callers treat identity as something that arrives (`ready`) rather than something
+that is simply there: when the session becomes the source of truth, only that
+file changes. The front door's "Not you? / Это не вы?" clears it. The intake form
+starts from it (a saved draft still wins), and `/it-requests/mine` falls back to
+it when the URL carries no `?email=`.
 
 **Language**: `frontend/src/i18n/itRequests.js` holds every string in `{en, ru}`
 with identical keys; components carry no literals. The reader's choice lives in
