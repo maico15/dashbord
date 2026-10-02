@@ -388,7 +388,13 @@ working as months are added.
 
 ## AI Access Register (admin page)
 
-`/ai-access` — `frontend/src/pages/AIAccess.jsx`. Who in the company uses which AI
+`/ai-access` — `frontend/src/pages/AIAccess.jsx` (shell, KPI cards, navigation) plus
+`frontend/src/pages/aiRegistry/` (`ServicesTab`, `PeopleTab`, `RisksTab`, `shared`).
+Three tabs: **Сервисы** (subscriptions — where the money is counted), **Люди** (the
+seat register below), **Риски**. Every figure is a link: a KPI card sets the tab and
+a filter and shows a removable "Фильтр: … · сбросить" chip; a count in a table opens
+the side panel that explains it (service panel → its people → that person in Люди;
+a person's service chip → that service). Who in the company uses which AI
 tool, on whose approval, at what cost. Admin-only (the `sessionStorage.admin_pw`
 pattern, like `/it-backlog`), **not** in the tab bar — footer's Admin group and the
 direct URL only. Russian UI, `--ios-*` tokens via the shared `itRequestsStyle.jsx`.
@@ -431,6 +437,53 @@ it (name, department, ref, justification).
 system added for this), or any system whose summary names a known tool
 (`frontend/src/lib/aiTools.js`), shows "Add to AI access register" on the triage
 panel; it creates a `pending` row and the button becomes "✓ In the register".
+
+### Subscriptions (`ai_services`) and risks (`ai_risks`)
+
+The people register understates spend — Claude is billed as one $3,325/mo plan,
+not seats × list price, and Abacus / Atlassian / Digital Ocean have no person at
+all — so spend is read from `ai_services`, one row per subscription, created in
+`conn.step("ai_services")`: `name`, `plan`, `cost_month` (NUMERIC, the invoice),
+`cost_note`, `seats_billed` (invoice) / `seats_seen` (usage export) /
+`seats_verified_at`, `renewal_date`, `owner_name`, `can_cancel` (who holds the
+billing login), `decision` (`keep` | `review` | `kill` | `cancelled` | `transfer`
+or empty, CHECK-constrained), `decision_note`, `saving_month` + `saving_from`
+(a saving starts when the invoice stops — defaults to `renewal_date`),
+`status_note`, `notes`. **Nothing is seeded**; services are POSTed after deploy.
+
+Derived server-side (`_ai_service_row`): `seats_gap = seats_billed - seats_seen`,
+`gap_cost_month = seats_gap × cost_month / seats_billed`, `cost_year`,
+`people_count` (billed `ai_access` rows linked to it), `flag_gap` (gap > 0),
+`flag_no_owner` (owner or can_cancel empty), `flag_renewal` (renewal within 14
+days, not cancelled). Row tint: muted = cancelled, else red = gap or no owner,
+amber = kill.
+
+`ai_access` gained `service_id` (the subscription a seat sits on) plus a usage
+audit: `usage_{30,60,90}d` and `usage_{chats,cowork,code}_{30,60,90}d` (INTEGER,
+a missing total is the sum of its split) and `usage_note`. `_ai_link_seats`
+backfills `service_id` for unlinked seats by matching `tool` (or `tool_other`)
+to the normalised service name ('abacus' → 'Abacus.AI'); it runs at boot and
+after every service create/rename, and only links when exactly one service
+matches — so POSTing "Claude" links every Claude seat with no second call. A new
+seat without `service_id` is matched the same way.
+
+| Method | Path | Auth | Purpose |
+|---|---|---|---|
+| GET | `/api/ai-services` | pw | Rows + derived fields; filter `decision` |
+| GET | `/api/ai-services/stats` | pw | `spend_month_total` / `spend_year_total` (all but cancelled), `unattributed_month` (live services with no linked person), `saved_month`, `killlist_month`, `services_count`, `people_seats`, `gap_seats`, `gap_cost_month`, plus `*_count` / `no_owner_month` / `renewal_count` for the cards |
+| POST | `/api/ai-services` | pw | Create; accepts every column; returns `seats_linked` |
+| PATCH | `/api/ai-services/{id}` | pw | Partial |
+| DELETE | `/api/ai-services/{id}` | pw | Remove; its seats stay, unlinked |
+| GET | `/api/ai-services/{id}/people` | pw | Seats linked to it, or unlinked seats whose tool matches |
+| GET | `/api/ai-services/export.csv` | pw | Every column + derived fields, UTF-8 BOM |
+| GET/POST | `/api/ai-risks` | pw | `severity` (`high` \| `medium`), `title`, `detail`, `owner`, `status` (`open` \| `in_progress` \| `closed`), `source`, `linked_gantt_id`, `notes` |
+| PATCH/DELETE | `/api/ai-risks/{id}` | pw | Partial / remove |
+
+`GET /api/ai-access` also takes `service_id`. "В задачи" on a risk POSTs
+`/api/gantt` (engineer picked in the dialog, the risk's owner preselected when they
+are on the team) and PATCHes the risk with `linked_gantt_id` (and `in_progress`).
+Choosing "отключено" in the inline decision control asks for the saving and its
+start date before writing.
 
 ## IT Backlog (hidden page)
 
