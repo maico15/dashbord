@@ -96,15 +96,12 @@ export function PeopleTable({ rows, services, focusId, lastImportAt, buckets = {
       <thead>
         <tr>
           <th>Сотрудник</th>
-          <th>Отдел</th>
           <th>Руководитель</th>
           <th>Инструмент</th>
-          <th>Сервис</th>
           <th className="aia-num">$/мес</th>
           <th><span className="aia-usage-head">Использование · <UsageAsOf date={lastImportAt} /></span>30 / 60 / 90</th>
           <th>Решение</th>
           <th>Согласовано</th>
-          <th>Последний вход</th>
           <th>Статус</th>
           <th aria-label="Действия" />
         </tr>
@@ -126,29 +123,36 @@ export function PeopleTable({ rows, services, focusId, lastImportAt, buckets = {
               <td data-label="Сотрудник">
                 <Num className="aia-person" onClick={() => onOpen(r.id)}>{r.person_name}</Num>
                 <div className="aia-muted">{r.person_email}</div>
+                {r.department && <div className="aia-muted">{r.department}</div>}
                 {r.employment && r.employment !== 'active' && (
                   <div className={`aia-emp aia-emp-${r.employment}`}>
                     {(EMPLOYMENT.find((e) => e.value === r.employment) || {}).label}
                   </div>
                 )}
               </td>
-              <td data-label="Отдел">{r.department || <span className="aia-muted">—</span>}</td>
-              <td data-label="Руководитель">{r.manager_name || <span className="aia-muted">—</span>}</td>
+              <td data-label="Руководитель" className="aia-wrap">{r.manager_name || <span className="aia-muted">—</span>}</td>
               <td data-label="Инструмент">
-                <span className="aia-tool"><i style={{ background: tool.color }} />{aiToolName(r)}</span>
+                {/* Tool, plan and the subscription it sits on — one cell, so the
+                 * table fits a laptop screen without sideways scrolling. */}
+                {byId[r.service_id] ? (
+                  <ServiceChip service={byId[r.service_id]} onClick={() => onOpenService(r.service_id)} />
+                ) : (
+                  <span className="aia-tool"><i style={{ background: tool.color }} />{aiToolName(r)}</span>
+                )}
                 {r.plan && <div className="aia-muted">{r.plan}</div>}
               </td>
-              <td data-label="Сервис">
-                <ServiceChip service={byId[r.service_id]} onClick={() => onOpenService(r.service_id)} />
-              </td>
               <td data-label="$/мес" className="aia-num">
-                {r.cost_month != null ? money(r.cost_month, 2) : <span className="aia-muted">{r.cost_note || '—'}</span>}
+                {r.cost_month != null ? money(r.cost_month, 2) : <span className="aia-muted">—</span>}
+                {r.cost_note && <div className="aia-muted aia-note-cell">{r.cost_note}</div>}
               </td>
               <td data-label="30/60/90">
                 <Usage row={r} onOpen={(w) => onOpen(r.id, w)} />
                 {r.usage_verified_at && r.usage_verified_at !== lastImportAt && (
                   <div className="aia-muted aia-tiny">на {fmtDate(r.usage_verified_at)}</div>
                 )}
+                <div className={`aia-tiny${r.flag_unused ? ' aia-warn-cell' : ' aia-muted'}`}>
+                  вход: {r.last_used_at ? fmtDate(r.last_used_at) : 'нет данных'}
+                </div>
               </td>
               <td data-label="Решение">
                 <DecisionPill row={r} />
@@ -164,9 +168,6 @@ export function PeopleTable({ rows, services, focusId, lastImportAt, buckets = {
                   </>
                 )}
                 {r.request_ref && <div className="aia-muted aia-ref">{r.request_ref}</div>}
-              </td>
-              <td data-label="Последний вход" className={`aia-date${r.flag_unused ? ' aia-warn-cell' : ''}`}>
-                {r.last_used_at ? fmtDate(r.last_used_at) : <span className="aia-muted">нет данных</span>}
               </td>
               <td data-label="Статус">
                 <span className={`itr-pill aia-pill-${r.status}`}>{STATUS_LABEL[r.status] || r.status}</span>

@@ -315,7 +315,10 @@ export default function AIAccess() {
   const serviceById = useMemo(() => Object.fromEntries(services.map((s) => [s.id, s])), [services])
   const panelService = svcPanel && serviceById[svcPanel.id]
   const panelPerson = personPanel && people.find((r) => r.id === personPanel.id)
-  const lastImportAt = report?.last_import?.as_of || null
+  // The date the usage numbers are from: the last import, else the newest date
+  // any seat was verified (numbers loaded through the API, not an upload).
+  const lastImportAt = report?.last_import?.as_of
+    || people.reduce((m, r) => (r.usage_verified_at && r.usage_verified_at > m ? r.usage_verified_at : m), '') || null
   const requestCount = requests.pending.length + requests.requests.length
   const openSeats = report?.summary?.open_seats ?? 0
 
