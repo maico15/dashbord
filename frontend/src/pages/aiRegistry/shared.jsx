@@ -207,6 +207,7 @@ export const CSS = `
 .aia-table th:first-child,.aia-table td:first-child{padding-left:16px}
 .aia-table td:last-child{padding-right:14px}
 .aia-num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+@media(max-width:860px){.aia-note-cell{margin-left:0;max-width:none}}
 .aia-tone-amber td{background:#FFF6E0}
 .aia-tone-red td{background:#FFE8E6}
 .aia-tone-muted td{color:var(--ios-label3,#6D6D72)}
@@ -378,7 +379,17 @@ export const CSS = `
   .aia-seat-who{grid-column:1 / -1}
   .aia-bucket-head{padding:12px}
   .aia-sum-line{font-size:15.5px}
-  .aia-selects .itr-select{flex:1 1 140px;min-width:0}
+  .aia-selects{width:100%}
+  .aia-selects .itr-select{flex:1 1 140px;min-width:0;width:auto;max-width:100%}
+}
+
+/* Все места: nine columns that fit a 1280px screen. Notes wrap inside their
+ * cell instead of widening the column; sideways scroll stays as a fallback. */
+.aia-note-cell{white-space:normal;max-width:130px;margin-left:auto;font-size:11.5px;line-height:1.3}
+.aia-wrap{max-width:140px;overflow-wrap:anywhere}
+.aia-table .aia-usage-head{white-space:normal}
+@media(min-width:861px){
+  .aia-table td:first-child{max-width:190px}
 }
 
 @media(max-width:1100px){
