@@ -19,6 +19,7 @@ import ITRequestStatus from './pages/ITRequestStatus'
 import ITRequestsMine from './pages/ITRequestsMine'
 import ITRequestsAdmin from './pages/ITRequestsAdmin'
 import AIAccess from './pages/AIAccess'
+import AIAccessRespond from './pages/AIAccessRespond'
 import MonthlyReviewLatest from './pages/MonthlyReviewLatest'
 import NotFound from './pages/NotFound'
 
@@ -58,6 +59,8 @@ export default function App() {
       {/* AI access register. Admin-only, not in the tab bar — the footer's Admin
         * group and the direct URL are the ways in. */}
       <Route path="/ai-access" element={<AIAccess />} />
+      {/* Where a manager lands from the Slack DM; token-protected, one seat only. */}
+      <Route path="/ai-access/respond/:id" element={<AIAccessRespond />} />
 
       {/* Anything else. Without this route React Router renders nothing, and an
         * unknown URL — most often one newer than the deployed bundle — shows a

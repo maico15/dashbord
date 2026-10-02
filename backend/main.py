@@ -1,7 +1,7 @@
 import os
 import threading
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, HTTPException, Header, Body
+from fastapi import FastAPI, HTTPException, Header, Body, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional, Dict, Any, List
@@ -14,7 +14,9 @@ import urllib.request
 import urllib.error
 import urllib.parse
 import csv
+import hmac
 import io
+import secrets
 import math
 from datetime import datetime, timedelta
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -136,6 +138,7 @@ async def lifespan(app):
     scheduler.add_job(_run_ai_usage_sync,    'cron',     hour=2,  minute=30, id='ai_usage_daily_sync', replace_existing=True)
     scheduler.add_job(_run_github_sync,      'interval', minutes=15,          id='github_interval_sync', replace_existing=True)
     scheduler.add_job(_run_it_request_autoclose, 'cron',  hour=3,  minute=0,  id='it_request_autoclose', replace_existing=True)
+    scheduler.add_job(_run_ai_seat_escalation, 'cron',    hour=9,  minute=0,  id='ai_seat_escalation', replace_existing=True)
     scheduler.add_job(
         _auto_advance_week,
         'cron',
@@ -903,6 +906,47 @@ def init_db():
                 source          TEXT DEFAULT '',
                 linked_gantt_id INTEGER,
                 notes           TEXT DEFAULT ''
+            );
+        """)
+
+    # ── Seat decisions (/ai-access → Решения) ─────────────────────────────────
+    # The register becomes a decision tool: each paid seat carries the decision
+    # taken on it, the manager loop around it, and the saving it produced.
+    # `decision` is validated in the app (AI_SEAT_DECISIONS) — a CHECK cannot be
+    # added to an existing column portably. Every change of it goes through
+    # _ai_set_decision, which writes the ai_access_events row.
+    with conn.step("ai_access_decisions"):
+        for col, ddl in _AI_DECISION_COLUMNS:
+            conn.add_column_if_missing("ai_access", col, ddl)
+
+    with conn.step("ai_access_events"):
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS ai_access_events (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                access_id     INTEGER NOT NULL,
+                created_at    TEXT,
+                actor         TEXT DEFAULT '',
+                from_decision TEXT DEFAULT '',
+                to_decision   TEXT DEFAULT '',
+                reason        TEXT DEFAULT '',
+                channel       TEXT DEFAULT ''
+            );
+        """)
+
+    # One row per usage export uploaded; diff_json keeps what the import found
+    # so "what changed last time" can be shown again without the file.
+    with conn.step("ai_seat_imports"):
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS ai_seat_imports (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at   TEXT,
+                service      TEXT DEFAULT '',
+                rows_total   INTEGER DEFAULT 0,
+                rows_matched INTEGER DEFAULT 0,
+                rows_new     INTEGER DEFAULT 0,
+                rows_missing INTEGER DEFAULT 0,
+                note         TEXT DEFAULT '',
+                diff_json    TEXT DEFAULT ''
             );
         """)
 
@@ -8560,8 +8604,42 @@ _AI_USAGE_COLS = tuple(
     [f"usage_{w}d" for w in AI_USAGE_WINDOWS]
     + [f"usage_{k}_{w}d" for w in AI_USAGE_WINDOWS for k in AI_USAGE_KINDS]
 )
-_AI_ACCESS_FIELDS = _AI_ACCESS_FIELDS + _AI_USAGE_COLS + ("usage_note",)
-_AI_ACCESS_INT_FIELDS = ("service_id",) + _AI_USAGE_COLS
+# Seat-decision columns (added by the "ai_access_decisions" init step). The
+# decision itself and the manager-loop columns are written only by the
+# decision/notify endpoints; the rest are plain fields create/PATCH accept.
+_AI_DECISION_COLUMNS = (
+    ("role", "TEXT DEFAULT ''"),
+    ("usage_source", "TEXT DEFAULT ''"),
+    ("usage_verified_at", "TEXT DEFAULT ''"),
+    ("decision", "TEXT DEFAULT ''"),
+    ("decision_reason", "TEXT DEFAULT ''"),
+    ("decision_by", "TEXT DEFAULT ''"),
+    ("decision_at", "TEXT DEFAULT ''"),
+    ("target_plan", "TEXT DEFAULT ''"),
+    ("manager_notified_at", "TEXT DEFAULT ''"),
+    ("manager_notify_status", "TEXT DEFAULT ''"),
+    ("manager_notify_error", "TEXT DEFAULT ''"),
+    ("manager_response", "TEXT DEFAULT ''"),
+    ("manager_response_at", "TEXT DEFAULT ''"),
+    ("manager_token", "TEXT DEFAULT ''"),
+    ("escalated_at", "TEXT DEFAULT ''"),
+    ("saving_month", "NUMERIC"),
+    ("saving_starts_at", "TEXT DEFAULT ''"),
+    ("duplicate_of", "INTEGER"),
+    ("keep_review_due", "TEXT DEFAULT ''"),
+)
+_AI_ACCESS_FIELDS = _AI_ACCESS_FIELDS + _AI_USAGE_COLS + (
+    "usage_note", "role", "usage_source", "usage_verified_at",
+    "saving_month", "saving_starts_at", "keep_review_due", "duplicate_of",
+)
+_AI_ACCESS_INT_FIELDS = ("service_id", "duplicate_of") + _AI_USAGE_COLS
+# The names the audit sheet uses (usage_chats_30, usage_total_30) are accepted
+# as aliases of the stored columns (usage_chats_30d, usage_30d) and echoed back,
+# so the register can be filled with either spelling.
+_AI_USAGE_ALIASES = {
+    **{f"usage_{k}_{w}": f"usage_{k}_{w}d" for w in AI_USAGE_WINDOWS for k in AI_USAGE_KINDS},
+    **{f"usage_total_{w}": f"usage_{w}d" for w in AI_USAGE_WINDOWS},
+}
 _AI_ACCESS_FLAGS = ("flag_no_approval", "flag_terminated", "flag_unused")
 
 
@@ -8630,17 +8708,27 @@ def _ai_access_row(row, now: datetime = None) -> dict:
             parts = [out.get(f"usage_{k}_{w}d") for k in AI_USAGE_KINDS]
             if any(p is not None for p in parts):
                 out[key] = sum(p or 0 for p in parts)
+    for alias, col in _AI_USAGE_ALIASES.items():
+        out[alias] = out.get(col)
+    if out.get("saving_month") is not None:
+        out["saving_month"] = float(out["saving_month"])
+    # The manager's one-time link secret never leaves the server in a listing.
+    out.pop("manager_token", None)
     return out
 
 
 def _ai_access_clean(data: dict, partial: bool) -> dict:
     """Validate and normalise a create/PATCH body down to known columns."""
+    data = dict(data)
+    for alias, col in _AI_USAGE_ALIASES.items():
+        if alias in data and col not in data:
+            data[col] = data[alias]
     out = {}
     for key in _AI_ACCESS_FIELDS:
         if key not in data:
             continue
         value = data[key]
-        if key == "cost_month":
+        if key in ("cost_month", "saving_month"):
             out[key] = _ai_money(key, value)
         elif key in _AI_ACCESS_INT_FIELDS:
             out[key] = _ai_int(key, value, minimum=1 if key == "service_id" else 0)
@@ -8824,6 +8912,9 @@ def create_ai_access(data: dict, password: str = ""):
 def patch_ai_access(access_id: int, data: dict, password: str = ""):
     if password != ADMIN_PASSWORD:
         raise HTTPException(403, "Unauthorized")
+    if "decision" in (data or {}):
+        # One path changes a decision, so every change leaves an event behind.
+        raise HTTPException(422, "decision is set through POST /api/ai-access/{id}/decision")
     fields = _ai_access_clean(data or {}, partial=True)
     if not fields:
         raise HTTPException(422, f"nothing to update — send one of: {', '.join(_AI_ACCESS_FIELDS)}")
@@ -8855,13 +8946,19 @@ def revoke_ai_access(access_id: int, data: dict = Body(default={}), password: st
     if not reason:
         raise HTTPException(422, "reason is required to revoke access")
     conn = get_db()
-    _ai_access_get(conn, access_id)
-    now = datetime.utcnow()
-    conn.execute(
-        "UPDATE ai_access SET status='revoked', revoked_at=?, revoke_reason=?, updated_at=? "
-        "WHERE id=?",
-        (now.date().isoformat(), reason, now.isoformat(), access_id),
-    )
+    row = dict(_ai_access_get(conn, access_id))
+    today = datetime.utcnow().date().isoformat()
+    actor = str((data or {}).get("by") or "admin")
+    if row["status"] == "pending":
+        # A request turned down was never a paid seat: no decision, no saving,
+        # and it must not count in "было N мест". The refusal is still logged.
+        conn.execute("UPDATE ai_access SET status='revoked', revoked_at=?, revoke_reason=?, "
+                     "updated_at=? WHERE id=?", (today, reason, datetime.utcnow().isoformat(), access_id))
+        _ai_log_seat_event(conn, access_id, actor, row.get("decision"), row.get("decision"),
+                           f"запрос отклонён: {reason}", "ui")
+    else:
+        _ai_set_decision(conn, row, "revoked", actor=actor, reason=reason, channel="ui",
+                         extra={"status": "revoked", "revoked_at": today, "revoke_reason": reason})
     conn.commit()
     out = _ai_access_row(conn.execute("SELECT * FROM ai_access WHERE id=?", (access_id,)).fetchone())
     conn.close()
@@ -8874,10 +8971,807 @@ def delete_ai_access(access_id: int, password: str = ""):
         raise HTTPException(403, "Unauthorized")
     conn = get_db()
     _ai_access_get(conn, access_id)
+    conn.execute("DELETE FROM ai_access_events WHERE access_id=?", (access_id,))
     conn.execute("DELETE FROM ai_access WHERE id=?", (access_id,))
     conn.commit()
     conn.close()
     return {"ok": True}
+
+
+# ── Seat decisions (/ai-access → Решения) ────────────────────────────────────
+# The page answers one question a month: who has a paid seat and does not use
+# it. Seats are sorted into buckets by rules over the usage audit, each bucket
+# carries the money it represents, and every decision taken on a seat is a row
+# in ai_access_events — nothing changes `decision` without one.
+
+AI_SEAT_DECISIONS = (
+    "keep", "propose_revoke", "awaiting_manager", "confirmed", "revoked", "downgrade",
+)
+AI_KEEP_REVIEW_DAYS = 90
+AI_ESCALATE_WORKING_DAYS = 5
+# Plans that cost more than the base seat. Matched as words in `plan`, so
+# "Team · Premium" and "Premium" both count; "Standard" and "Team" do not.
+AI_UPPER_TIERS = ("premium", "max", "enterprise")
+AI_LOW_USE_MAX = 3
+AI_DOWNGRADE_USE_MAX = 50
+AI_ROLE_MISMATCH_MAX = 10
+
+# Order is the rule: a seat lands in the first bucket it matches.
+AI_BUCKETS = (
+    ("duplicate", "Дубль", "у человека два активных места — одно лишнее"),
+    ("revoke", "Снять", "ноль обращений за 90 дней"),
+    ("ask_manager", "Спросить руководителя", "ноль за 30 дней, но пользовался за 90"),
+    ("low_use", "Почти не пользуется", f"от 1 до {AI_LOW_USE_MAX} обращений за 30 дней"),
+    ("downgrade", "Понизить тариф",
+     f"дорогой тариф, а за 30 дней меньше {AI_DOWNGRADE_USE_MAX} обращений или ни Code, ни Cowork"),
+    ("role_mismatch", "Роль не по делу",
+     f"Admin/Owner, а за 90 дней меньше {AI_ROLE_MISMATCH_MAX} обращений"),
+    ("no_data", "Нет данных", "использование ещё не загружено — решать рано"),
+    ("ok", "В порядке", "пользуется"),
+)
+AI_BUCKET_KEYS = tuple(b[0] for b in AI_BUCKETS)
+# Buckets where a decision is expected; no_data and ok need none.
+AI_ACTION_BUCKETS = AI_BUCKET_KEYS[:6]
+_AI_NO_MANAGER = re.compile(r"^\s*(|-|—|n/?a|не найден[оа]?|not found|unknown|неизвестно)\s*$", re.I)
+
+
+def _ai_today() -> str:
+    return datetime.utcnow().date().isoformat()
+
+
+def _ai_log_seat_event(conn, access_id, actor, from_decision, to_decision, reason="", channel="ui"):
+    conn.execute(
+        "INSERT INTO ai_access_events (access_id, created_at, actor, from_decision, to_decision, "
+        "reason, channel) VALUES (?,?,?,?,?,?,?)",
+        (access_id, datetime.utcnow().isoformat(), actor or "", from_decision or "",
+         to_decision or "", reason or "", channel or ""),
+    )
+
+
+def _ai_set_decision(conn, row: dict, to: str, actor: str, reason: str = "",
+                     channel: str = "ui", extra: dict = None):
+    """The only writer of ai_access.decision. Stamps who/when/why, applies the
+    side fields the decision implies, and logs the transition."""
+    if to not in AI_SEAT_DECISIONS:
+        raise HTTPException(422, f"decision must be one of {', '.join(AI_SEAT_DECISIONS)}")
+    now = datetime.utcnow()
+    fields = {
+        "decision": to, "decision_reason": reason or "", "decision_by": actor or "",
+        "decision_at": now.isoformat(), "updated_at": now.isoformat(),
+    }
+    if to == "keep":
+        fields["keep_review_due"] = (now.date() + timedelta(days=AI_KEEP_REVIEW_DAYS)).isoformat()
+    if to not in ("awaiting_manager",):
+        # Leaving the manager loop closes it; a later proposal starts a new one.
+        fields["escalated_at"] = ""
+    fields.update(extra or {})
+    sets = ", ".join(f"{k}=?" for k in fields)
+    conn.execute(f"UPDATE ai_access SET {sets} WHERE id=?", (*fields.values(), row["id"]))
+    _ai_log_seat_event(conn, row["id"], actor, row.get("decision") or "", to, reason, channel)
+    row.update(fields)
+    return row
+
+
+def _ai_has_manager(row) -> bool:
+    return not _AI_NO_MANAGER.match(str(row.get("manager_name") or "")) \
+        or bool(str(row.get("manager_email") or "").strip())
+
+
+def _ai_upper_tier(plan) -> bool:
+    words = set(re.findall(r"[a-zа-я]+", str(plan or "").lower()))
+    return any(t in words for t in AI_UPPER_TIERS)
+
+
+def _ai_bucket(r: dict, duplicate: bool) -> str:
+    """First matching rule wins (AI_BUCKETS order). None means "not loaded",
+    never zero: a seat with no audit yet is no_data, not a revoke candidate."""
+    t30, t90 = r.get("usage_30d"), r.get("usage_90d")
+    code30, cowork30 = r.get("usage_code_30d"), r.get("usage_cowork_30d")
+    if duplicate:
+        return "duplicate"
+    if t90 == 0:
+        return "revoke"
+    if t30 == 0 and (t90 or 0) > 0:
+        return "ask_manager"
+    if t30 is not None and 1 <= t30 <= AI_LOW_USE_MAX:
+        return "low_use"
+    if _ai_upper_tier(r.get("plan")) and (
+            (t30 is not None and t30 < AI_DOWNGRADE_USE_MAX)
+            or (code30 == 0 and cowork30 == 0)):
+        return "downgrade"
+    role = str(r.get("role") or "").lower()
+    if ("admin" in role or "owner" in role) and t90 is not None and t90 < AI_ROLE_MISMATCH_MAX:
+        return "role_mismatch"
+    if t30 is None and t90 is None:
+        return "no_data"
+    return "ok"
+
+
+def _ai_mark_duplicates(conn) -> dict:
+    """Active seats sharing a display name under different emails: the newer
+    seat (higher id) gets duplicate_of = the oldest one. Recomputed on every
+    read, so a resolved duplicate clears itself. Returns {id: duplicate_of}."""
+    rows = conn.execute(
+        "SELECT id, person_name, person_email, duplicate_of FROM ai_access WHERE status='active' "
+        "ORDER BY id").fetchall()
+    groups = {}
+    for r in rows:
+        key = re.sub(r"\s+", " ", str(r["person_name"] or "").strip().lower())
+        if key:
+            groups.setdefault(key, []).append(r)
+    want = {}
+    for seats in groups.values():
+        emails = {str(s["person_email"] or "").lower() for s in seats}
+        if len(seats) > 1 and len(emails) > 1:
+            first = seats[0]["id"]
+            for s in seats[1:]:
+                if str(s["person_email"] or "").lower() != str(seats[0]["person_email"] or "").lower():
+                    want[s["id"]] = first
+    for r in rows:
+        if (r["duplicate_of"] or None) != want.get(r["id"]):
+            conn.execute("UPDATE ai_access SET duplicate_of=? WHERE id=?", (want.get(r["id"]), r["id"]))
+    conn.commit()
+    return want
+
+
+def _ai_seat_cost(r: dict, services: dict):
+    """What one seat costs a month: the subscription's invoice spread over its
+    billed seats when both are known, else the seat's own price."""
+    svc = services.get(r.get("service_id"))
+    if svc and svc.get("cost_month") is not None and svc.get("seats_billed"):
+        return round(float(svc["cost_month"]) / svc["seats_billed"], 2)
+    return float(r["cost_month"]) if r.get("cost_month") is not None else None
+
+
+def _ai_seat_state(r: dict, today: str) -> str:
+    """Where a seat is in the loop: open (needs a decision), waiting (with the
+    manager), not_sent (proposed but the DM did not go out), escalated,
+    confirmed (manager agreed, seat still live), kept, downgrade. A keep past
+    its review date is open again."""
+    d = r.get("decision") or ""
+    if d == "keep":
+        return "kept" if str(r.get("keep_review_due") or "") >= today else "open"
+    if d == "propose_revoke":
+        # Proposed, but the DM did not go out (no manager, no Slack, an error):
+        # nobody is being asked, so it is still the admin's move.
+        return "not_sent"
+    if d == "awaiting_manager":
+        return "escalated" if r.get("escalated_at") else "waiting"
+    if d in ("confirmed", "downgrade"):
+        return d
+    return "open"
+
+
+def _ai_last_import(conn):
+    row = conn.execute("SELECT * FROM ai_seat_imports ORDER BY id DESC LIMIT 1").fetchone()
+    if not row:
+        return None
+    out = dict(row)
+    out.pop("diff_json", None)
+    m = re.search(r"данные на (\d{4}-\d{2}-\d{2})", str(out.get("note") or ""))
+    out["as_of"] = m.group(1) if m else str(out.get("created_at") or "")[:10]
+    return out
+
+
+def _ai_seat_report(conn) -> dict:
+    """Buckets + summary + metrics in one pass, so the cards, the line at the
+    top and the strip can never disagree."""
+    dups = _ai_mark_duplicates(conn)
+    now = datetime.utcnow()
+    today = now.date().isoformat()
+    services = {r["id"]: _ai_service_row(r) for r in conn.execute("SELECT * FROM ai_services").fetchall()}
+    rows = [_ai_access_row(r, now) for r in conn.execute(
+        "SELECT * FROM ai_access ORDER BY LOWER(person_name), id").fetchall()]
+    active = [r for r in rows if r["status"] == "active"]
+
+    buckets = {k: {"key": k, "title": t, "rule": rule, "count": 0, "open": 0,
+                   "money_month": 0.0, "open_money_month": 0.0, "seats": []}
+               for k, t, rule in AI_BUCKETS}
+    for r in active:
+        r["bucket"] = _ai_bucket(r, r["id"] in dups)
+        r["seat_cost"] = _ai_seat_cost(r, services)
+        r["state"] = _ai_seat_state(r, today)
+        r["has_manager"] = _ai_has_manager(r)
+        svc = services.get(r.get("service_id"))
+        r["service_name"] = svc["name"] if svc else ""
+        b = buckets[r["bucket"]]
+        b["count"] += 1
+        b["money_month"] += r["seat_cost"] or 0
+        if r["state"] == "open":
+            b["open"] += 1
+            b["open_money_month"] += r["seat_cost"] or 0
+        b["seats"].append(r)
+    order = {"open": 0, "not_sent": 1, "escalated": 2, "confirmed": 3, "waiting": 4,
+             "downgrade": 5, "kept": 6}
+    for b in buckets.values():
+        b["money_month"] = round(b["money_month"], 2)
+        b["open_money_month"] = round(b["open_money_month"], 2)
+        b["seats"].sort(key=lambda r: (order.get(r["state"], 9), -(r["seat_cost"] or 0),
+                                       str(r["person_name"]).lower()))
+
+    flagged = [r for r in active if r["bucket"] in AI_ACTION_BUCKETS]
+    open_seats = [r for r in flagged if r["state"] == "open"]
+    # The renewal that makes this month's decisions urgent: the nearest one
+    # among services that have a flagged seat, else among all live services.
+    def _renewal(cands):
+        best = None
+        for svc in cands:
+            d = _ai_parse_date(svc.get("renewal_date"))
+            if not d or svc.get("decision") == "cancelled":
+                continue
+            days = (d.date() - now.date()).days
+            if days >= 0 and (best is None or days < best["days"]):
+                best = {"service_id": svc["id"], "service": svc["name"], "date": svc["renewal_date"], "days": days}
+        return best
+    flagged_services = [services[i] for i in {r.get("service_id") for r in flagged} if i in services]
+    renewal = _renewal(flagged_services) or _renewal(services.values())
+
+    # Metrics strip.
+    decided = [r for r in active if r["state"] in ("kept", "downgrade", "confirmed")]
+    revoked_by_decision = [r for r in rows if r.get("decision") == "revoked"]
+    events = conn.execute(
+        "SELECT access_id, created_at, to_decision FROM ai_access_events "
+        "WHERE to_decision IN ('propose_revoke','revoked') ORDER BY id").fetchall()
+    proposed, spans = {}, []
+    for e in events:
+        if e["to_decision"] == "propose_revoke":
+            proposed.setdefault(e["access_id"], e["created_at"])
+        elif e["access_id"] in proposed:
+            a = _ai_parse_date(proposed.pop(e["access_id"]))
+            b = _ai_parse_date(e["created_at"])
+            if a and b:
+                spans.append((b - a).total_seconds() / 86400)
+    counted = [r for r in revoked_by_decision
+               if r.get("saving_starts_at") and str(r["saving_starts_at"]) <= today]
+    with_90 = [r for r in active if r.get("usage_90d") is not None]
+    saving_all = round(sum(r.get("saving_month") or 0 for r in revoked_by_decision), 2)
+    starts = sorted(str(r["saving_starts_at"]) for r in revoked_by_decision if r.get("saving_starts_at"))
+
+    return {
+        "generated": now.isoformat(),
+        "last_import": _ai_last_import(conn),
+        "summary": {
+            "open_seats": len(open_seats),
+            "open_money_month": round(sum(r["seat_cost"] or 0 for r in open_seats), 2),
+            "waiting": sum(1 for r in flagged if r["state"] == "waiting"),
+            "escalated": sum(1 for r in flagged if r["state"] == "escalated"),
+            "confirmed": sum(1 for r in flagged if r["state"] == "confirmed"),
+            "notify_failed": sum(1 for r in flagged if r["state"] == "not_sent"),
+            "renewal": renewal,
+        },
+        # "было 77 мест, стало 70, экономия $315 с 3 октября"
+        "headline": {
+            "seats_before": len(active) + len(revoked_by_decision),
+            "seats_now": len(active),
+            "saving_month": saving_all,
+            "saving_from": starts[0] if starts else None,
+        },
+        "metrics": {
+            "decided": len(decided),
+            "active": len(active),
+            "no_manager": sum(1 for r in active if not r["has_manager"]),
+            "avg_days_to_revoke": round(sum(spans) / len(spans), 1) if spans else None,
+            "saving_counted_month": round(sum(r.get("saving_month") or 0 for r in counted), 2),
+            "zero_90_share": round(sum(1 for r in with_90 if r["usage_90d"] == 0) / len(with_90), 3)
+            if with_90 else None,
+            "zero_90": sum(1 for r in with_90 if r["usage_90d"] == 0),
+            "with_usage": len(with_90),
+        },
+        "buckets": [buckets[k] for k in AI_BUCKET_KEYS],
+    }
+
+
+@app.get("/api/ai-access/buckets")
+def ai_access_buckets(password: str = ""):
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    conn = get_db()
+    out = _ai_seat_report(conn)
+    conn.close()
+    return out
+
+
+@app.get("/api/ai-access/{access_id}/events")
+def ai_access_events(access_id: int, password: str = ""):
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    conn = get_db()
+    rows = [dict(r) for r in conn.execute(
+        "SELECT * FROM ai_access_events WHERE access_id=? ORDER BY id DESC", (access_id,)).fetchall()]
+    conn.close()
+    return {"items": rows}
+
+
+@app.post("/api/ai-access/{access_id}/decision")
+def set_ai_access_decision(access_id: int, data: dict = Body(default={}), password: str = ""):
+    """One endpoint for every row action on the Решения tab.
+
+    keep            reason required → keep_review_due = today + 90
+    propose_revoke  logged, then the manager is notified when known; a sent
+                    DM moves it on to awaiting_manager
+    downgrade       target_plan required; saving_month = the monthly difference
+    revoked         status → revoked; revoked_at (today), saving_starts_at
+                    (the service renewal date) and saving_month (the seat cost)
+                    default when not given
+    confirmed / awaiting_manager  accepted for manual corrections
+    """
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    data = data or {}
+    to = str(data.get("decision") or "").strip()
+    reason = str(data.get("reason") or "").strip()
+    actor = str(data.get("by") or "admin").strip() or "admin"
+    if to not in AI_SEAT_DECISIONS:
+        raise HTTPException(422, f"decision must be one of {', '.join(AI_SEAT_DECISIONS)}")
+    conn = get_db()
+    row = dict(_ai_access_get(conn, access_id))
+    extra = {}
+    if to == "keep" and not reason:
+        conn.close()
+        raise HTTPException(422, "reason is required to keep a seat")
+    if to == "downgrade":
+        target = str(data.get("target_plan") or "").strip()
+        if not target:
+            conn.close()
+            raise HTTPException(422, "target_plan is required for a downgrade")
+        extra["target_plan"] = target
+        extra["saving_month"] = _ai_money("saving_month", data.get("saving_month"))
+        reason = reason or f"→ {target}"
+    if to == "revoked":
+        services = {r["id"]: dict(r) for r in conn.execute("SELECT * FROM ai_services").fetchall()}
+        svc = services.get(row.get("service_id")) or {}
+        revoked_at = str(data.get("revoked_at") or "").strip() or _ai_today()
+        starts = (str(data.get("saving_starts_at") or "").strip()
+                  or str(svc.get("renewal_date") or "").strip() or revoked_at)
+        saving = data.get("saving_month")
+        saving = _ai_money("saving_month", saving) if saving not in (None, "") \
+            else _ai_seat_cost(_ai_access_row(row), services)
+        extra.update({"status": "revoked", "revoked_at": revoked_at, "saving_starts_at": starts,
+                      "saving_month": saving, "revoke_reason": reason or row.get("revoke_reason") or ""})
+    _ai_set_decision(conn, row, to, actor, reason, channel="ui", extra=extra)
+    notify = None
+    if to == "propose_revoke" and data.get("notify", True) is not False:
+        notify = _ai_notify_manager(conn, row, actor)
+    conn.commit()
+    out = _ai_access_row(conn.execute("SELECT * FROM ai_access WHERE id=?", (access_id,)).fetchone())
+    conn.close()
+    return {"ok": True, "item": out, "notify": notify}
+
+
+@app.post("/api/ai-access/{access_id}/approve")
+def approve_ai_access(access_id: int, data: dict = Body(default={}), password: str = ""):
+    """Запросы на доступ → approve: the seat goes live and its decision is keep,
+    with the reason it was granted for."""
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    reason = str((data or {}).get("reason") or "").strip()
+    by = str((data or {}).get("by") or "").strip()
+    if not reason or not by:
+        raise HTTPException(422, "reason and by are required to approve a seat")
+    conn = get_db()
+    row = dict(_ai_access_get(conn, access_id))
+    today = _ai_today()
+    _ai_set_decision(conn, row, "keep", by, reason, channel="ui", extra={
+        "status": "active", "approved_by": by, "approved_at": today,
+        "granted_at": row.get("granted_at") or today,
+    })
+    conn.commit()
+    out = _ai_access_row(conn.execute("SELECT * FROM ai_access WHERE id=?", (access_id,)).fetchone())
+    conn.close()
+    return {"ok": True, "item": out}
+
+
+# ── manager loop ─────────────────────────────────────────────────────────────
+
+def _ai_manager_link(conn, row: dict, response: str) -> str:
+    base = (_get_config_value(conn, "public_base_url") or "").strip().rstrip("/")
+    path = f"/ai-access/respond/{row['id']}?t={row['manager_token']}&r={response}"
+    return f"{base}{path}" if base else path
+
+
+def _ai_notify_manager(conn, row: dict, actor: str = "admin") -> dict:
+    """DM the seat's manager with the numbers and two links (confirm / keep).
+    Never raises: the outcome lands on the row (manager_notify_status) and in
+    the event log, and a failure leaves the seat at propose_revoke so the page
+    can say "уведомление не ушло"."""
+    now = datetime.utcnow().isoformat()
+    email = str(row.get("manager_email") or "").strip().lower()
+
+    def _record(status, error=""):
+        conn.execute("UPDATE ai_access SET manager_notify_status=?, manager_notify_error=? WHERE id=?",
+                     (status, error, row["id"]))
+        row.update({"manager_notify_status": status, "manager_notify_error": error})
+        if status != "sent":
+            _ai_log_seat_event(conn, row["id"], actor, row.get("decision"), row.get("decision"),
+                               f"уведомление не ушло: {error}", "slack")
+        return {"status": status, "error": error}
+
+    try:
+        if not email:
+            return _record("no_manager", "у места не указана почта руководителя")
+        token = (_get_config_value(conn, "slack_bot_token") or "").strip()
+        if not token:
+            return _record("failed", "Slack не настроен (slack_bot_token)")
+        uid = _slack_user_id(token, email, None)
+        if not uid:
+            return _record("failed", f"в Slack нет пользователя {email}")
+        if not row.get("manager_token"):
+            row["manager_token"] = secrets.token_urlsafe(24)
+            conn.execute("UPDATE ai_access SET manager_token=? WHERE id=?", (row["manager_token"], row["id"]))
+        r = _ai_access_row(row)
+        services = {s["id"]: dict(s) for s in conn.execute("SELECT * FROM ai_services").fetchall()}
+        cost = _ai_seat_cost(r, services)
+        u = lambda w: "—" if r.get(f"usage_{w}d") is None else str(r.get(f"usage_{w}d"))  # noqa: E731
+        tool = r.get("tool_other") if r.get("tool") == "other" else str(r.get("tool") or "").capitalize()
+        lines = [
+            "*Проверка AI-доступа*",
+            f"*{r['person_name']}* ({r['person_email']}) · {tool}{' · ' + r['plan'] if r.get('plan') else ''}"
+            + (f" · ${cost:,.2f}/мес" if cost is not None else ""),
+            f"Обращений за 30 / 60 / 90 дней: *{u(30)} / {u(60)} / {u(90)}*"
+            + (f" (данные на {r['usage_verified_at']})" if r.get("usage_verified_at") else ""),
+            "Место можно снять? Если нужно оставить — напишите, зачем.",
+        ]
+        confirm_url = _ai_manager_link(conn, row, "confirm")
+        keep_url = _ai_manager_link(conn, row, "keep")
+        text = "\n".join(lines)
+        blocks = [{"type": "section", "text": {"type": "mrkdwn", "text": text}}]
+        if confirm_url.startswith("http"):
+            blocks.append({"type": "actions", "elements": [
+                {"type": "button", "style": "danger", "text": {"type": "plain_text", "text": "Снять место"},
+                 "url": confirm_url, "action_id": "ai_seat_confirm"},
+                {"type": "button", "text": {"type": "plain_text", "text": "Оставить"},
+                 "url": keep_url, "action_id": "ai_seat_keep"},
+            ]})
+        else:
+            # Without public_base_url a link is only a path — still say where to answer.
+            text += f"\nОтветить: {confirm_url}"
+            blocks[0]["text"]["text"] = text
+        _slack_post("chat.postMessage", token, {"channel": uid, "text": text, "blocks": blocks})
+        conn.execute("UPDATE ai_access SET manager_notified_at=?, manager_response='', "
+                     "manager_response_at='', escalated_at='' WHERE id=?", (now, row["id"]))
+        row.update({"manager_notified_at": now, "manager_response": "", "manager_response_at": "",
+                    "escalated_at": ""})
+        _record("sent")
+        if row.get("decision") != "awaiting_manager":
+            _ai_set_decision(conn, row, "awaiting_manager", actor,
+                             f"Slack DM → {email}", channel="slack")
+        return {"status": "sent", "error": ""}
+    except Exception as ex:  # a Slack outage must never break the decision
+        return _record("failed", str(ex)[:300])
+
+
+@app.post("/api/ai-access/{access_id}/notify-manager")
+def notify_ai_access_manager(access_id: int, data: dict = Body(default={}), password: str = ""):
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    conn = get_db()
+    row = dict(_ai_access_get(conn, access_id))
+    actor = str((data or {}).get("by") or "admin")
+    if row.get("decision") not in ("propose_revoke", "awaiting_manager"):
+        _ai_set_decision(conn, row, "propose_revoke", actor, "отправлено руководителю", channel="ui")
+    result = _ai_notify_manager(conn, row, actor)
+    conn.commit()
+    out = _ai_access_row(conn.execute("SELECT * FROM ai_access WHERE id=?", (access_id,)).fetchone())
+    conn.close()
+    return {"ok": result["status"] == "sent", "notify": result, "item": out}
+
+
+def _ai_manager_auth(row, token: str, password: str):
+    if password and password == ADMIN_PASSWORD:
+        return "admin"
+    stored = str(row["manager_token"] or "")
+    if stored and token and hmac.compare_digest(stored, str(token)):
+        return "manager"
+    raise HTTPException(403, "Ссылка недействительна")
+
+
+@app.get("/api/ai-access/{access_id}/manager-view")
+def ai_access_manager_view(access_id: int, t: str = "", password: str = ""):
+    """What the manager's link shows: only this seat, only what the decision
+    needs. Authorised by the one-time token from the DM (or the admin pw)."""
+    conn = get_db()
+    raw = _ai_access_get(conn, access_id)
+    _ai_manager_auth(raw, t, password)
+    r = _ai_access_row(raw)
+    services = {s["id"]: dict(s) for s in conn.execute("SELECT * FROM ai_services").fetchall()}
+    cost = _ai_seat_cost(r, services)
+    conn.close()
+    keys = ("id", "person_name", "person_email", "department", "manager_name", "tool", "tool_other",
+            "plan", "usage_verified_at", "decision", "manager_response", "manager_response_at",
+            "status") + _AI_USAGE_COLS
+    return {**{k: r.get(k) for k in keys}, "seat_cost": cost}
+
+
+@app.post("/api/ai-access/{access_id}/manager-response")
+def ai_access_manager_response(access_id: int, data: dict = Body(default={}),
+                               t: str = "", password: str = ""):
+    """confirm → decision confirmed (the seat is then removed and marked Снято);
+    keep → decision keep with the manager's reason, review in 90 days."""
+    data = data or {}
+    response = str(data.get("response") or "").strip()
+    reason = str(data.get("reason") or "").strip()
+    if response not in ("confirm", "keep"):
+        raise HTTPException(422, "response must be confirm or keep")
+    if response == "keep" and not reason:
+        raise HTTPException(422, "reason is required to keep a seat")
+    conn = get_db()
+    raw = _ai_access_get(conn, access_id)
+    who = _ai_manager_auth(raw, data.get("t") or t, password)
+    row = dict(raw)
+    if row.get("status") == "revoked":
+        conn.close()
+        raise HTTPException(409, "Место уже снято")
+    now = datetime.utcnow().isoformat()
+    actor = row.get("manager_name") or row.get("manager_email") or who
+    if who == "admin" and data.get("by"):
+        actor = f"{data['by']} (за руководителя)"
+    _ai_set_decision(
+        conn, row, "confirmed" if response == "confirm" else "keep", actor,
+        reason or "руководитель подтвердил снятие",
+        channel="manager_link" if who == "manager" else "ui",
+        extra={"manager_response": response, "manager_response_at": now,
+               # The link is single-use: a second click cannot flip the answer.
+               "manager_token": ""},
+    )
+    conn.commit()
+    conn.close()
+    return {"ok": True, "decision": row["decision"]}
+
+
+def _run_ai_seat_escalation() -> dict:
+    """Seats waiting on a manager for 5 working days get escalated_at, which
+    the Решения tab shows as "эскалация". The decision itself does not move."""
+    conn = get_db()
+    flagged = 0
+    try:
+        now = datetime.utcnow()
+        for r in conn.execute(
+                "SELECT id, decision, manager_notified_at FROM ai_access WHERE "
+                "decision='awaiting_manager' AND COALESCE(manager_response,'')='' "
+                "AND COALESCE(escalated_at,'')='' AND status='active'").fetchall():
+            if r["manager_notified_at"] and \
+                    _it_working_days_since(r["manager_notified_at"], now) >= AI_ESCALATE_WORKING_DAYS:
+                conn.execute("UPDATE ai_access SET escalated_at=? WHERE id=?", (now.isoformat(), r["id"]))
+                _ai_log_seat_event(conn, r["id"], "scheduler", r["decision"], r["decision"],
+                                   f"эскалация: нет ответа {AI_ESCALATE_WORKING_DAYS} рабочих дней",
+                                   "scheduler")
+                flagged += 1
+        conn.commit()
+    finally:
+        conn.close()
+    return {"escalated": flagged}
+
+
+@app.post("/api/ai-access/escalate")
+def run_ai_seat_escalation(password: str = ""):
+    """The 09:00 UTC job on demand."""
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    return _run_ai_seat_escalation()
+
+
+# ── access requests ──────────────────────────────────────────────────────────
+
+# Mirrors frontend/src/lib/aiTools.js: an IT request that names a known tool.
+_AI_TOOL_WORDS = re.compile(
+    r"\bclaude\b|anthropic|chat\s?gpt|openai|lovable|fireflies|open\s?router|notion|abacus", re.I)
+
+
+@app.get("/api/ai-access/requests")
+def ai_access_requests(password: str = ""):
+    """Запросы на доступ: seats waiting for approval, plus AI access requests
+    filed in IT requests that are not in the register yet."""
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    conn = get_db()
+    now = datetime.utcnow()
+    pending = [_ai_access_row(r, now) for r in conn.execute(
+        "SELECT * FROM ai_access WHERE status='pending' ORDER BY id DESC").fetchall()]
+    known_refs = {str(r["request_ref"] or "").upper() for r in conn.execute(
+        "SELECT request_ref FROM ai_access WHERE COALESCE(request_ref,'')<>''").fetchall()}
+    reqs = {}
+    try:
+        for r in conn.execute(
+                "SELECT * FROM it_requests WHERE kind='access' AND status NOT IN ('rejected') "
+                "ORDER BY id DESC").fetchall():
+            d = dict(r)
+            if d.get("system") == "ai_tools" or _AI_TOOL_WORDS.search(str(d.get("summary") or "")):
+                reqs[str(d["ref"]).upper()] = d
+    except Exception:
+        conn.rollback()  # IT requests table missing on a fresh DB — nothing to add
+    for p in pending:
+        req = reqs.get(str(p.get("request_ref") or "").upper())
+        p["requested_by"] = (req or {}).get("requester_email") or ""
+        p["request_summary"] = (req or {}).get("summary") or ""
+    unregistered = [
+        {k: d.get(k) for k in ("id", "ref", "requester_email", "requester_slack", "department",
+                               "summary", "business_value", "status", "created_at", "system")}
+        for ref, d in reqs.items() if ref not in known_refs
+    ]
+    conn.close()
+    return {"pending": pending, "requests": unregistered}
+
+
+# ── usage import (Claude → Analytics → Members export) ───────────────────────
+
+_AI_IMPORT_KIND = (("chats", re.compile(r"chat")), ("cowork", re.compile(r"cowork|co work")),
+                   ("code", re.compile(r"\bcode|claude code")), ("total", re.compile(r"total|all|sum|итого|всего")))
+
+
+def _ai_import_columns(headers) -> dict:
+    """Map export headers onto register fields. Tolerant on purpose: the audit
+    sheet and the Analytics export spell them differently ("Chats (30d)",
+    "chats_30", "Code 30 days"), so a header is read for its window number and
+    its kind rather than matched exactly."""
+    cols = {}
+    for h in headers:
+        n = re.sub(r"[^a-zа-я0-9]+", " ", str(h or "").lower()).strip()
+        if not n:
+            continue
+        w = re.search(r"(?<!\d)(30|60|90)(?!\d)", n)
+        if w:
+            kind = next((k for k, rx in _AI_IMPORT_KIND if rx.search(n)), "total")
+            col = f"usage_{w.group(1)}d" if kind == "total" else f"usage_{kind}_{w.group(1)}d"
+            cols.setdefault(col, h)
+        elif "mail" in n or "почта" in n:
+            cols.setdefault("person_email", h)
+        elif "role" in n or "роль" in n:
+            cols.setdefault("role", h)
+        elif re.search(r"\bplan\b|seat|tier|тариф|license", n):
+            cols.setdefault("plan", h)
+        elif "name" in n or "имя" in n or n in ("member", "user", "сотрудник"):
+            cols.setdefault("person_name", h)
+    return cols
+
+
+def _ai_parse_int(v):
+    s = str(v if v is not None else "").strip().replace(",", "").replace(" ", "")
+    if s in ("", "-", "—"):
+        return None
+    try:
+        return max(0, int(float(s)))
+    except ValueError:
+        return None
+
+
+async def _ai_import_payload(request: Request):
+    """The CSV text and its filename, from multipart (field `file`), a raw
+    text/csv body, or JSON {csv, filename}. Parsed with the stdlib so the
+    endpoint needs no extra dependency."""
+    ctype = request.headers.get("content-type", "")
+    body = await request.body()
+    if "multipart/form-data" in ctype:
+        import email.parser
+        import email.policy
+        msg = email.parser.BytesParser(policy=email.policy.default).parsebytes(
+            b"Content-Type: " + ctype.encode() + b"\r\n\r\n" + body)
+        for part in msg.iter_parts():
+            if part.get_filename() or part.get_param("name", header="content-disposition") == "file":
+                raw = part.get_payload(decode=True) or b""
+                return raw.decode("utf-8-sig", errors="replace"), part.get_filename() or "upload.csv"
+        raise HTTPException(422, "multipart body has no file field")
+    if "application/json" in ctype:
+        data = json_lib.loads(body or b"{}")
+        return str(data.get("csv") or ""), str(data.get("filename") or "import.csv")
+    return body.decode("utf-8-sig", errors="replace"), "import.csv"
+
+
+@app.post("/api/ai-access/import")
+async def import_ai_usage(request: Request, password: str = "", service_id: int = 0,
+                          dry_run: bool = False, as_of: str = ""):
+    """Load a usage export. Rows match register seats by email (case-
+    insensitive) within the service; matched seats get their usage, plan,
+    role, usage_verified_at and usage_source updated. The response is the diff
+    the page shows — matched, new people, seats missing from the export (likely
+    already removed) and seats whose 30-day usage dropped to zero. dry_run
+    returns the same diff and writes nothing."""
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    text, filename = await _ai_import_payload(request)
+    if not text.strip():
+        raise HTTPException(422, "the file is empty")
+    sample = text[:4096]
+    try:
+        dialect = csv.Sniffer().sniff(sample, delimiters=",;\t")
+    except csv.Error:
+        dialect = csv.excel
+    reader = csv.DictReader(io.StringIO(text), dialect=dialect)
+    cols = _ai_import_columns(reader.fieldnames or [])
+    if "person_email" not in cols:
+        raise HTTPException(422, f"no email column found in: {', '.join(reader.fieldnames or [])}")
+    usage_cols = [c for c in cols if c.startswith("usage_")]
+
+    conn = get_db()
+    services = {s["id"]: dict(s) for s in conn.execute("SELECT * FROM ai_services").fetchall()}
+    if service_id and service_id not in services:
+        conn.close()
+        raise HTTPException(404, "Service not found")
+    svc = services.get(service_id) or next(
+        (s for s in services.values() if _ai_tool_matches(s["name"], "claude")), None)
+    svc_name = svc["name"] if svc else "Claude"
+    seats = [dict(r) for r in conn.execute("SELECT * FROM ai_access").fetchall()]
+    in_scope = [r for r in seats if (svc and r.get("service_id") == svc["id"])
+                or (not r.get("service_id") and _ai_tool_matches(svc_name, r["tool"], r.get("tool_other")))]
+    by_email = {}
+    for r in sorted(in_scope, key=lambda r: (r["status"] != "active", r["id"])):
+        by_email.setdefault(str(r["person_email"] or "").strip().lower(), r)
+
+    now = datetime.utcnow()
+    verified = as_of.strip()[:10] or now.date().isoformat()
+    matched, new, dropped, seen, total = [], [], [], set(), 0
+    for line in reader:
+        email = str(line.get(cols["person_email"]) or "").strip().lower()
+        if not email or "@" not in email:
+            continue
+        total += 1
+        values = {c: _ai_parse_int(line.get(h)) for c, h in cols.items() if c.startswith("usage_")}
+        for meta in ("plan", "role", "person_name"):
+            if meta in cols:
+                values[meta] = str(line.get(cols[meta]) or "").strip()
+        seat = by_email.get(email)
+        if not seat:
+            new.append({"email": email, "name": values.get("person_name", ""),
+                        "plan": values.get("plan", ""), "role": values.get("role", ""),
+                        "usage_30d": values.get("usage_30d"), "usage_90d": values.get("usage_90d")})
+            continue
+        seen.add(seat["id"])
+        before = _ai_access_row(seat)
+        upd = {c: values[c] for c in usage_cols}
+        # A total the export does not carry is recomputed from the split on read.
+        for w in AI_USAGE_WINDOWS:
+            if f"usage_{w}d" not in cols and any(f"usage_{k}_{w}d" in cols for k in AI_USAGE_KINDS):
+                upd[f"usage_{w}d"] = None
+        for meta in ("plan", "role"):
+            if values.get(meta):
+                upd[meta] = values[meta]
+        upd.update({"usage_verified_at": verified, "usage_source": f"{svc_name} export · {filename}",
+                    "updated_at": now.isoformat()})
+        after = _ai_access_row({**seat, **upd})
+        item = {"id": seat["id"], "name": seat["person_name"], "email": email,
+                "before_30d": before.get("usage_30d"), "after_30d": after.get("usage_30d"),
+                "before_90d": before.get("usage_90d"), "after_90d": after.get("usage_90d")}
+        matched.append(item)
+        if (before.get("usage_30d") or 0) > 0 and after.get("usage_30d") == 0:
+            dropped.append(item)
+        if not dry_run:
+            sets = ", ".join(f"{k}=?" for k in upd)
+            conn.execute(f"UPDATE ai_access SET {sets} WHERE id=?", (*upd.values(), seat["id"]))
+    missing = [{"id": r["id"], "name": r["person_name"], "email": r["person_email"],
+                "plan": r.get("plan") or "", "status": r["status"]}
+               for r in in_scope if r["status"] == "active" and r["id"] not in seen]
+    diff = {"matched": matched, "new": new, "missing": missing, "dropped_to_zero": dropped,
+            "columns": cols, "unmapped": [h for h in (reader.fieldnames or []) if h not in cols.values()]}
+    result = {"ok": True, "dry_run": dry_run, "service": svc_name, "filename": filename,
+              "as_of": verified, "rows_total": total, "rows_matched": len(matched),
+              "rows_new": len(new), "rows_missing": len(missing), **diff}
+    if not dry_run:
+        cur = conn.execute(
+            "INSERT INTO ai_seat_imports (created_at, service, rows_total, rows_matched, rows_new, "
+            "rows_missing, note, diff_json) VALUES (?,?,?,?,?,?,?,?)",
+            (now.isoformat(), svc_name, total, len(matched), len(new), len(missing),
+             f"{filename} · данные на {verified}", json_lib.dumps(diff, ensure_ascii=False)),
+        )
+        result["import_id"] = cur.lastrowid
+        conn.commit()
+        _ai_mark_duplicates(conn)
+    conn.close()
+    return result
+
+
+@app.get("/api/ai-access/imports")
+def list_ai_seat_imports(password: str = "", limit: int = 10):
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    conn = get_db()
+    rows = [dict(r) for r in conn.execute(
+        "SELECT * FROM ai_seat_imports ORDER BY id DESC LIMIT ?", (max(1, min(limit, 100)),)).fetchall()]
+    conn.close()
+    for r in rows:
+        try:
+            r["diff"] = json_lib.loads(r.pop("diff_json") or "{}")
+        except ValueError:
+            r["diff"] = {}
+    return {"items": rows}
 
 
 # ── AI subscriptions (/ai-access → Сервисы) ──────────────────────────────────
