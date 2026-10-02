@@ -86,7 +86,7 @@ Key helpers:
 
 **SQLite/PostgreSQL tables**:
 `team_members`, `dev_metrics`, `support_metrics`, `docs_metrics`, `score_rules`, `config`, `ai_usage_cache`, `weekly_tasks`, `sync_log`, `api_key_mapping`, `ai_usage`, `daily_reports`,
-`monthly_review_meta`, `monthly_review_summary`, `monthly_review_engineers`, `monthly_review_tasks`, `ai_access`
+`monthly_review_meta`, `monthly_review_summary`, `monthly_review_engineers`, `monthly_review_tasks`, `ai_access`, `ai_access_events`, `ai_seat_imports`, `ai_services`, `ai_risks`
 
 **Key endpoints**:
 
@@ -437,6 +437,70 @@ it (name, department, ref, justification).
 system added for this), or any system whose summary names a known tool
 (`frontend/src/lib/aiTools.js`), shows "Add to AI access register" on the triage
 panel; it creates a `pending` row and the button becomes "✓ In the register".
+
+### Seat decisions (Решения — the default tab)
+
+The page's job is one monthly question: who has a paid AI seat and does not use
+it. Tabs, in this order: **Решения** · **Все места** (the register, for lookup) ·
+**Запросы на доступ** (pending seats + AI access IT requests not yet registered) ·
+**Сервисы** · **Риски** (the service KPI cards live inside Сервисы).
+Frontend: `pages/aiRegistry/DecisionsTab.jsx`, `RequestsTab.jsx`, `ImportDialog.jsx`;
+the manager's landing page is `pages/AIAccessRespond.jsx` at
+`/ai-access/respond/:id?t=…` (public, token-protected, one seat only).
+
+**Usage columns.** Stored as `usage_{30,60,90}d` + `usage_{chats,cowork,code}_{30,60,90}d`;
+the audit-sheet spellings `usage_total_30`, `usage_chats_30` … are accepted as
+aliases on write and echoed on read — one storage, two names. Also `role`,
+`usage_source`, `usage_verified_at`.
+
+**Buckets** (`_ai_bucket`, `GET /api/ai-access/buckets`): every `status='active'`
+seat lands in the first that matches — `duplicate` (same display name, different
+email; `duplicate_of` set on the newer seat, recomputed on every read) →
+`revoke` (90d = 0) → `ask_manager` (30d = 0, 90d > 0) → `low_use` (30d 1–3) →
+`downgrade` (plan names an upper tier — `AI_UPPER_TIERS` premium/max/enterprise —
+and 30d < 50 or no Code and no Cowork) → `role_mismatch` (Admin/Owner, 90d < 10) →
+`no_data` (no usage loaded — **null is never read as zero**) → `ok`. Money per seat
+= the service's `cost_month / seats_billed`, else the seat's own `cost_month`.
+The response also carries `summary` (open seats + money, waiting / escalated /
+not-sent counts, nearest renewal), `headline` ("было N мест, стало M, экономия $X
+с <date>": before = active + seats revoked through a decision), `metrics` and
+`last_import`.
+
+**Decisions** — `decision` ∈ `keep | propose_revoke | awaiting_manager | confirmed |
+revoked | downgrade`, validated in the app. **Only `_ai_set_decision` writes it**,
+and it always inserts an `ai_access_events` row (actor, from, to, reason, channel
+`ui | slack | manager_link | scheduler`); `PATCH /api/ai-access/{id}` refuses
+`decision`. `POST /api/ai-access/{id}/decision` is the one row-action endpoint:
+`keep` needs a reason and sets `keep_review_due` = +90 days (past it, the seat is
+open again); `downgrade` needs `target_plan` and stores `saving_month`; `revoked`
+sets `status='revoked'` with `revoked_at`, `saving_starts_at` (default: the
+service's renewal date) and `saving_month` (default: the seat cost);
+`propose_revoke` also notifies the manager. Rejecting a *pending* request is not
+a decision (it was never a paid seat) — only an event. `POST …/approve` sets
+`active` + `decision=keep` with the reason.
+
+**Manager loop.** `_ai_notify_manager` DMs `manager_email` (Slack id via the
+existing `_slack_user_id` lookup) with person, tool, plan, cost, 30/60/90 and two
+URL buttons to `/ai-access/respond/{id}?t=<manager_token>` — absolute only when
+`public_base_url` is configured. Sent → `awaiting_manager`; any failure (no
+manager email, no Slack, user not found, API error) leaves `propose_revoke`,
+records `manager_notify_status`/`_error` and an event, and the tab shows
+"уведомление не ушло". `POST …/manager-response {response: confirm|keep, reason}`
+takes the token (single-use — cleared on answer) or the admin password (recording
+an answer given in chat). `_run_ai_seat_escalation` (09:00 UTC, or
+`POST /api/ai-access/escalate`) stamps `escalated_at` after 5 working days without
+an answer; re-notifying clears it. `manager_token` is never returned by listings.
+
+**Usage import.** `POST /api/ai-access/import?service_id=&dry_run=&as_of=` takes
+multipart (`file`), raw `text/csv` or JSON `{csv, filename}` — parsed with the
+stdlib, no `python-multipart` dependency. Headers are read by meaning (email,
+name, role, plan/seat/tier, and chats/cowork/code/total + 30/60/90), rows match
+seats of that service by email case-insensitively, and the response is the diff:
+`matched`, `new` (not in the register — reported, not created), `missing` (active
+seats absent from the export), `dropped_to_zero` (30d went from > 0 to 0). A real
+run writes `ai_seat_imports` (counts + `diff_json`; `note` carries
+"данные на YYYY-MM-DD") — the page shows that date next to every usage column.
+`GET /api/ai-access/imports` lists them.
 
 ### Subscriptions (`ai_services`) and risks (`ai_risks`)
 

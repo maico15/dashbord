@@ -15,7 +15,7 @@ export const EMPTY_PERSON = {
   employment: 'active', tool: 'claude', tool_other: '', plan: '', cost_month: '',
   cost_note: '', justification: '', approved_by: '', approved_at: '', request_ref: '',
   granted_at: '', last_used_at: '', last_verified_at: '', status: 'pending',
-  revoked_at: '', revoke_reason: '', notes: '', service_id: '', usage_note: '',
+  revoked_at: '', revoke_reason: '', notes: '', service_id: '', usage_note: '', role: '',
   ...Object.fromEntries(USAGE_WINDOWS.flatMap((w) => [
     [`usage_${w}d`, ''], ...USAGE_KINDS.map((k) => [`usage_${k.key}_${w}d`, '']),
   ])),
@@ -27,6 +27,8 @@ export const PEOPLE_FLAGS = {
   no_approval: { label: 'без согласования', test: (r) => r.flag_no_approval },
   terminated:  { label: 'уволен, доступ жив', test: (r) => r.flag_terminated },
   unused:      { label: 'не заходил 30+ дней', test: (r) => r.flag_unused },
+  no_manager:  { label: 'без руководителя', test: (r) => r.status === 'active'
+    && (!r.manager_name || /^\s*(-|—|n\/?a|не найден[оа]?|not found|неизвестно)\s*$/i.test(r.manager_name)) && !r.manager_email },
   unlinked:    { label: 'не привязан к подписке', test: (r) => !r.service_id && r.status !== 'revoked' },
 }
 
@@ -64,7 +66,26 @@ export function ServiceChip({ service, onClick }) {
 
 /* ── table ─────────────────────────────────────────────────────────────── */
 
-export function PeopleTable({ rows, services, focusId, onOpen, onEdit, onApprove, onRevoke, onOpenService }) {
+export const DECISION_LABEL = {
+  keep: 'оставить', propose_revoke: 'предложено снять', awaiting_manager: 'ждёт руководителя',
+  confirmed: 'согласовано снять', revoked: 'снято', downgrade: 'понизить тариф',
+}
+
+export function DecisionPill({ row }) {
+  if (!row.decision) return <span className="aia-muted">—</span>
+  return (
+    <span className={`aia-state aia-state-d-${row.decision}${row.escalated_at ? ' aia-state-escalated' : ''}`}>
+      {row.escalated_at ? 'эскалация' : DECISION_LABEL[row.decision] || row.decision}
+    </span>
+  )
+}
+
+/** "данные на 30 сент." — so a stale number is never read as current. */
+export function UsageAsOf({ date }) {
+  return <span className="aia-asof">{date ? `данные на ${fmtDate(date)}` : 'нет выгрузки'}</span>
+}
+
+export function PeopleTable({ rows, services, focusId, lastImportAt, buckets = {}, onOpen, onEdit, onApprove, onRevoke, onOpenService }) {
   const byId = Object.fromEntries(services.map((s) => [s.id, s]))
   const focusRef = useRef(null)
   useEffect(() => {
@@ -80,7 +101,8 @@ export function PeopleTable({ rows, services, focusId, onOpen, onEdit, onApprove
           <th>Инструмент</th>
           <th>Сервис</th>
           <th className="aia-num">$/мес</th>
-          <th><span className="aia-usage-head">Использование</span>30 / 60 / 90</th>
+          <th><span className="aia-usage-head">Использование · <UsageAsOf date={lastImportAt} /></span>30 / 60 / 90</th>
+          <th>Решение</th>
           <th>Согласовано</th>
           <th>Последний вход</th>
           <th>Статус</th>
@@ -122,7 +144,16 @@ export function PeopleTable({ rows, services, focusId, onOpen, onEdit, onApprove
               <td data-label="$/мес" className="aia-num">
                 {r.cost_month != null ? money(r.cost_month, 2) : <span className="aia-muted">{r.cost_note || '—'}</span>}
               </td>
-              <td data-label="30/60/90"><Usage row={r} onOpen={(w) => onOpen(r.id, w)} /></td>
+              <td data-label="30/60/90">
+                <Usage row={r} onOpen={(w) => onOpen(r.id, w)} />
+                {r.usage_verified_at && r.usage_verified_at !== lastImportAt && (
+                  <div className="aia-muted aia-tiny">на {fmtDate(r.usage_verified_at)}</div>
+                )}
+              </td>
+              <td data-label="Решение">
+                <DecisionPill row={r} />
+                {buckets[r.id] && buckets[r.id] !== 'ok' && <div className="aia-muted aia-tiny">{BUCKET_LABEL[buckets[r.id]]}</div>}
+              </td>
               <td data-label="Согласовано">
                 {r.flag_no_approval ? (
                   <span className="aia-missing">нет записи</span>
@@ -166,8 +197,23 @@ export function PeopleTable({ rows, services, focusId, onOpen, onEdit, onApprove
 
 /* ── person panel (read) ───────────────────────────────────────────────── */
 
-export function PersonPanel({ row: r, service, window: win, onClose, onEdit, onApprove, onRevoke, onOpenService }) {
+export const BUCKET_LABEL = {
+  duplicate: 'дубль', revoke: 'ноль за 90 дней', ask_manager: 'ноль за 30 дней', low_use: 'почти не пользуется',
+  downgrade: 'кандидат на понижение', role_mismatch: 'роль не по делу', no_data: 'нет данных', ok: 'в порядке',
+}
+
+const CHANNEL_LABEL = { ui: 'страница', slack: 'Slack', manager_link: 'ссылка руководителя', scheduler: 'расписание', import: 'выгрузка' }
+
+export function PersonPanel({ row: r, pw, service, window: win, onClose, onEdit, onApprove, onRevoke, onOpenService }) {
   const usageRef = useRef(null)
+  const [events, setEvents] = useState(null)
+  useEffect(() => {
+    let alive = true
+    api.get(`/ai-access/${r.id}/events?password=${encodeURIComponent(pw)}`)
+      .then((d) => { if (alive) setEvents(d.items || []) })
+      .catch(() => { if (alive) setEvents([]) })
+    return () => { alive = false }
+  }, [r.id, r.decision, r.updated_at, pw])
   useEffect(() => {
     if (win && usageRef.current) {
       usageRef.current.scrollIntoView({ block: 'start' })
@@ -193,7 +239,7 @@ export function PersonPanel({ row: r, service, window: win, onClose, onEdit, onA
         )}
 
         <section className="aia-block" ref={usageRef}>
-          <h3>Использование</h3>
+          <h3>Использование · <UsageAsOf date={r.usage_verified_at} /></h3>
           <table className="aia-ugrid">
             <thead>
               <tr>
@@ -215,9 +261,37 @@ export function PersonPanel({ row: r, service, window: win, onClose, onEdit, onA
           <div style={{ marginTop: 10 }}>
             <Fact label="Последний вход">{r.last_used_at ? fmtDate(r.last_used_at) : <span className="aia-muted">нет данных</span>}</Fact>
             <Fact label="Проверено">{r.last_verified_at ? fmtDate(r.last_verified_at) : <span className="aia-muted">—</span>}</Fact>
+            {r.usage_source && <Fact label="Источник">{r.usage_source}</Fact>}
+            {r.role && <Fact label="Роль">{r.role}</Fact>}
             <Fact label="Аудит">
               {r.usage_note ? <span className="aia-note">{r.usage_note}</span> : <span className="aia-muted">заметки нет</span>}
             </Fact>
+          </div>
+        </section>
+
+        <section className="aia-block">
+          <h3>Решение</h3>
+          <Fact label="Сейчас"><DecisionPill row={r} />{r.decision_at && <span className="aia-muted"> · {fmtDate(r.decision_at)}{r.decision_by ? ` · ${r.decision_by}` : ''}</span>}</Fact>
+          {r.decision_reason && <Fact label="Почему"><span className="aia-note">{r.decision_reason}</span></Fact>}
+          {r.keep_review_due && r.decision === 'keep' && <Fact label="Пересмотр">{fmtDate(r.keep_review_due)}</Fact>}
+          {r.manager_notified_at && <Fact label="Руководителю">{fmtDate(r.manager_notified_at)} · {r.manager_notify_status === 'sent' ? 'отправлено' : 'не ушло'}</Fact>}
+          {r.manager_notify_status && r.manager_notify_status !== 'sent' && r.manager_notify_error && <Fact label="Ошибка">{r.manager_notify_error}</Fact>}
+          {r.saving_month != null && <Fact label="Экономия">{money(r.saving_month, 2)}/мес{r.saving_starts_at ? ` с ${fmtDate(r.saving_starts_at)}` : ''}</Fact>}
+          <div className="aia-history">
+            <div className="aia-factlabel">История</div>
+            {events == null ? <div className="aia-muted">Загружаю…</div> : !events.length ? <div className="aia-muted">Решений ещё не было</div> : (
+              <ul>
+                {events.map((e) => (
+                  <li key={e.id}>
+                    <span className="aia-muted">{fmtDate(e.created_at)}</span>{' '}
+                    {e.from_decision === e.to_decision ? '' : `${DECISION_LABEL[e.from_decision] || 'нет решения'} → `}
+                    <b>{DECISION_LABEL[e.to_decision] || e.to_decision || '—'}</b>
+                    {e.reason && ` · ${e.reason}`}
+                    <span className="aia-muted"> · {e.actor}{e.channel ? `, ${CHANNEL_LABEL[e.channel] || e.channel}` : ''}</span>
+                  </li>
+                ))}
+              </ul>
+            )}
           </div>
         </section>
 
@@ -339,6 +413,9 @@ export function PersonForm({ initial, services, onClose, onSave, onDelete }) {
           {hint && <div className="itr-hint aia-prefill">{hint}</div>}
           <div className="itr-row">
             {field('department', 'Отдел')}
+            {field('role', 'Роль в сервисе', { placeholder: 'User, Admin, Owner' })}
+          </div>
+          <div className="itr-row">
             <label className="itr-field aia-f">
               <span className="itr-label">Занятость</span>
               <select className="itr-select" value={form.employment} onChange={set('employment')}>

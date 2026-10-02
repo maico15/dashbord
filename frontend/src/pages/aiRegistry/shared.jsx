@@ -319,6 +319,68 @@ export const CSS = `
 .aia-dialog{width:min(440px,100%);margin:0}
 .aia-dialog-title{margin:0 0 4px;font-size:18px;font-weight:700}
 
+/* ── Решения ── */
+.aia-sum{padding:14px 16px;margin-bottom:10px}
+.aia-sum-line{font-size:17px;line-height:1.4}
+.aia-sum-line b{font-variant-numeric:tabular-nums}
+.aia-sum-sub{display:flex;flex-wrap:wrap;gap:4px 16px;font-size:13px;margin-top:4px;color:var(--ios-label2,#636366)}
+.aia-sum-import{display:flex;flex-wrap:wrap;gap:8px 12px;align-items:center;justify-content:space-between;margin-top:10px;
+  padding-top:10px;border-top:0.5px solid var(--ios-sep,#E5E5EA)}
+.aia-notice{display:flex;gap:10px;align-items:center;justify-content:space-between;margin:0 0 12px;padding:9px 12px;border-radius:10px;
+  background:var(--ios-blue-tint,#D6E6FF);color:var(--ios-blue-text,#0A3D91);font-size:13.5px}
+.aia-notice button{border:none;background:none;color:inherit;font-size:20px;cursor:pointer;line-height:1}
+.aia-bucket{padding:0;margin-bottom:12px;overflow:hidden;border-left:4px solid var(--ios-sep,#E5E5EA)}
+.aia-bucket-duplicate,.aia-bucket-revoke{border-left-color:#FF3B30}
+.aia-bucket-ask_manager,.aia-bucket-low_use{border-left-color:var(--ios-orange,#FF9500)}
+.aia-bucket-downgrade,.aia-bucket-role_mismatch{border-left-color:var(--ios-blue,#007AFF)}
+.aia-bucket-head{display:flex;gap:12px;justify-content:space-between;align-items:flex-start;padding:12px 16px;
+  border-bottom:0.5px solid var(--ios-sep,#E5E5EA)}
+.aia-bucket-head h3{margin:0;font-size:16px;font-weight:700}
+.aia-bucket-nums{text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums}
+.aia-bucket-empty{font-size:13px;color:var(--ios-label3,#6D6D72);padding:6px 4px 10px}
+.aia-seats{display:flex;flex-direction:column}
+.aia-seat{display:grid;grid-template-columns:minmax(150px,1.3fr) minmax(120px,1fr) minmax(90px,.8fr) 110px minmax(120px,1fr) auto;
+  gap:10px 14px;align-items:start;padding:10px 16px;border-bottom:0.5px solid var(--ios-sep,#E5E5EA);font-size:13px}
+.aia-seat:last-child{border-bottom:none}
+.aia-seat-dim{opacity:.6}
+.aia-seat-busy{opacity:.55;pointer-events:none}
+.aia-seat > *{min-width:0;overflow-wrap:anywhere}
+.aia-seat-actions{display:flex;flex-wrap:wrap;gap:5px;justify-content:flex-end}
+.aia-seat-actions .itr-btn{white-space:nowrap;padding:4px 10px;font-size:12px}
+.aia-tiny{font-size:10.5px}
+.aia-done-toggle{border:none;background:none;font:inherit;font-size:12.5px;color:var(--ios-blue,#007AFF);cursor:pointer;
+  padding:8px 16px;text-align:left}
+.aia-state{display:inline-block;font-size:11.5px;font-weight:600;padding:2px 8px;border-radius:999px;
+  background:var(--ios-bg,#F2F2F7);color:var(--ios-label2,#636366)}
+.aia-state-waiting,.aia-state-d-awaiting_manager{background:var(--ios-blue-tint,#D6E6FF);color:var(--ios-blue-text,#0A3D91)}
+.aia-state-escalated,.aia-state-not_sent,.aia-state-d-propose_revoke{background:#FFE8E6;color:#9B1C15}
+.aia-state-confirmed,.aia-state-d-confirmed{background:var(--ios-orange-tint,#FFE5CC);color:var(--ios-orange-text,#7A3E00)}
+.aia-state-kept,.aia-state-d-keep,.aia-state-downgrade,.aia-state-d-downgrade{background:var(--ios-green-tint,#E3F6E8);color:var(--ios-green-text,#1E7A3A)}
+.aia-state-revoked,.aia-state-d-revoked{background:var(--ios-sep,#E5E5EA);color:var(--ios-label2,#636366)}
+.aia-asof{text-transform:none;letter-spacing:0;font-weight:500}
+.aia-selects{display:flex;flex-wrap:wrap;gap:8px}
+.aia-selects .itr-select{width:auto;min-width:150px}
+.aia-radio{display:flex;gap:8px;align-items:center;font-size:14px;padding:4px 0;cursor:pointer}
+.aia-history ul{list-style:none;margin:6px 0 0;padding:0;font-size:13px}
+.aia-history li{padding:4px 0;border-bottom:0.5px solid var(--ios-sep,#E5E5EA)}
+.aia-history li:last-child{border-bottom:none}
+.aia-history{padding-top:6px}
+.aia-difflist{margin:0;padding-left:18px;font-size:13px;max-height:260px;overflow-y:auto}
+.aia-difflist li{padding:2px 0}
+.aia-difflist-red li::marker{color:#FF3B30}
+.aia-difflist-amber li::marker{color:var(--ios-orange,#FF9500)}
+@media(max-width:1100px){
+  .aia-seat{grid-template-columns:minmax(0,1.3fr) minmax(0,1fr) minmax(0,1fr)}
+  .aia-seat-actions{grid-column:1 / -1;justify-content:flex-start}
+}
+@media(max-width:560px){
+  .aia-seat{grid-template-columns:minmax(0,1fr) minmax(0,1fr);padding:10px 12px}
+  .aia-seat-who{grid-column:1 / -1}
+  .aia-bucket-head{padding:12px}
+  .aia-sum-line{font-size:15.5px}
+  .aia-selects .itr-select{flex:1 1 140px;min-width:0}
+}
+
 @media(max-width:1100px){
   .aia-kpis{grid-template-columns:repeat(2,minmax(0,1fr))}
 }
