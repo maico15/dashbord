@@ -21,11 +21,12 @@ const STATE_TEXT = {
 }
 
 /** "N мест ждут решения · $X в месяц · продление Claude через D дней" */
-export function DecisionSummary({ report, onImport }) {
+export function DecisionSummary({ report, scope, onImport }) {
   const s = report.summary
   const h = report.headline
   const imp = report.last_import
   const r = s.renewal
+  const rc = report.reconcile || {}
   return (
     <section className="itr-card aia-sum">
       <div className="aia-sum-line">
@@ -46,11 +47,23 @@ export function DecisionSummary({ report, onImport }) {
           </span>
         )}
       </div>
+      {/* Сверка: what the invoice bills, what the usage export sees, who is in
+       * the register — for the open service, or summed over all of them. */}
+      <div className="aia-sum-sub aia-reconcile">
+        <span>Оплачено: <b>{rc.seats_billed ?? '—'}</b></span>
+        <span>в выгрузке: <b>{rc.seats_seen ?? '—'}</b></span>
+        <span>в реестре: <b>{rc.seats_in_register ?? 0}</b></span>
+        {rc.gap > 0 && <span className="aia-bad">оплачено сверх видимого: {rc.gap}</span>}
+        {rc.cost_month != null && <span>счёт {money(rc.cost_month)}/мес</span>}
+        {!scope && <span className="aia-muted">сумма по всем сервисам с местами</span>}
+      </div>
       <div className="aia-sum-import">
         <span className="aia-muted">
-          {imp ? `Использование: выгрузка ${imp.service}, данные на ${fmtDate(imp.as_of)} · загружено ${fmtDate(imp.created_at)} · ${imp.rows_matched} совпало, ${imp.rows_new} новых, ${imp.rows_missing} нет в выгрузке` : 'Выгрузок ещё не было — цифры использования из ручного ввода'}
+          {!imp && scope ? `Выгрузок ${scope.name} ещё не было — цифры использования из ручного ввода` : imp ? `Использование: выгрузка ${imp.service}, данные на ${fmtDate(imp.as_of)} · загружено ${fmtDate(imp.created_at)} · ${imp.rows_matched} совпало, ${imp.rows_new} новых, ${imp.rows_missing} нет в выгрузке` : 'Выгрузок ещё не было — цифры использования из ручного ввода'}
         </span>
-        <button type="button" className="itr-btn itr-btn-sm" onClick={onImport}>Загрузить выгрузку</button>
+        <button type="button" className="itr-btn itr-btn-sm" onClick={onImport}>
+          Загрузить выгрузку{scope ? ` ${scope.name}` : ''}
+        </button>
       </div>
     </section>
   )

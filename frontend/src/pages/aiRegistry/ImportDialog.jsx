@@ -26,8 +26,9 @@ async function upload(file, { pw, serviceId, dryRun, asOf }) {
   return JSON.parse(text)
 }
 
-export default function ImportDialog({ pw, services, onClose, onImported }) {
-  const claude = services.find((s) => /claude/i.test(s.name))
+export default function ImportDialog({ pw, services, defaultServiceId, onClose, onImported }) {
+  // The open service tab decides where the export goes; on "Все" it is Claude.
+  const claude = services.find((s) => s.id === defaultServiceId) || services.find((s) => /claude/i.test(s.name))
   const [file, setFile] = useState(null)
   const [serviceId, setServiceId] = useState(claude ? String(claude.id) : '')
   const [asOf, setAsOf] = useState(today())

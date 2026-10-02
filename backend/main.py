@@ -9088,17 +9088,20 @@ def _ai_bucket(r: dict, duplicate: bool) -> str:
 
 
 def _ai_mark_duplicates(conn) -> dict:
-    """Active seats sharing a display name under different emails: the newer
-    seat (higher id) gets duplicate_of = the oldest one. Recomputed on every
-    read, so a resolved duplicate clears itself. Returns {id: duplicate_of}."""
+    """Active seats of the same service sharing a display name under different
+    emails: the newer seat (higher id) gets duplicate_of = the oldest one. A
+    person on Claude and on ChatGPT is two tools, not a duplicate, so the
+    group is (name, service). Recomputed on every read, so a resolved
+    duplicate clears itself. Returns {id: duplicate_of}."""
     rows = conn.execute(
-        "SELECT id, person_name, person_email, duplicate_of FROM ai_access WHERE status='active' "
-        "ORDER BY id").fetchall()
+        "SELECT id, person_name, person_email, duplicate_of, service_id, tool, tool_other "
+        "FROM ai_access WHERE status='active' ORDER BY id").fetchall()
     groups = {}
     for r in rows:
-        key = re.sub(r"\s+", " ", str(r["person_name"] or "").strip().lower())
-        if key:
-            groups.setdefault(key, []).append(r)
+        name = re.sub(r"\s+", " ", str(r["person_name"] or "").strip().lower())
+        where = r["service_id"] or f"{r['tool']}:{str(r['tool_other'] or '').lower()}"
+        if name:
+            groups.setdefault((name, where), []).append(r)
     want = {}
     for seats in groups.values():
         emails = {str(s["person_email"] or "").lower() for s in seats}
@@ -9142,8 +9145,12 @@ def _ai_seat_state(r: dict, today: str) -> str:
     return "open"
 
 
-def _ai_last_import(conn):
-    row = conn.execute("SELECT * FROM ai_seat_imports ORDER BY id DESC LIMIT 1").fetchone()
+def _ai_last_import(conn, service_name: str = ""):
+    if service_name:
+        row = conn.execute("SELECT * FROM ai_seat_imports WHERE service=? ORDER BY id DESC LIMIT 1",
+                           (service_name,)).fetchone()
+    else:
+        row = conn.execute("SELECT * FROM ai_seat_imports ORDER BY id DESC LIMIT 1").fetchone()
     if not row:
         return None
     out = dict(row)
@@ -9153,15 +9160,56 @@ def _ai_last_import(conn):
     return out
 
 
-def _ai_seat_report(conn) -> dict:
+def _ai_slug(name) -> str:
+    """'Claude' → 'claude', 'Abacus.AI' → 'abacus-ai' — the ?service= value."""
+    return re.sub(r"[^a-z0-9а-я]+", "-", str(name or "").lower()).strip("-") or "service"
+
+
+AI_UNLINKED_SERVICE = -1  # service_id filter for seats on no subscription
+
+
+def _ai_service_tabs(rows: list, services: dict) -> list:
+    """One tab per subscription that has at least one live seat (active,
+    pending or to_revoke), plus "Без подписки" when unlinked seats exist, so
+    the tabs always add up to the whole register. `active` is the tab's number."""
+    tabs = {}
+    for r in rows:
+        if r["status"] not in ("active", "pending", "to_revoke"):
+            continue
+        sid = r.get("service_id") if r.get("service_id") in services else AI_UNLINKED_SERVICE
+        t = tabs.setdefault(sid, {"service_id": sid, "active": 0, "seats": 0})
+        t["seats"] += 1
+        t["active"] += r["status"] == "active"
+    out = []
+    for sid, t in tabs.items():
+        if sid == AI_UNLINKED_SERVICE:
+            t.update(name="Без подписки", slug="none")
+        else:
+            t.update(name=services[sid]["name"], slug=_ai_slug(services[sid]["name"]))
+        out.append(t)
+    out.sort(key=lambda t: (t["service_id"] == AI_UNLINKED_SERVICE, -t["active"], t["name"].lower()))
+    return out
+
+
+def _ai_seat_report(conn, service_id: int = 0) -> dict:
     """Buckets + summary + metrics in one pass, so the cards, the line at the
-    top and the strip can never disagree."""
+    top and the strip can never disagree. service_id narrows every number to
+    one subscription (AI_UNLINKED_SERVICE: seats on none; 0: everything)."""
     dups = _ai_mark_duplicates(conn)
     now = datetime.utcnow()
     today = now.date().isoformat()
     services = {r["id"]: _ai_service_row(r) for r in conn.execute("SELECT * FROM ai_services").fetchall()}
     rows = [_ai_access_row(r, now) for r in conn.execute(
         "SELECT * FROM ai_access ORDER BY LOWER(person_name), id").fetchall()]
+    tabs = _ai_service_tabs(rows, services)
+    scope_service = services.get(service_id) if service_id and service_id > 0 else None
+    if service_id == AI_UNLINKED_SERVICE:
+        rows = [r for r in rows if r.get("service_id") not in services]
+    elif service_id:
+        if not scope_service:
+            raise HTTPException(404, "Service not found")
+        rows = [r for r in rows if r.get("service_id") == service_id]
+    in_scope = {r["id"] for r in rows}
     active = [r for r in rows if r["status"] == "active"]
 
     buckets = {k: {"key": k, "title": t, "rule": rule, "count": 0, "open": 0,
@@ -9203,15 +9251,38 @@ def _ai_seat_report(conn) -> dict:
             if days >= 0 and (best is None or days < best["days"]):
                 best = {"service_id": svc["id"], "service": svc["name"], "date": svc["renewal_date"], "days": days}
         return best
-    flagged_services = [services[i] for i in {r.get("service_id") for r in flagged} if i in services]
-    renewal = _renewal(flagged_services) or _renewal(services.values())
+    if scope_service:
+        renewal = _renewal([scope_service])
+    elif service_id == AI_UNLINKED_SERVICE:
+        renewal = None
+    else:
+        flagged_services = [services[i] for i in {r.get("service_id") for r in flagged} if i in services]
+        renewal = _renewal(flagged_services) or _renewal(services.values())
+
+    # Сверка: what the invoice bills vs what the usage export sees vs who is in
+    # the register. For "Все" the sums run over the services that have seats.
+    def _sum(key, svcs):
+        vals = [s.get(key) for s in svcs if s.get(key) is not None]
+        return sum(vals) if vals else None
+    scope_services = [scope_service] if scope_service else (
+        [] if service_id == AI_UNLINKED_SERVICE
+        else [services[t["service_id"]] for t in tabs if t["service_id"] in services])
+    reconcile = {
+        "seats_billed": _sum("seats_billed", scope_services),
+        "seats_seen": _sum("seats_seen", scope_services),
+        "seats_in_register": sum(1 for r in rows if r["status"] in ("active", "to_revoke")),
+        "cost_month": _sum("cost_month", scope_services),
+    }
+    if reconcile["seats_billed"] is not None and reconcile["seats_seen"] is not None:
+        reconcile["gap"] = reconcile["seats_billed"] - reconcile["seats_seen"]
 
     # Metrics strip.
     decided = [r for r in active if r["state"] in ("kept", "downgrade", "confirmed")]
     revoked_by_decision = [r for r in rows if r.get("decision") == "revoked"]
-    events = conn.execute(
+    events = [e for e in conn.execute(
         "SELECT access_id, created_at, to_decision FROM ai_access_events "
         "WHERE to_decision IN ('propose_revoke','revoked') ORDER BY id").fetchall()
+        if e["access_id"] in in_scope]
     proposed, spans = {}, []
     for e in events:
         if e["to_decision"] == "propose_revoke":
@@ -9229,7 +9300,12 @@ def _ai_seat_report(conn) -> dict:
 
     return {
         "generated": now.isoformat(),
-        "last_import": _ai_last_import(conn),
+        "service_id": service_id or 0,
+        "service": ({"id": scope_service["id"], "name": scope_service["name"],
+                     "slug": _ai_slug(scope_service["name"])} if scope_service else None),
+        "service_tabs": tabs,
+        "reconcile": reconcile,
+        "last_import": _ai_last_import(conn, scope_service["name"] if scope_service else ""),
         "summary": {
             "open_seats": len(open_seats),
             "open_money_month": round(sum(r["seat_cost"] or 0 for r in open_seats), 2),
@@ -9262,12 +9338,16 @@ def _ai_seat_report(conn) -> dict:
 
 
 @app.get("/api/ai-access/buckets")
-def ai_access_buckets(password: str = ""):
+def ai_access_buckets(password: str = "", service_id: int = 0):
+    """service_id narrows the whole report to one subscription; 0 or absent
+    is every seat, -1 the seats on no subscription."""
     if password != ADMIN_PASSWORD:
         raise HTTPException(403, "Unauthorized")
     conn = get_db()
-    out = _ai_seat_report(conn)
-    conn.close()
+    try:
+        out = _ai_seat_report(conn, service_id)
+    finally:
+        conn.close()
     return out
 
 

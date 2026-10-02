@@ -1,10 +1,11 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { api } from '../api/client'
 import AppFooter from '../components/AppFooter'
 import PasswordField from '../components/PasswordField'
 import { I18N, readLang } from '../i18n/itRequests'
 import { RequestsStyle, Segmented, Chips } from './itRequestsStyle'
-import { AI_TOOLS } from '../lib/aiTools'
+import { AI_TOOLS, guessAiTool } from '../lib/aiTools'
 import { STATUSES, CSS, Num, money, plural, today, downloadCsv } from './aiRegistry/shared'
 import {
   SERVICE_FILTERS, filterServices, ServicesTable, ServicePanel, ServiceForm, CancelDialog,
@@ -37,13 +38,21 @@ import ImportDialog from './aiRegistry/ImportDialog'
 const PW_TEXT = (I18N[readLang('ru')] || I18N.ru).common
 const APPROVER_KEY = 'ai_access_approver'
 const ACTION_BUCKETS = ['duplicate', 'revoke', 'ask_manager', 'low_use', 'downgrade', 'role_mismatch']
+// ?service= values. Mirrors _ai_slug in backend/main.py.
+const slugify = (name) => String(name || '').toLowerCase().replace(/[^a-z0-9а-я]+/g, '-').replace(/^-+|-+$/g, '') || 'service'
+const DEFAULT_SERVICE = 'claude'
+const UNLINKED = -1
 
 export default function AIAccess() {
   const [pw, setPw] = useState(() => sessionStorage.getItem('admin_pw') || '')
   const [pwInput, setPwInput] = useState('')
   const [pwError, setPwError] = useState('')
 
-  const [people, setPeople] = useState([])
+  // Every seat; `people` below is the slice the open service tab shows.
+  const [allPeople, setPeople] = useState([])
+  const [params, setParams] = useSearchParams()
+  const serviceSlug = params.get('service') || DEFAULT_SERVICE
+  const [scopeId, setScopeId] = useState(null)   // resolved from the slug on load
   const [services, setServices] = useState([])
   const [stats, setStats] = useState(null)
   const [risks, setRisks] = useState([])
@@ -96,17 +105,26 @@ export default function AIAccess() {
     if (!pw) return Promise.resolve()
     const p = encodeURIComponent(pw)
     if (!quiet) setLoading(true)
-    return Promise.all([
-      api.get(`/ai-access?password=${p}`),
-      api.get(`/ai-services?password=${p}`),
-      api.get(`/ai-services/stats?password=${p}`),
-      api.get(`/ai-risks?password=${p}`),
-      api.get(`/ai-access/buckets?password=${p}`),
-      api.get(`/ai-access/requests?password=${p}`),
-    ])
-      .then(([a, s, st, r, b, rq]) => {
+    // The service tab is a slug in the URL; the id it stands for comes from the
+    // subscriptions list, so that is read first. An unknown slug means "Все".
+    return api.get(`/ai-services?password=${p}`)
+      .then((s) => {
+        const list = s.items || []
+        const hit = list.find((x) => slugify(x.name) === serviceSlug)
+        const sid = serviceSlug === 'all' ? 0 : serviceSlug === 'none' ? UNLINKED : hit ? hit.id : 0
+        return Promise.all([
+          Promise.resolve(s), Promise.resolve(sid),
+          api.get(`/ai-access?password=${p}`),
+          api.get(`/ai-services/stats?password=${p}`),
+          api.get(`/ai-risks?password=${p}`),
+          api.get(`/ai-access/buckets?password=${p}&service_id=${sid}`),
+          api.get(`/ai-access/requests?password=${p}`),
+        ])
+      })
+      .then(([s, sid, a, st, r, b, rq]) => {
         setPeople(a.items || [])
         setServices(s.items || [])
+        setScopeId(sid)
         setStats(st)
         setRisks(r.items || [])
         setReport(b)
@@ -118,7 +136,7 @@ export default function AIAccess() {
         else setError(String(e.message || 'Не удалось загрузить реестр'))
       })
       .finally(() => setLoading(false))
-  }, [pw])
+  }, [pw, serviceSlug])
 
   useEffect(() => { load() }, [load])
   useEffect(() => {
@@ -229,7 +247,7 @@ export default function AIAccess() {
   /** Opens the person panel. From the Решения and Запросы tabs it opens in
    * place; from anywhere else it lands on that row in Все места. */
   const openPerson = (id, window = null) => {
-    const row = people.find((r) => r.id === id)
+    const row = allPeople.find((r) => r.id === id)
     if (!row) return
     setSvcPanel(null)
     if (tab !== 'decisions' && tab !== 'requests') {
@@ -269,6 +287,33 @@ export default function AIAccess() {
   }
 
   /* ── derived ─────────────────────────────────────────────────────────── */
+
+  /* ── service scope: the tab row over the whole page ───────────────────── */
+
+  const serviceIds = useMemo(() => new Set(services.map((x) => x.id)), [services])
+  const inScope = useCallback((r) => (
+    !scopeId ? true
+      : scopeId === UNLINKED ? !serviceIds.has(r.service_id)
+        : r.service_id === scopeId
+  ), [scopeId, serviceIds])
+  const people = useMemo(() => allPeople.filter(inScope), [allPeople, inScope])
+  const scopeService = scopeId > 0 ? services.find((x) => x.id === scopeId) : null
+  const serviceTabs = report?.service_tabs || []
+  const pickService = (slug) => {
+    closePanels()
+    const next = new URLSearchParams(params)
+    next.set('service', slug)
+    setParams(next, { replace: true })
+  }
+  const scopedRequests = useMemo(() => ({
+    pending: requests.pending.filter(inScope),
+    // An IT request is not linked to a subscription yet; it shows under the
+    // service its summary names, and always under "Все".
+    requests: !scopeId ? requests.requests : requests.requests.filter((q) => {
+      const key = guessAiTool(q.summary) || (q.system === 'ai_tools' ? 'claude' : '')
+      return scopeService && key && slugify(scopeService.name).startsWith(key)
+    }),
+  }), [requests, inScope, scopeId, scopeService])
 
   const bucketOf = useMemo(() => {
     const out = {}
@@ -314,12 +359,12 @@ export default function AIAccess() {
   const openRisks = risks.filter((r) => r.status !== 'closed').length
   const serviceById = useMemo(() => Object.fromEntries(services.map((s) => [s.id, s])), [services])
   const panelService = svcPanel && serviceById[svcPanel.id]
-  const panelPerson = personPanel && people.find((r) => r.id === personPanel.id)
+  const panelPerson = personPanel && allPeople.find((r) => r.id === personPanel.id)
   // The date the usage numbers are from: the last import, else the newest date
   // any seat was verified (numbers loaded through the API, not an upload).
   const lastImportAt = report?.last_import?.as_of
     || people.reduce((m, r) => (r.usage_verified_at && r.usage_verified_at > m ? r.usage_verified_at : m), '') || null
-  const requestCount = requests.pending.length + requests.requests.length
+  const requestCount = scopedRequests.pending.length + scopedRequests.requests.length
   const openSeats = report?.summary?.open_seats ?? 0
 
   if (!pw) {
@@ -364,6 +409,19 @@ export default function AIAccess() {
     <div className="itr-page">
       <RequestsStyle />
       <main className="itr-main itr-main-wide">
+        {serviceTabs.length > 0 && (
+          <nav className="aia-svc-tabs" aria-label="Сервис">
+            <Segmented
+              name="Сервис"
+              value={scopeId === UNLINKED ? 'none' : scopeService ? slugify(scopeService.name) : 'all'}
+              onChange={pickService}
+              options={[
+                { value: 'all', label: `Все · ${serviceTabs.reduce((n, t) => n + t.active, 0)}` },
+                ...serviceTabs.map((t) => ({ value: t.slug, label: `${t.name} · ${t.active}` })),
+              ]}
+            />
+          </nav>
+        )}
         <header className="itr-head">
           <div className="itr-head-main">
             <h1 className="itr-title">AI-места</h1>
@@ -416,7 +474,7 @@ export default function AIAccess() {
         {tab === 'decisions' && (
           !report ? <section className="itr-card"><div className="itr-empty">{loading ? 'Загружаю…' : 'Нет данных'}</div></section> : (
             <>
-              <DecisionSummary report={report} onImport={() => setImportOpen(true)} />
+              <DecisionSummary report={report} scope={scopeService} onImport={() => setImportOpen(true)} />
               <DecisionMetrics report={report} onShowPeople={showPeople} />
               {report.buckets.filter((b) => ACTION_BUCKETS.includes(b.key)).map((b) => (
                 <BucketCard key={b.key} bucket={b} pending={pending} actions={seatActions}
@@ -485,6 +543,7 @@ export default function AIAccess() {
                     services={services}
                     focusId={personFocus}
                     lastImportAt={lastImportAt}
+                    showService={!scopeId}
                     buckets={bucketOf}
                     onOpen={openPerson}
                     onEdit={(r) => setEditingPerson(r)}
@@ -506,8 +565,8 @@ export default function AIAccess() {
         {tab === 'requests' && (
           <section className="itr-card aia-tablecard">
             <RequestsTable
-              pending={requests.pending}
-              requests={requests.requests}
+              pending={scopedRequests.pending}
+              requests={scopedRequests.requests}
               onOpenPerson={(id) => openPerson(id)}
               onApprove={(r) => setDialog({ kind: 'approve', seat: r })}
               onReject={(r) => setRevoking(r)}
@@ -705,7 +764,7 @@ export default function AIAccess() {
         }} />
       )}
       {dialog?.kind === 'manager' && (
-        <ManagerDialog seat={dialog.seat} people={people} team={team} onCancel={() => setDialog(null)}
+        <ManagerDialog seat={dialog.seat} people={allPeople} team={team} onCancel={() => setDialog(null)}
           onConfirm={async (body) => {
             await write(() => api.patch(`/ai-access/${dialog.seat.id}`, body, pw))
               .then(() => setDialog(null)).catch(() => {})
@@ -720,7 +779,7 @@ export default function AIAccess() {
       )}
 
       {importOpen && (
-        <ImportDialog pw={pw} services={services} onClose={() => setImportOpen(false)}
+        <ImportDialog pw={pw} services={services} defaultServiceId={scopeId > 0 ? scopeId : null} onClose={() => setImportOpen(false)}
           onImported={() => load(true)} />
       )}
 
