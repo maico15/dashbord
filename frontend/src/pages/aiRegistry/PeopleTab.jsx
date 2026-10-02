@@ -85,7 +85,7 @@ export function UsageAsOf({ date }) {
   return <span className="aia-asof">{date ? `данные на ${fmtDate(date)}` : 'нет выгрузки'}</span>
 }
 
-export function PeopleTable({ rows, services, focusId, lastImportAt, buckets = {}, onOpen, onEdit, onApprove, onRevoke, onOpenService }) {
+export function PeopleTable({ rows, services, focusId, lastImportAt, showService = true, buckets = {}, onOpen, onEdit, onApprove, onRevoke, onOpenService }) {
   const byId = Object.fromEntries(services.map((s) => [s.id, s]))
   const focusRef = useRef(null)
   useEffect(() => {
@@ -97,7 +97,9 @@ export function PeopleTable({ rows, services, focusId, lastImportAt, buckets = {
         <tr>
           <th>Сотрудник</th>
           <th>Руководитель</th>
-          <th>Инструмент</th>
+          {/* On "Все" the column says which subscription; on a service tab that
+            * is the tab itself, so the column shows the plan only. */}
+          <th>{showService ? 'Сервис' : 'Тариф'}</th>
           <th className="aia-num">$/мес</th>
           <th><span className="aia-usage-head">Использование · <UsageAsOf date={lastImportAt} /></span>30 / 60 / 90</th>
           <th>Решение</th>
@@ -134,12 +136,12 @@ export function PeopleTable({ rows, services, focusId, lastImportAt, buckets = {
               <td data-label="Инструмент">
                 {/* Tool, plan and the subscription it sits on — one cell, so the
                  * table fits a laptop screen without sideways scrolling. */}
-                {byId[r.service_id] ? (
+                {!showService ? null : byId[r.service_id] ? (
                   <ServiceChip service={byId[r.service_id]} onClick={() => onOpenService(r.service_id)} />
                 ) : (
                   <span className="aia-tool"><i style={{ background: tool.color }} />{aiToolName(r)}</span>
                 )}
-                {r.plan && <div className="aia-muted">{r.plan}</div>}
+                {r.plan ? <div className={showService ? 'aia-muted' : ''}>{r.plan}</div> : !showService && <span className="aia-muted">—</span>}
               </td>
               <td data-label="$/мес" className="aia-num">
                 {r.cost_month != null ? money(r.cost_month, 2) : <span className="aia-muted">—</span>}

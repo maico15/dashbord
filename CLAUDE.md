@@ -448,6 +448,19 @@ Frontend: `pages/aiRegistry/DecisionsTab.jsx`, `RequestsTab.jsx`, `ImportDialog.
 the manager's landing page is `pages/AIAccessRespond.jsx` at
 `/ai-access/respond/:id?t=…` (public, token-protected, one seat only).
 
+**Service tabs** over the whole page, from `service_tabs` in the buckets
+response: one per subscription with at least one live seat (active, pending or
+to_revoke), numbered by active seats, plus "Без подписки" when unlinked seats
+exist — so the tabs always add up to "Все". Services with no seats (infrastructure,
+Medium…) get no tab; they stay on Сервисы. The tab is `?service=<slug>` in the URL
+(`_ai_slug`: lowercase, non-alphanumerics → `-`; `all`, `none`), default `claude`.
+It scopes Решения (summary, buckets, metrics, renewal, the "оплачено / в выгрузке /
+в реестре" reconcile line, the import's default service), Все места and Запросы;
+Сервисы and Риски stay whole. `GET /api/ai-access/buckets?service_id=` takes the id
+(0/empty = all, -1 = unlinked, unknown → 404). On "Все" the table shows a Сервис
+column; on a service tab it shows the plan instead. Duplicates are grouped by
+(name, service) — one person on Claude and on ChatGPT is not a duplicate.
+
 **Usage columns.** Stored as `usage_{30,60,90}d` + `usage_{chats,cowork,code}_{30,60,90}d`;
 the audit-sheet spellings `usage_total_30`, `usage_chats_30` … are accepted as
 aliases on write and echoed on read — one storage, two names. Also `role`,

@@ -392,6 +392,11 @@ export const CSS = `
   .aia-table td:first-child{max-width:190px}
 }
 
+/* Service tabs over the whole page (Все · Claude · ChatGPT …). */
+.aia-svc-tabs{margin:0 0 14px;overflow-x:auto;-webkit-overflow-scrolling:touch}
+.aia-svc-tabs .itr-seg{flex-wrap:nowrap;white-space:nowrap}
+.aia-reconcile b{color:var(--ios-label,#1C1C1E);font-variant-numeric:tabular-nums}
+
 @media(max-width:1100px){
   .aia-kpis{grid-template-columns:repeat(2,minmax(0,1fr))}
 }
