@@ -848,6 +848,64 @@ def init_db():
             );
         """)
 
+    # ── AI subscriptions (the Services tab of /ai-access) ─────────────────────
+    # What the invoices say, per vendor: a $3,325/mo Claude plan is one row here,
+    # not 65 × $25 in ai_access, and Abacus or Digital Ocean exist here even with
+    # no person attached. Filled by API after deploy — nothing is seeded.
+    with conn.step("ai_services"):
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS ai_services (
+                id                INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at        TEXT,
+                updated_at        TEXT,
+                name              TEXT NOT NULL,
+                plan              TEXT DEFAULT '',
+                cost_month        NUMERIC,
+                cost_note         TEXT DEFAULT '',
+                seats_billed      INTEGER,
+                seats_seen        INTEGER,
+                seats_verified_at TEXT DEFAULT '',
+                renewal_date      TEXT DEFAULT '',
+                owner_name        TEXT DEFAULT '',
+                can_cancel        TEXT DEFAULT '',
+                decision          TEXT DEFAULT ''
+                                  CHECK (decision IN ('','keep','review','kill','cancelled','transfer')),
+                decision_note     TEXT DEFAULT '',
+                saving_month      NUMERIC,
+                saving_from       TEXT DEFAULT '',
+                status_note       TEXT DEFAULT '',
+                notes             TEXT DEFAULT ''
+            );
+        """)
+
+    # A seat points at the subscription that pays for it, plus the usage audit
+    # (30/60/90-day counts split chats / cowork / code) the People tab drills into.
+    with conn.step("ai_access_service_usage"):
+        conn.add_column_if_missing("ai_access", "service_id", "INTEGER")
+        for col in _AI_USAGE_COLS:
+            conn.add_column_if_missing("ai_access", col, "INTEGER")
+        conn.add_column_if_missing("ai_access", "usage_note", "TEXT DEFAULT ''")
+        _ai_link_seats(conn)
+
+    with conn.step("ai_risks"):
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS ai_risks (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at      TEXT,
+                updated_at      TEXT,
+                severity        TEXT NOT NULL DEFAULT 'medium'
+                                CHECK (severity IN ('high','medium')),
+                title           TEXT NOT NULL,
+                detail          TEXT DEFAULT '',
+                owner           TEXT DEFAULT '',
+                status          TEXT NOT NULL DEFAULT 'open'
+                                CHECK (status IN ('open','in_progress','closed')),
+                source          TEXT DEFAULT '',
+                linked_gantt_id INTEGER,
+                notes           TEXT DEFAULT ''
+            );
+        """)
+
     conn.close()
 
 
@@ -8491,8 +8549,46 @@ _AI_ACCESS_FIELDS = (
     "employment", "tool", "tool_other", "plan", "cost_month", "cost_note",
     "justification", "approved_by", "approved_at", "request_ref", "granted_at",
     "last_used_at", "last_verified_at", "status", "revoked_at", "revoke_reason", "notes",
+    "service_id",
 )
+# The usage audit: a total per window plus its split. A total left empty is the
+# sum of whatever split was given, so an export that only has totals and one
+# that only has the split both read the same on the page.
+AI_USAGE_WINDOWS = (30, 60, 90)
+AI_USAGE_KINDS = ("chats", "cowork", "code")
+_AI_USAGE_COLS = tuple(
+    [f"usage_{w}d" for w in AI_USAGE_WINDOWS]
+    + [f"usage_{k}_{w}d" for w in AI_USAGE_WINDOWS for k in AI_USAGE_KINDS]
+)
+_AI_ACCESS_FIELDS = _AI_ACCESS_FIELDS + _AI_USAGE_COLS + ("usage_note",)
+_AI_ACCESS_INT_FIELDS = ("service_id",) + _AI_USAGE_COLS
 _AI_ACCESS_FLAGS = ("flag_no_approval", "flag_terminated", "flag_unused")
+
+
+def _ai_int(key: str, value, minimum: int = 0):
+    """'' / None → None, otherwise a non-negative int or a 422 naming the field."""
+    if value in (None, ""):
+        return None
+    try:
+        n = int(float(str(value).strip()))
+    except ValueError:
+        raise HTTPException(422, f"{key} must be a whole number")
+    if n < minimum:
+        raise HTTPException(422, f"{key} cannot be below {minimum}")
+    return n
+
+
+def _ai_money(key: str, value):
+    """'' / None → None, otherwise a non-negative amount rounded to cents."""
+    if value in (None, ""):
+        return None
+    try:
+        n = round(float(str(value).replace(",", ".").replace("$", "").replace(" ", "")), 2)
+    except ValueError:
+        raise HTTPException(422, f"{key} must be a number")
+    if n < 0:
+        raise HTTPException(422, f"{key} cannot be negative")
+    return n
 
 
 def _ai_parse_date(value):
@@ -8528,6 +8624,12 @@ def _ai_access_row(row, now: datetime = None) -> dict:
     out["flag_unused"] = bool(
         live and seen and (now - seen).days > AI_ACCESS_UNUSED_DAYS
     )
+    for w in AI_USAGE_WINDOWS:
+        key = f"usage_{w}d"
+        if out.get(key) is None:
+            parts = [out.get(f"usage_{k}_{w}d") for k in AI_USAGE_KINDS]
+            if any(p is not None for p in parts):
+                out[key] = sum(p or 0 for p in parts)
     return out
 
 
@@ -8539,15 +8641,9 @@ def _ai_access_clean(data: dict, partial: bool) -> dict:
             continue
         value = data[key]
         if key == "cost_month":
-            if value in (None, ""):
-                out[key] = None
-            else:
-                try:
-                    out[key] = round(float(str(value).replace(",", ".").replace("$", "")), 2)
-                except ValueError:
-                    raise HTTPException(422, "cost_month must be a number")
-                if out[key] < 0:
-                    raise HTTPException(422, "cost_month cannot be negative")
+            out[key] = _ai_money(key, value)
+        elif key in _AI_ACCESS_INT_FIELDS:
+            out[key] = _ai_int(key, value, minimum=1 if key == "service_id" else 0)
         else:
             out[key] = str(value if value is not None else "").strip()
 
@@ -8599,10 +8695,14 @@ def _ai_access_log_request(conn, ref: str, body: str):
 
 @app.get("/api/ai-access")
 def list_ai_access(password: str = "", status: str = "", tool: str = "",
-                   department: str = "", employment: str = "", q: str = ""):
+                   department: str = "", employment: str = "", q: str = "",
+                   service_id: int = 0):
     if password != ADMIN_PASSWORD:
         raise HTTPException(403, "Unauthorized")
     where, params = [], []
+    if service_id:
+        where.append("service_id=?")
+        params.append(service_id)
     for col, raw in (("status", status), ("tool", tool), ("employment", employment)):
         wanted = [v for v in str(raw or "").split(",") if v]
         if wanted:
@@ -8698,8 +8798,13 @@ def create_ai_access(data: dict, password: str = ""):
     now = datetime.utcnow().isoformat()
     fields["created_at"] = now
     fields["updated_at"] = now
-    cols = list(fields)
     conn = get_db()
+    if fields.get("service_id"):
+        _ai_service_get(conn, fields["service_id"])
+    else:
+        fields["service_id"] = _ai_service_for_tool(
+            conn, fields["tool"], fields.get("tool_other", ""))
+    cols = list(fields)
     cur = conn.execute(
         f"INSERT INTO ai_access ({', '.join(cols)}) VALUES ({', '.join('?' for _ in cols)})",
         tuple(fields[c] for c in cols),
@@ -8724,6 +8829,8 @@ def patch_ai_access(access_id: int, data: dict, password: str = ""):
         raise HTTPException(422, f"nothing to update — send one of: {', '.join(_AI_ACCESS_FIELDS)}")
     conn = get_db()
     row = _ai_access_get(conn, access_id)
+    if fields.get("service_id"):
+        _ai_service_get(conn, fields["service_id"])
     # Moving into revoked stamps the date the seat stopped costing money;
     # moving back out clears it, so a restored seat is not reported as revoked.
     if fields.get("status") == "revoked" and row["status"] != "revoked" and not fields.get("revoked_at"):
@@ -8768,6 +8875,414 @@ def delete_ai_access(access_id: int, password: str = ""):
     conn = get_db()
     _ai_access_get(conn, access_id)
     conn.execute("DELETE FROM ai_access WHERE id=?", (access_id,))
+    conn.commit()
+    conn.close()
+    return {"ok": True}
+
+
+# ── AI subscriptions (/ai-access → Сервисы) ──────────────────────────────────
+# One row per vendor subscription, with what the invoice says. The people
+# register undercounts on its own — a seat price times heads is not what is
+# billed, and infrastructure has no head at all — so spend is read from here.
+
+AI_SERVICE_DECISIONS = ("keep", "review", "kill", "cancelled", "transfer")
+AI_SERVICE_RENEWAL_DAYS = 14
+_AI_SERVICE_FIELDS = (
+    "name", "plan", "cost_month", "cost_note", "seats_billed", "seats_seen",
+    "seats_verified_at", "renewal_date", "owner_name", "can_cancel", "decision",
+    "decision_note", "saving_month", "saving_from", "status_note", "notes",
+)
+_AI_SERVICE_MONEY = ("cost_month", "saving_month")
+_AI_SERVICE_INTS = ("seats_billed", "seats_seen")
+_AI_SERVICE_FLAGS = ("flag_gap", "flag_no_owner", "flag_renewal")
+
+
+def _ai_norm(name) -> str:
+    """'Abacus.AI' → 'abacusai', 'ChatGPT Team' → 'chatgptteam'."""
+    return re.sub(r"[^a-z0-9а-я]+", "", str(name or "").lower())
+
+
+def _ai_tool_matches(service_name, tool, tool_other="") -> bool:
+    """Does a seat's tool belong to this subscription? 'claude' matches 'Claude'
+    and 'Claude Team'; 'abacus' matches 'Abacus.AI'; an `other` seat matches on
+    its free-text name."""
+    svc = _ai_norm(service_name)
+    key = _ai_norm(tool_other) if tool == "other" else _ai_norm(tool)
+    return bool(svc and key) and (svc == key or svc.startswith(key) or key.startswith(svc))
+
+
+def _ai_service_for_tool(conn, tool, tool_other=""):
+    """The one subscription a tool belongs to, or None when there is none or the
+    match is ambiguous (two ChatGPT plans) — a seat is never guessed onto one."""
+    hits = [r["id"] for r in conn.execute("SELECT id, name FROM ai_services").fetchall()
+            if _ai_tool_matches(r["name"], tool, tool_other)]
+    return hits[0] if len(hits) == 1 else None
+
+
+def _ai_link_seats(conn) -> int:
+    """Backfill ai_access.service_id for seats that have none. Runs at boot and
+    after every service create/rename, so the services POSTed after deploy pick
+    up their seats without a second call. Never re-points a linked seat."""
+    services = conn.execute("SELECT id, name FROM ai_services").fetchall()
+    if not services:
+        return 0
+    linked = 0
+    for seat in conn.execute(
+            "SELECT id, tool, tool_other FROM ai_access WHERE service_id IS NULL").fetchall():
+        hits = [s["id"] for s in services
+                if _ai_tool_matches(s["name"], seat["tool"], seat["tool_other"])]
+        if len(hits) == 1:
+            conn.execute("UPDATE ai_access SET service_id=? WHERE id=?", (hits[0], seat["id"]))
+            linked += 1
+    return linked
+
+
+def _ai_service_row(row, seats: dict = None, today=None) -> dict:
+    """The stored row plus the gap and the three flags. `seats` is
+    {service_id: billed people rows}, used for the people count on the row."""
+    out = dict(row)
+    for key in _AI_SERVICE_MONEY:
+        if out.get(key) is not None:
+            out[key] = float(out[key])
+    today = today or datetime.utcnow().date()
+    billed, seen, cost = out.get("seats_billed"), out.get("seats_seen"), out.get("cost_month")
+    gap = billed - seen if billed is not None and seen is not None else None
+    out["seats_gap"] = gap
+    out["gap_cost_month"] = (
+        round(gap * (cost / billed), 2) if gap is not None and cost is not None and billed else None
+    )
+    out["cost_year"] = round(cost * 12, 2) if cost is not None else None
+    out["flag_gap"] = bool(gap is not None and gap > 0)
+    out["flag_no_owner"] = (not str(out.get("owner_name") or "").strip()
+                            or not str(out.get("can_cancel") or "").strip())
+    renew = _ai_parse_date(out.get("renewal_date"))
+    out["flag_renewal"] = bool(
+        renew and out.get("decision") != "cancelled"
+        and 0 <= (renew.date() - today).days <= AI_SERVICE_RENEWAL_DAYS
+    )
+    out["people_count"] = (seats or {}).get(out["id"], 0)
+    return out
+
+
+def _ai_service_seat_counts(conn) -> dict:
+    counts = {}
+    for r in conn.execute(
+            "SELECT service_id, COUNT(*) AS n FROM ai_access WHERE service_id IS NOT NULL "
+            "AND status IN ('active','to_revoke') GROUP BY service_id").fetchall():
+        counts[r["service_id"]] = int(r["n"])
+    return counts
+
+
+def _ai_service_rows(conn) -> list:
+    seats = _ai_service_seat_counts(conn)
+    today = datetime.utcnow().date()
+    return [_ai_service_row(r, seats, today) for r in conn.execute(
+        "SELECT * FROM ai_services ORDER BY cost_month IS NULL, cost_month DESC, LOWER(name), id"
+    ).fetchall()]
+
+
+def _ai_service_clean(data: dict, partial: bool) -> dict:
+    out = {}
+    for key in _AI_SERVICE_FIELDS:
+        if key not in data:
+            continue
+        value = data[key]
+        if key in _AI_SERVICE_MONEY:
+            out[key] = _ai_money(key, value)
+        elif key in _AI_SERVICE_INTS:
+            out[key] = _ai_int(key, value)
+        else:
+            out[key] = str(value if value is not None else "").strip()
+    if not partial and not out.get("name"):
+        raise HTTPException(422, "name is required")
+    if partial and "name" in out and not out["name"]:
+        raise HTTPException(422, "name cannot be empty")
+    if out.get("decision") and out["decision"] not in AI_SERVICE_DECISIONS:
+        raise HTTPException(
+            422, f"decision must be one of {', '.join(AI_SERVICE_DECISIONS)} (or empty)")
+    return out
+
+
+def _ai_service_get(conn, service_id: int):
+    row = conn.execute("SELECT * FROM ai_services WHERE id=?", (service_id,)).fetchone()
+    if not row:
+        conn.close()
+        raise HTTPException(404, "Service not found")
+    return row
+
+
+def _ai_service_one(conn, service_id: int) -> dict:
+    row = conn.execute("SELECT * FROM ai_services WHERE id=?", (service_id,)).fetchone()
+    return _ai_service_row(row, _ai_service_seat_counts(conn))
+
+
+@app.get("/api/ai-services")
+def list_ai_services(password: str = "", decision: str = ""):
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    conn = get_db()
+    rows = _ai_service_rows(conn)
+    conn.close()
+    wanted = [v for v in str(decision or "").split(",") if v]
+    if wanted:
+        rows = [r for r in rows if (r.get("decision") or "") in wanted]
+    return {"generated": datetime.utcnow().isoformat(), "items": rows}
+
+
+@app.get("/api/ai-services/stats")
+def ai_services_stats(password: str = ""):
+    """The four KPI cards. Spend is what is still being paid — every service
+    except a cancelled one; the saving from a cancelled one is counted apart."""
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    conn = get_db()
+    rows = _ai_service_rows(conn)
+    people = conn.execute(
+        "SELECT COUNT(*) AS n FROM ai_access WHERE status IN ('active','to_revoke')").fetchone()
+    conn.close()
+    live = [r for r in rows if r.get("decision") != "cancelled"]
+    cost = lambda rs: round(sum(r["cost_month"] or 0 for r in rs), 2)  # noqa: E731
+    spend = cost(live)
+    no_owner = [r for r in live if r["flag_no_owner"]]
+    kill = [r for r in rows if r.get("decision") == "kill"]
+    cancelled = [r for r in rows if r.get("decision") == "cancelled"]
+    gaps = [r for r in live if r["flag_gap"]]
+    return {
+        "spend_month_total": spend,
+        "spend_year_total": round(spend * 12, 2),
+        # Paid for, but no person in the register is on it.
+        "unattributed_month": cost([r for r in live if not r["people_count"]]),
+        "unattributed_count": sum(1 for r in live if not r["people_count"]),
+        "saved_month": round(sum(r["saving_month"] or 0 for r in cancelled), 2),
+        "saved_count": len(cancelled),
+        "killlist_month": cost(kill),
+        "killlist_count": len(kill),
+        "no_owner_count": len(no_owner),
+        "no_owner_month": cost(no_owner),
+        "renewal_count": sum(1 for r in live if r["flag_renewal"]),
+        "services_count": len(live),
+        "people_seats": int(people["n"]) if people else 0,
+        "gap_seats": sum(r["seats_gap"] for r in gaps),
+        "gap_cost_month": round(sum(r["gap_cost_month"] or 0 for r in gaps), 2),
+    }
+
+
+@app.get("/api/ai-services/export.csv")
+def export_ai_services(password: str = ""):
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    from fastapi.responses import Response
+    conn = get_db()
+    rows = _ai_service_rows(conn)
+    conn.close()
+    cols = (("id",) + _AI_SERVICE_FIELDS
+            + ("cost_year", "seats_gap", "gap_cost_month", "people_count")
+            + _AI_SERVICE_FLAGS + ("created_at", "updated_at"))
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(cols)
+    for r in rows:
+        writer.writerow([
+            ("yes" if r.get(c) else "") if c in _AI_SERVICE_FLAGS
+            else ("" if r.get(c) is None else r.get(c))
+            for c in cols
+        ])
+    filename = f"ai-services-{datetime.utcnow().strftime('%Y-%m-%d')}.csv"
+    return Response(
+        content="﻿" + buf.getvalue(),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@app.post("/api/ai-services")
+def create_ai_service(data: dict, password: str = ""):
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    fields = _ai_service_clean(data or {}, partial=False)
+    now = datetime.utcnow().isoformat()
+    fields["created_at"] = now
+    fields["updated_at"] = now
+    cols = list(fields)
+    conn = get_db()
+    cur = conn.execute(
+        f"INSERT INTO ai_services ({', '.join(cols)}) VALUES ({', '.join('?' for _ in cols)})",
+        tuple(fields[c] for c in cols),
+    )
+    new_id = cur.lastrowid
+    linked = _ai_link_seats(conn)
+    conn.commit()
+    item = _ai_service_one(conn, new_id)
+    conn.close()
+    return {"ok": True, "id": new_id, "item": item, "seats_linked": linked}
+
+
+@app.patch("/api/ai-services/{service_id}")
+def patch_ai_service(service_id: int, data: dict, password: str = ""):
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    fields = _ai_service_clean(data or {}, partial=True)
+    if not fields:
+        raise HTTPException(422, f"nothing to update — send one of: {', '.join(_AI_SERVICE_FIELDS)}")
+    conn = get_db()
+    row = _ai_service_get(conn, service_id)
+    # A saving only exists for a cancelled service; it starts at the renewal
+    # date unless told otherwise, because that is when the invoice stops.
+    if fields.get("decision") == "cancelled" and not (fields.get("saving_from") or row["saving_from"]):
+        fields["saving_from"] = fields.get("renewal_date", row["renewal_date"]) or ""
+    fields["updated_at"] = datetime.utcnow().isoformat()
+    sets = ", ".join(f"{k}=?" for k in fields)
+    conn.execute(f"UPDATE ai_services SET {sets} WHERE id=?", (*fields.values(), service_id))
+    linked = _ai_link_seats(conn) if "name" in fields else 0
+    conn.commit()
+    item = _ai_service_one(conn, service_id)
+    conn.close()
+    return {"ok": True, "item": item, "seats_linked": linked}
+
+
+@app.delete("/api/ai-services/{service_id}")
+def delete_ai_service(service_id: int, password: str = ""):
+    """Remove a subscription. Its seats stay in the register, unlinked."""
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    conn = get_db()
+    _ai_service_get(conn, service_id)
+    conn.execute("UPDATE ai_access SET service_id=NULL WHERE service_id=?", (service_id,))
+    conn.execute("DELETE FROM ai_services WHERE id=?", (service_id,))
+    conn.commit()
+    conn.close()
+    return {"ok": True}
+
+
+@app.get("/api/ai-services/{service_id}/people")
+def ai_service_people(service_id: int, password: str = ""):
+    """The register rows on this subscription: linked by service_id, or — for a
+    seat not linked yet — whose tool matches the service name."""
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    conn = get_db()
+    svc = _ai_service_get(conn, service_id)
+    now = datetime.utcnow()
+    rows = [_ai_access_row(r, now) for r in conn.execute(
+        "SELECT * FROM ai_access ORDER BY LOWER(person_name), id").fetchall()]
+    conn.close()
+    items = [r for r in rows
+             if r.get("service_id") == service_id
+             or (r.get("service_id") is None
+                 and _ai_tool_matches(svc["name"], r["tool"], r.get("tool_other")))]
+    return {"service_id": service_id, "items": items}
+
+
+# ── AI risks (/ai-access → Риски) ────────────────────────────────────────────
+# A short list of what could go wrong with the AI estate, each with an owner and
+# a way into the Gantt. Plain CRUD; the Gantt task itself is created by the page
+# through POST /api/gantt, which then stores its id here as linked_gantt_id.
+
+AI_RISK_SEVERITIES = ("high", "medium")
+AI_RISK_STATUSES = ("open", "in_progress", "closed")
+_AI_RISK_FIELDS = ("severity", "title", "detail", "owner", "status", "source",
+                   "linked_gantt_id", "notes")
+
+
+def _ai_risk_clean(data: dict, partial: bool) -> dict:
+    out = {}
+    for key in _AI_RISK_FIELDS:
+        if key not in data:
+            continue
+        value = data[key]
+        if key == "linked_gantt_id":
+            out[key] = _ai_int(key, value, minimum=1)
+        else:
+            out[key] = str(value if value is not None else "").strip()
+    if not partial and not out.get("title"):
+        raise HTTPException(422, "title is required")
+    if partial and "title" in out and not out["title"]:
+        raise HTTPException(422, "title cannot be empty")
+    if "severity" in out:
+        out["severity"] = out["severity"] or "medium"
+        if out["severity"] not in AI_RISK_SEVERITIES:
+            raise HTTPException(422, f"severity must be one of {', '.join(AI_RISK_SEVERITIES)}")
+    if "status" in out:
+        out["status"] = out["status"] or "open"
+        if out["status"] not in AI_RISK_STATUSES:
+            raise HTTPException(422, f"status must be one of {', '.join(AI_RISK_STATUSES)}")
+    return out
+
+
+def _ai_risk_one(conn, risk_id: int):
+    row = conn.execute("SELECT * FROM ai_risks WHERE id=?", (risk_id,)).fetchone()
+    if not row:
+        conn.close()
+        raise HTTPException(404, "Risk not found")
+    return dict(row)
+
+
+@app.get("/api/ai-risks")
+def list_ai_risks(password: str = "", status: str = ""):
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    sql, params = "SELECT * FROM ai_risks", []
+    wanted = [v for v in str(status or "").split(",") if v]
+    if wanted:
+        sql += " WHERE status IN (" + ",".join("?" for _ in wanted) + ")"
+        params = wanted
+    # High before medium, open before closed, newest first within that.
+    sql += (" ORDER BY CASE status WHEN 'closed' THEN 1 ELSE 0 END,"
+            " CASE severity WHEN 'high' THEN 0 ELSE 1 END, id DESC")
+    conn = get_db()
+    rows = [dict(r) for r in conn.execute(sql, tuple(params)).fetchall()]
+    conn.close()
+    return {"items": rows}
+
+
+@app.post("/api/ai-risks")
+def create_ai_risk(data: dict, password: str = ""):
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    fields = _ai_risk_clean(data or {}, partial=False)
+    fields.setdefault("severity", "medium")
+    fields.setdefault("status", "open")
+    now = datetime.utcnow().isoformat()
+    fields["created_at"] = now
+    fields["updated_at"] = now
+    cols = list(fields)
+    conn = get_db()
+    cur = conn.execute(
+        f"INSERT INTO ai_risks ({', '.join(cols)}) VALUES ({', '.join('?' for _ in cols)})",
+        tuple(fields[c] for c in cols),
+    )
+    new_id = cur.lastrowid
+    conn.commit()
+    item = _ai_risk_one(conn, new_id)
+    conn.close()
+    return {"ok": True, "id": new_id, "item": item}
+
+
+@app.patch("/api/ai-risks/{risk_id}")
+def patch_ai_risk(risk_id: int, data: dict, password: str = ""):
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    fields = _ai_risk_clean(data or {}, partial=True)
+    if not fields:
+        raise HTTPException(422, f"nothing to update — send one of: {', '.join(_AI_RISK_FIELDS)}")
+    conn = get_db()
+    _ai_risk_one(conn, risk_id)
+    fields["updated_at"] = datetime.utcnow().isoformat()
+    sets = ", ".join(f"{k}=?" for k in fields)
+    conn.execute(f"UPDATE ai_risks SET {sets} WHERE id=?", (*fields.values(), risk_id))
+    conn.commit()
+    item = _ai_risk_one(conn, risk_id)
+    conn.close()
+    return {"ok": True, "item": item}
+
+
+@app.delete("/api/ai-risks/{risk_id}")
+def delete_ai_risk(risk_id: int, password: str = ""):
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    conn = get_db()
+    _ai_risk_one(conn, risk_id)
+    conn.execute("DELETE FROM ai_risks WHERE id=?", (risk_id,))
     conn.commit()
     conn.close()
     return {"ok": True}
