@@ -85,7 +85,7 @@ Key helpers:
 - `_anthropic_get(path, admin_key, usage_beta=True)` — HTTP call to Anthropic API with error logging
 
 **SQLite/PostgreSQL tables**:
-`team_members`, `dev_metrics`, `support_metrics`, `docs_metrics`, `score_rules`, `config`, `ai_usage_cache`, `weekly_tasks`, `sync_log`, `api_key_mapping`, `ai_usage`, `daily_reports`,
+`team_members`, `dev_metrics`, `support_metrics`, `docs_metrics`, `score_rules`, `config`, `ai_usage_cache`, `weekly_tasks`, `sync_log`, `api_key_mapping`, `ai_usage`, `daily_reports`, `ref_counter`,
 `monthly_review_meta`, `monthly_review_summary`, `monthly_review_engineers`, `monthly_review_tasks`, `ai_access`, `ai_access_events`, `ai_seat_imports`, `ai_services`, `ai_risks`
 
 **Key endpoints**:
@@ -116,6 +116,9 @@ Key helpers:
 | POST | `/api/sync/slack-reports` | pw | Trigger Slack report sync |
 | POST | `/api/admin/verify` | — | Validate admin password |
 | POST | `/api/admin/change-password` | — | Change admin password |
+| POST | `/api/gantt/{id}/to-backlog` | pw | Body `{reason}` (required) — move a Gantt task to the backlog, same `ref` |
+| POST | `/api/backlog/{id}/assign` | pw | Backlog → Gantt; restores `ref`, note, priority and the percent it left with |
+| GET | `/api/ref/{ref}` | pw | Any `IT-` number → `{kind: gantt\|backlog\|request, id, title, engineer, status, percent, url}` |
 | POST | `/api/telemetry/heartbeat` | per-engineer secret | Tray-agent liveness + `rss_mb` |
 | GET | `/api/telemetry/agents` | pw | Fleet-wide agent memory/health |
 
@@ -265,6 +268,34 @@ drifted from the source file (someone edited via the API) unless `--force`.
 August 2026 was imported this way and its source file deleted.
 
 Editing is API-only for now — an Admin panel section is not built yet.
+
+## Task refs (one IT- sequence)
+
+Everything that gets named in Slack draws its number from **one** counter, so an
+`IT-` number never means two things: IT requests, Gantt tasks
+(`gantt_assignments.ref`) and backlog items (`backlog_items.ref`, the Gantt
+dock — not `it_backlog_items`). `ref_counter` is a single row
+(`id = 1`, `next_value`); `allocate_ref(conn)` is one `UPDATE … RETURNING`, so
+it is atomic. On every boot the counter is bumped above the highest ref stored
+in any of the three tables, and rows without a ref are backfilled (Gantt by id,
+then backlog by `created_at`) with the mapping printed to stdout.
+
+A ref is assigned once, at creation, and never regenerated, reused or edited —
+it is not in `GANTT_FIELDS` / `BACKLOG_FIELDS`. It travels with the task:
+`POST /api/gantt/{id}/to-backlog` copies it (plus note → description, engineer →
+owner, priority, est_days) and appends
+`Снято с Ганта <date>, было <percent>% у <engineer>. Причина: <reason>.`;
+the assign path (`_apply_backlog_assign`, also used by `apply-changes`) carries
+the ref back, strips that line from the note and restores its percent.
+`gantt_assignments.priority` exists only so the priority survives the trip.
+
+UI (`TeamGantt.jsx`): a monospace click-to-copy `RefChip` on every task row, in
+the side panel title, on every dock row and in the detail modal; a search field
+in the toolbar takes a ref or free text (repeat Enter cycles matches) and opens
+the dock when the task lives there; `/team-gantt?ref=IT-0162` deep-links the
+same search. "Вернуть в бэклог" in the side panel writes immediately (it needs a
+reason the draft queue cannot carry) and is disabled while the task has unsaved
+staged changes.
 
 ## IT Requests (intake, status, triage)
 

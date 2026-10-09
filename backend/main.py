@@ -778,6 +778,59 @@ def init_db():
             "ON it_request_events(request_id, id)"
         )
 
+    # ── Task refs: one IT- sequence for everything that gets named in Slack ──
+    # IT requests, Gantt tasks and backlog items all draw from ref_counter, so a
+    # number never means two different things. A ref is assigned once, on
+    # creation, and travels with the task between the Gantt and the backlog —
+    # it is never regenerated, reused or edited.
+    conn.add_column_if_missing("gantt_assignments", "ref", "TEXT")
+    conn.add_column_if_missing("backlog_items", "ref", "TEXT")
+    # Gantt rows had no priority; without one a task returned to the backlog
+    # would always come back as P2 whatever it was when it left.
+    conn.add_column_if_missing("gantt_assignments", "priority", "TEXT DEFAULT ''")
+    with conn.step("index uq_gantt_assignments_ref"):
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_gantt_assignments_ref ON gantt_assignments(ref)")
+    with conn.step("index uq_backlog_items_ref"):
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_backlog_items_ref ON backlog_items(ref)")
+
+    with conn.step("ref_counter"):
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS ref_counter (
+                id         INTEGER PRIMARY KEY CHECK (id = 1),
+                next_value INTEGER NOT NULL
+            )
+        """)
+        # Seeded (and, on every boot, bumped) above the highest ref already
+        # stored anywhere, so a counter created after requests were filed — or
+        # one restored from an older backup — can never hand out a taken number.
+        floor = _ref_highest(conn) + 1
+        conn.execute("INSERT OR IGNORE INTO ref_counter (id, next_value) VALUES (1, ?)", (floor,))
+        conn.execute("UPDATE ref_counter SET next_value=? WHERE id=1 AND next_value < ?", (floor, floor))
+
+    # One-off backfill: Gantt first, then backlog, oldest first, so today's
+    # tasks get stable numbers. The mapping is printed so it can be kept.
+    with conn.step("backfill task refs"):
+        gantt_rows = conn.execute(
+            "SELECT id, project FROM gantt_assignments WHERE ref IS NULL ORDER BY id"
+        ).fetchall()
+        backlog_rows = conn.execute(
+            "SELECT id, title FROM backlog_items WHERE ref IS NULL "
+            "ORDER BY created_at IS NULL, created_at, id"
+        ).fetchall()
+        mapping = []
+        for r in gantt_rows:
+            ref = allocate_ref(conn)
+            conn.execute("UPDATE gantt_assignments SET ref=? WHERE id=?", (ref, r["id"]))
+            mapping.append(f"gantt #{r['id']} -> {ref}  {r['project']}")
+        for r in backlog_rows:
+            ref = allocate_ref(conn)
+            conn.execute("UPDATE backlog_items SET ref=? WHERE id=?", (ref, r["id"]))
+            mapping.append(f"backlog #{r['id']} -> {ref}  {r['title']}")
+        if mapping:
+            print(f"[init] task ref backfill — {len(mapping)} row(s), keep this mapping:")
+            for line in mapping:
+                print(f"[init]   {line}")
+
     # Empty by default, and an empty value means "post nothing" — a dashboard
     # without Slack configured must still take requests.
     with conn.step("config slack_requests_channel_id"):
@@ -5901,6 +5954,62 @@ def delete_roadmap_task(task_id: int, password: str = ""):
     return {"ok": True}
 
 
+_REF_RE = re.compile(r"^IT-(\d+)$")
+
+
+def _ref_number(ref):
+    m = _REF_RE.match(str(ref or "").strip().upper())
+    return int(m.group(1)) if m else None
+
+
+def _ref_highest(conn) -> int:
+    """Highest IT- number stored in any table that holds one (0 if none)."""
+    highest = 0
+    for table in ("it_requests", "gantt_assignments", "backlog_items"):
+        try:
+            rows = conn.execute(
+                f"SELECT ref FROM {table} WHERE ref IS NOT NULL AND ref LIKE 'IT-%'"
+            ).fetchall()
+        except Exception:
+            continue  # column not there yet on a very old database
+        for r in rows:
+            n = _ref_number(r["ref"])
+            if n is not None and n > highest:
+                highest = n
+    return highest
+
+
+def allocate_ref(conn) -> str:
+    """Next IT-0001-style ref from the shared sequence. One UPDATE … RETURNING,
+    so two concurrent callers can never be handed the same number (Postgres
+    row-locks the counter until the caller's transaction ends). Numbers are
+    never given back: a rolled-back caller simply leaves a gap."""
+    row = conn.execute(
+        "UPDATE ref_counter SET next_value = next_value + 1 WHERE id = 1 "
+        "RETURNING next_value - 1 AS n"
+    ).fetchone()
+    if row is None:
+        raise RuntimeError("ref_counter is not initialised")
+    return f"IT-{int(row['n']):04d}"
+
+
+# The line "return to backlog" appends to the description, and the one the
+# reverse trip reads the percent back out of and then drops.
+_REMOVED_FROM_GANTT_RE = re.compile(
+    r"(?:\n\n)?^Снято с Ганта [^\n]*?, было (\d{1,3})% у [^\n]*$\n?", re.MULTILINE
+)
+
+
+def _strip_removed_line(text: str):
+    """(text without any "Снято с Ганта …" lines, percent from the last one or None)."""
+    text = text or ""
+    found = _REMOVED_FROM_GANTT_RE.findall(text)
+    if not found:
+        return text, None
+    percent = max(0, min(100, int(found[-1])))
+    return _REMOVED_FROM_GANTT_RE.sub("", text), percent
+
+
 GANTT_FIELDS = {"project", "start_date", "est_days", "percent", "status", "queue_start", "note", "depends_on", "engineer_id"}
 GANTT_STATUSES = {"active", "queued", "continuous", "done"}
 
@@ -5940,9 +6049,9 @@ def _apply_gantt_create(conn, fields: dict) -> int:
     now = datetime.utcnow().isoformat()
     cur = conn.execute(
         "INSERT INTO gantt_assignments "
-        "(engineer_id, project, start_date, est_days, percent, status, queue_start, note, updated_at) "
-        "VALUES (?,?,?,?,?,?,?,?,?)",
-        (engineer_id, project, start_date, fields.get("est_days") or 10,
+        "(ref, engineer_id, project, start_date, est_days, percent, status, queue_start, note, updated_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?)",
+        (allocate_ref(conn), engineer_id, project, start_date, fields.get("est_days") or 10,
          percent, status, fields.get("queue_start"), fields.get("note") or "", now),
     )
     return cur.lastrowid
@@ -6121,9 +6230,10 @@ def create_gantt_assignment(data: GanttAssignmentCreate, password: str = ""):
     except ChangeError as e:
         conn.close()
         raise HTTPException(e.status_code, e.message)
+    ref = conn.execute("SELECT ref FROM gantt_assignments WHERE id=?", (aid,)).fetchone()["ref"]
     conn.commit()
     conn.close()
-    return {"ok": True, "id": aid}
+    return {"ok": True, "id": aid, "ref": ref}
 
 
 @app.put("/api/gantt/{assignment_id}")
@@ -6154,6 +6264,75 @@ def delete_gantt_assignment(assignment_id: int, password: str = ""):
     conn.commit()
     conn.close()
     return {"ok": True}
+
+
+class GanttToBacklog(BaseModel):
+    reason: str = ""
+
+
+@app.post("/api/gantt/{assignment_id}/to-backlog")
+def gantt_to_backlog(assignment_id: int, data: GanttToBacklog, password: str = ""):
+    """Take a task off the Gantt and put it back in the backlog — same ref, the
+    note as its description plus a "Снято с Ганта …" line recording the date,
+    the percent, the engineer and the reason. POST /api/backlog/{id}/assign
+    reverses it losslessly."""
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    with get_db() as conn:
+        try:
+            backlog_id = _apply_gantt_to_backlog(conn, assignment_id, data.reason)
+        except ChangeError as e:
+            raise HTTPException(e.status_code, e.message)
+        item = dict(conn.execute("SELECT * FROM backlog_items WHERE id=?", (backlog_id,)).fetchone())
+    return item
+
+
+def _ref_lookup(conn, ref: str):
+    row = conn.execute(
+        "SELECT g.id, g.project AS title, g.status, g.percent, t.name AS engineer "
+        "FROM gantt_assignments g LEFT JOIN team_members t ON t.id = g.engineer_id "
+        "WHERE g.ref=?", (ref,),
+    ).fetchone()
+    if row:
+        return {"kind": "gantt", "id": row["id"], "title": row["title"],
+                "engineer": row["engineer"] or "", "status": row["status"],
+                "percent": row["percent"], "url": f"/team-gantt?ref={ref}"}
+    row = conn.execute(
+        "SELECT id, title, owner, status, description FROM backlog_items WHERE ref=?", (ref,)
+    ).fetchone()
+    if row:
+        _, percent = _strip_removed_line(row["description"])
+        return {"kind": "backlog", "id": row["id"], "title": row["title"],
+                "engineer": row["owner"] or "", "status": row["status"] or "backlog",
+                "percent": percent, "url": f"/team-gantt?ref={ref}"}
+    row = conn.execute(
+        "SELECT r.id, r.summary, r.status, r.owner, t.name AS engineer_name "
+        "FROM it_requests r LEFT JOIN team_members t ON t.id = r.owner_engineer_id "
+        "WHERE r.ref=?", (ref,),
+    ).fetchone()
+    if row:
+        return {"kind": "request", "id": row["id"], "title": row["summary"],
+                "engineer": row["engineer_name"] or row["owner"] or "",
+                "status": row["status"], "percent": None,
+                "url": f"/it-requests/status/{ref}"}
+    return None
+
+
+@app.get("/api/ref/{ref}")
+def resolve_ref(ref: str, password: str = ""):
+    """Any IT- number → the one place it lives (Gantt, backlog or IT request)."""
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    n = _ref_number(ref)
+    if n is None:
+        raise HTTPException(422, "Expected a ref like IT-0162")
+    # Accept "it-162" as well as the canonical zero-padded form.
+    canonical = f"IT-{n:04d}"
+    with get_db() as conn:
+        hit = _ref_lookup(conn, canonical)
+    if not hit:
+        raise HTTPException(404, f"{canonical} not found")
+    return {"ref": canonical, **hit}
 
 
 VALID_CHANGE_TYPES = {
@@ -6292,9 +6471,9 @@ def sync_gantt_from_reports(password: str = ""):
         project = _gantt_project_name(str(source_text))
         conn.execute(
             "INSERT INTO gantt_assignments "
-            "(engineer_id, project, start_date, est_days, percent, status, updated_at) "
-            "VALUES (?,?,?,?,?,?,?)",
-            (mid, project, row["report_date"], 10, 0, "active", now),
+            "(ref, engineer_id, project, start_date, est_days, percent, status, updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            (allocate_ref(conn), mid, project, row["report_date"], 10, 0, "active", now),
         )
         created += 1
     conn.commit()
@@ -6398,9 +6577,9 @@ def _apply_backlog_create(conn, fields: dict) -> int:
     now = datetime.utcnow().isoformat()
     cur = conn.execute(
         "INSERT INTO backlog_items "
-        "(title, description, owner, priority, est_days, est_hours, roi, cost, ret, status, source, origin, sort_order, created_at) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        (title, fields.get("description") or "", fields.get("owner") or "", priority,
+        "(ref, title, description, owner, priority, est_days, est_hours, roi, cost, ret, status, source, origin, sort_order, created_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (allocate_ref(conn), title, fields.get("description") or "", fields.get("owner") or "", priority,
          est_days, est_hours, fields.get("roi") or "", fields.get("cost") or "",
          fields.get("ret") or "", fields.get("status") or "", fields.get("source") or "",
          fields.get("origin") or "", mx, now),
@@ -6495,11 +6674,17 @@ def _apply_backlog_assign(conn, item_id, engineer_id, start_date=None, status=No
 
     sd = start_date or today
     now = datetime.utcnow().isoformat()
+    # Lossless round trip: the ref, the description and the priority come back
+    # with the task, and a task that was returned from the Gantt resumes at the
+    # percent it left with (read off the "Снято с Ганта …" line, which is then
+    # dropped — it described the trip, not the work).
+    note, percent = _strip_removed_line(item["description"])
     cur = conn.execute(
         "INSERT INTO gantt_assignments "
-        "(engineer_id, project, start_date, est_days, percent, status, queue_start, note, updated_at) "
-        "VALUES (?,?,?,?,?,?,?,?,?)",
-        (engineer_id, item["title"], sd, item["est_days"], 0, resolved_status, queue_start, "", now),
+        "(ref, engineer_id, project, start_date, est_days, percent, status, queue_start, note, priority, updated_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        (item["ref"] or allocate_ref(conn), engineer_id, item["title"], sd, item["est_days"],
+         percent or 0, resolved_status, queue_start, note, item["priority"] or "", now),
     )
     assignment_id = cur.lastrowid
     conn.execute("DELETE FROM backlog_items WHERE id=?", (item_id,))
@@ -6508,6 +6693,44 @@ def _apply_backlog_assign(conn, item_id, engineer_id, start_date=None, status=No
         (_title_key(item["title"]), now),
     )
     return assignment_id, resolved_status
+
+
+def _apply_gantt_to_backlog(conn, assignment_id, reason) -> int:
+    """Move a Gantt task back into the backlog, keeping its ref. The reason is
+    required: a task leaving the plan with no reason is how work gets lost."""
+    if assignment_id is None:
+        raise ChangeError(422, "Missing id")
+    reason = re.sub(r"\s+", " ", str(reason or "")).strip()
+    if not reason:
+        raise ChangeError(422, "A reason is required")
+    row = conn.execute(
+        "SELECT g.*, t.name AS engineer_name FROM gantt_assignments g "
+        "LEFT JOIN team_members t ON t.id = g.engineer_id WHERE g.id=?",
+        (assignment_id,),
+    ).fetchone()
+    if not row:
+        raise ChangeError(404, "Gantt task not found")
+
+    engineer = row["engineer_name"] or ""
+    percent = max(0, min(100, int(row["percent"] or 0)))
+    line = (f"Снято с Ганта {datetime.utcnow().date().isoformat()}, "
+            f"было {percent}% у {engineer or '—'}. Причина: {reason}.")
+    note = (row["note"] or "").rstrip()
+    description = f"{note}\n\n{line}" if note else line
+    priority = row["priority"] if row["priority"] in BACKLOG_PRIORITIES else "P2"
+    mx = conn.execute("SELECT COALESCE(MAX(sort_order),0)+1 FROM backlog_items").fetchone()[0]
+    cur = conn.execute(
+        "INSERT INTO backlog_items "
+        "(ref, title, description, owner, priority, est_days, sort_order, created_at) "
+        "VALUES (?,?,?,?,?,?,?,?)",
+        (row["ref"] or allocate_ref(conn), row["project"], description, engineer, priority,
+         row["est_days"] or 10, mx, datetime.utcnow().isoformat()),
+    )
+    backlog_id = cur.lastrowid
+    # A dependent would otherwise point at a row that no longer exists.
+    conn.execute("UPDATE gantt_assignments SET depends_on=NULL WHERE depends_on=?", (assignment_id,))
+    conn.execute("DELETE FROM gantt_assignments WHERE id=?", (assignment_id,))
+    return backlog_id
 
 
 def _get_config_value(conn, key):
@@ -6537,9 +6760,10 @@ def create_backlog_item(data: BacklogItem, password: str = ""):
     except ChangeError as e:
         conn.close()
         raise HTTPException(e.status_code, e.message)
+    ref = conn.execute("SELECT ref FROM backlog_items WHERE id=?", (bid,)).fetchone()["ref"]
     conn.commit()
     conn.close()
-    return {"ok": True, "id": bid}
+    return {"ok": True, "id": bid, "ref": ref}
 
 
 @app.post("/api/backlog/reorder")
@@ -6566,9 +6790,13 @@ def assign_backlog_item(item_id: int, data: BacklogAssign, password: str = ""):
     except ChangeError as e:
         conn.close()
         raise HTTPException(e.status_code, e.message)
+    row = conn.execute(
+        "SELECT ref, percent, note FROM gantt_assignments WHERE id=?", (assignment_id,)
+    ).fetchone()
     conn.commit()
     conn.close()
-    return {"ok": True, "assignment_id": assignment_id, "status": resolved_status}
+    return {"ok": True, "assignment_id": assignment_id, "status": resolved_status,
+            "ref": row["ref"], "percent": row["percent"], "note": row["note"]}
 
 
 @app.put("/api/backlog/{item_id}")
@@ -6757,9 +6985,9 @@ def sync_backlog_from_sheet():
             priority_max[priority] = next_sort
             conn.execute(
                 "INSERT INTO backlog_items "
-                "(title, description, owner, priority, est_days, est_hours, roi, cost, ret, status, source, origin, sort_order, created_at) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (title, description, owner, priority, est_days, est_hours, roi, cost, ret, status, source, origin, next_sort, now),
+                "(ref, title, description, owner, priority, est_days, est_hours, roi, cost, ret, status, source, origin, sort_order, created_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (allocate_ref(conn), title, description, owner, priority, est_days, est_hours, roi, cost, ret, status, source, origin, next_sort, now),
             )
             existing[key] = {"id": -1, "est_hours": est_hours}  # guards against a duplicate title later in the same sheet
             added += 1
@@ -7795,22 +8023,6 @@ def _it_log_event(conn, request_id: int, actor: str, kind: str,
     return cur.lastrowid
 
 
-def _it_next_ref(conn) -> str:
-    """IT-0001, IT-0002 … Derived from the highest ref already stored rather than
-    from a row count, so deleting a row never hands its number to a new request."""
-    row = conn.execute(
-        "SELECT ref FROM it_requests WHERE ref LIKE 'IT-%' ORDER BY id DESC LIMIT 1"
-    ).fetchone()
-    last = 0
-    if row and row["ref"]:
-        try:
-            last = int(str(row["ref"]).split("-", 1)[1])
-        except (IndexError, ValueError):
-            last = 0
-    highest = conn.execute("SELECT COUNT(*) AS n FROM it_requests").fetchone()["n"]
-    return f"IT-{max(last, int(highest)) + 1:04d}"
-
-
 _IT_STOPWORDS = {
     "the", "a", "an", "and", "or", "for", "to", "in", "on", "of", "is", "are", "we",
     "it", "with", "need", "needs", "please", "can", "not", "no", "that", "this",
@@ -8111,7 +8323,7 @@ def create_it_request(data: dict):
     lang = "ru" if str(data.get("lang") or "").lower() == "ru" else "en"
     now = datetime.utcnow().isoformat()
     conn = get_db()
-    ref = _it_next_ref(conn)
+    ref = allocate_ref(conn)
     cur = conn.execute(
         "INSERT INTO it_requests (ref, created_at, lang, requester_email, requester_slack,"
         " department, kind, system, summary, current_workaround, business_value, impact,"
