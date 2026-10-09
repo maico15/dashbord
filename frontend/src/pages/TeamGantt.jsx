@@ -1,5 +1,5 @@
 import { Fragment, useState, useEffect, useLayoutEffect, useMemo, useRef } from "react";
-import { Link } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 import { useTheme, toggleTheme } from "../hooks/useTheme";
 import { api } from "../api/client";
 import AppFooter from "../components/AppFooter";
@@ -434,15 +434,20 @@ function computeDraftState(baseEngineers, baseBacklogItems, changeQueue) {
         if (eng && item) {
           const hasActive = eng.assignments.some((a) => a.status === "active");
           const status = hasActive ? "queued" : "active";
+          // Same lossless carry-over the backend does: ref, description,
+          // priority, and the percent a task returned from the Gantt left with.
+          const restored = stripRemovedLine(item.description);
           eng.assignments.push({
             id: ch.tempId,
+            ref: item.ref || null,
             project: item.title,
             est_days: item.est_days || 10,
-            percent: 0,
+            percent: restored.percent ?? 0,
             status,
             queue_start: status === "queued" ? ch.startDate : null,
             start_date: ch.startDate,
-            note: "",
+            note: restored.text,
+            priority: item.priority || "",
             __pending: true,
           });
         }
@@ -896,6 +901,52 @@ function CalendarGlyph() {
   );
 }
 
+/* ---------------- task refs (IT-0162) ---------------- */
+
+const REF_RE = /^\s*it[-\s]?(\d{1,6})\s*$/i;
+
+/** "it-162" / "IT 0162" / "IT-0162" → "IT-0162"; anything else → null. */
+function normalizeRef(text) {
+  const m = REF_RE.exec(String(text || ""));
+  return m ? `IT-${String(Number(m[1])).padStart(4, "0")}` : null;
+}
+
+/* Mirrors the backend's _strip_removed_line: the "Снято с Ганта …" line that
+ * "return to backlog" appends is read back for the percent and then dropped,
+ * so the draft preview of an assign shows what Save will store. */
+const REMOVED_LINE_RE = /(?:\n\n)?^Снято с Ганта [^\n]*?, было (\d{1,3})% у [^\n]*$\n?/gm;
+
+function stripRemovedLine(text) {
+  const src = text || "";
+  const found = [...src.matchAll(REMOVED_LINE_RE)];
+  if (found.length === 0) return { text: src, percent: null };
+  const percent = Math.max(0, Math.min(100, Number(found[found.length - 1][1])));
+  return { text: src.replace(REMOVED_LINE_RE, ""), percent };
+}
+
+/** Monospace ref chip; click copies it. Clicks never reach the row/bar under it. */
+function RefChip({ value, className = "" }) {
+  const [copied, setCopied] = useState(false);
+  if (!value) return null;
+  function copy(e) {
+    e.stopPropagation();
+    e.preventDefault();
+    const done = () => { setCopied(true); setTimeout(() => setCopied(false), 1200) };
+    try {
+      navigator.clipboard.writeText(value).then(done, () => {});
+    } catch { /* clipboard unavailable (http, old browser) */ }
+  }
+  return (
+    <span
+      className={`tg-ref${copied ? " copied" : ""} ${className}`}
+      title={copied ? TXT.copied : TXT.copyRef}
+      role="button"
+      onMouseDown={(e) => e.stopPropagation()}
+      onClick={copy}
+    >{copied ? "✓ " : ""}{value}</span>
+  );
+}
+
 const STATUS_LABEL = {
   active: "active", queued: "queued", done: "done",
   continuous: "ongoing", error: "?", idle: "idle",
@@ -917,10 +968,24 @@ const TXT = {
   en: {
     starts: "starts", overdue: "overdue", noTask: "No active task",
     active: "active", queued: "queued", continuous: "ongoing", done: "done",
+    copyRef: "Click to copy", copied: "Copied",
+    toBacklog: "Return to backlog", toBacklogReason: "Why is it leaving the plan? (required)",
+    toBacklogConfirm: "Return", cancel: "Cancel", toBacklogSaveFirst: "Save or undo this task's changes first",
+    toBacklogDone: (ref) => `${ref} returned to backlog`,
+    search: "IT-0162 or text…", searchNone: (q) => `Nothing matches “${q}”`,
+    searchBacklog: (ref) => `${ref} is in the backlog`, searchHidden: (n) => `${n}'s lane is hidden`,
+    searchRequest: (ref) => `${ref} is an IT request`, searchDone: "It is in the Done tab",
   },
   ru: {
     starts: "старт", overdue: "просрочена", noTask: "Нет активной задачи",
     active: "в работе", queued: "в очереди", continuous: "бессрочно", done: "сделано",
+    copyRef: "Нажмите, чтобы скопировать", copied: "Скопировано",
+    toBacklog: "Вернуть в бэклог", toBacklogReason: "Почему задача уходит из плана? (обязательно)",
+    toBacklogConfirm: "Вернуть", cancel: "Отмена", toBacklogSaveFirst: "Сначала сохраните или отмените изменения этой задачи",
+    toBacklogDone: (ref) => `${ref} возвращена в бэклог`,
+    search: "IT-0162 или текст…", searchNone: (q) => `Ничего не найдено: «${q}»`,
+    searchBacklog: (ref) => `${ref} — в бэклоге`, searchHidden: (n) => `Дорожка ${n} скрыта`,
+    searchRequest: (ref) => `${ref} — это заявка в IT`, searchDone: "Задача во вкладке Done",
   },
 }[LANG];
 
@@ -1010,6 +1075,7 @@ function TaskRow({
         `tg-task-row${selected ? " tg-task-selected" : ""}${done ? " tg-task-done" : ""}`
       }
       style={{ gridColumn: 1, gridRow }}
+      data-assignment-id={a.id}
       onMouseEnter={() => setHoveredId(a.id)}
       onMouseLeave={() => setHoveredId(null)}
       onMouseDown={beginClickTracking}
@@ -1031,7 +1097,8 @@ function TaskRow({
         className={`tg-sdot tg-sdot-${dotStatus}`}
         title={STATUS_LABEL[dotStatus] || dotStatus}
       />
-      <span className="tg-task-name" title={a.project}>
+      <span className="tg-task-name" title={a.ref ? `${a.ref} · ${a.project}` : a.project}>
+        <RefChip value={a.ref} />
         {bar.kind === "error" && "⚠ "}{a.project}
         {a.__pending && <span className="tg-pending-dot" title="Unsaved" />}
       </span>
@@ -1290,9 +1357,39 @@ const PANEL_STATUSES = ["active", "queued", "continuous", "done"];
  *  keeps its last contents while it slides out, otherwise the fields would
  *  blank out mid-transition.
  */
-function TaskSidePanel({ assignment, engineers, editMode, width, onWidthChange, onApply, onDelete, onClose }) {
+function TaskSidePanel({
+  assignment, engineers, editMode, width, onWidthChange, onApply, onDelete, onClose,
+  onReturnToBacklog, returnBlocked,
+}) {
   const [form, setForm] = useState(null);
   const panelRef = useRef(null);
+  // "Return to backlog" is a two-step control: the button opens a reason box,
+  // and nothing is sent until a reason is typed — a task leaving the plan
+  // without one is how work gets lost.
+  const [returning, setReturning] = useState(false);
+  const [returnReason, setReturnReason] = useState("");
+  const [returnBusy, setReturnBusy] = useState(false);
+  const [returnError, setReturnError] = useState("");
+
+  useEffect(() => {
+    setReturning(false);
+    setReturnReason("");
+    setReturnError("");
+  }, [assignment?.id]);
+
+  async function submitReturn() {
+    const reason = returnReason.trim();
+    if (!assignment || !reason || returnBusy) return;
+    setReturnBusy(true);
+    setReturnError("");
+    try {
+      await onReturnToBacklog(assignment, reason);
+    } catch (err) {
+      setReturnError(err.message || "Failed");
+    } finally {
+      setReturnBusy(false);
+    }
+  }
 
   const seedKey = assignment
     ? [assignment.id, assignment.project, assignment.start_date,
@@ -1422,7 +1519,7 @@ function TaskSidePanel({ assignment, engineers, editMode, width, onWidthChange, 
       {form && (
         <>
           <div className="tg-sp-head">
-            <span className="tg-sp-title">Task</span>
+            <span className="tg-sp-title">Task <RefChip value={assignment?.ref} className="tg-ref-lg" /></span>
             <button className="tg-sp-close" onClick={onClose} title="Close (Esc)">×</button>
           </div>
 
@@ -1517,6 +1614,46 @@ function TaskSidePanel({ assignment, engineers, editMode, width, onWidthChange, 
               onClick={() => { if (assignment) { onDelete(assignment.id); onClose() } }}
             >Delete</button>
           </div>
+
+          {onReturnToBacklog && (
+            <div className="tg-sp-return">
+              {!returning ? (
+                <button
+                  className="tg-btn tg-sp-return-btn"
+                  disabled={!!returnBlocked}
+                  title={returnBlocked || ""}
+                  onClick={() => setReturning(true)}
+                >↩ {TXT.toBacklog}</button>
+              ) : (
+                <>
+                  <textarea
+                    className="tg-sp-textarea"
+                    rows={2}
+                    autoFocus
+                    placeholder={TXT.toBacklogReason}
+                    value={returnReason}
+                    onChange={(e) => setReturnReason(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) submitReturn();
+                    }}
+                  />
+                  <div className="tg-sp-actions tg-sp-actions-tight">
+                    <button
+                      className="tg-btn tg-sp-apply"
+                      disabled={!returnReason.trim() || returnBusy}
+                      onClick={submitReturn}
+                    >{returnBusy ? "…" : TXT.toBacklogConfirm}</button>
+                    <button
+                      className="tg-btn"
+                      onClick={() => { setReturning(false); setReturnReason(""); setReturnError("") }}
+                    >{TXT.cancel}</button>
+                  </div>
+                </>
+              )}
+              {returnBlocked && <div className="tg-sp-hint">{returnBlocked}</div>}
+              {returnError && <div className="tg-sp-error">{returnError}</div>}
+            </div>
+          )}
         </>
       )}
     </aside>
@@ -1606,6 +1743,14 @@ export default function TeamGantt() {
       return null;
     }
   });
+  // Board search: a ref (IT-0162) or free text. `searchHit` cycles through
+  // free-text matches on repeated Enter; `foundBacklogId` highlights a dock row.
+  const [searchQ, setSearchQ] = useState("");
+  const [searchMsg, setSearchMsg] = useState(null); // {text, href?} under the field
+  const searchCursorRef = useRef({ q: "", i: -1 });
+  const [foundBacklogId, setFoundBacklogId] = useState(null);
+  const [searchParams] = useSearchParams();
+  const urlRefHandledRef = useRef(false);
   const [blSearch, setBlSearch] = useState("");
   const [blSearchDebounced, setBlSearchDebounced] = useState("");
   const [blPriorityFilter, setBlPriorityFilter] = useState([]); // selected priority chip values; [] = all
@@ -2035,6 +2180,134 @@ export default function TeamGantt() {
     setTimeout(() => setBacklogToast(""), 5000);
   }
 
+  /* ---------------- return to backlog ---------------- */
+
+  // Written straight away rather than staged: it moves a row between two
+  // tables and needs a reason, which the draft queue has no way to carry.
+  // Blocked while this task has unsaved edits (or another staged change
+  // points at it) — those would be replayed against a row that is gone.
+  function returnBlockedFor(a) {
+    if (!a) return null;
+    if (typeof a.id === "string" || a.__pending) return TXT.toBacklogSaveFirst;
+    const touched = changeQueue.some((ch) =>
+      ch.id === a.id || ch.fields?.depends_on === a.id
+    );
+    return touched ? TXT.toBacklogSaveFirst : null;
+  }
+
+  function returnToBacklog(assignment, reason) {
+    return new Promise((resolve, reject) => {
+      withPassword(async (p) => {
+        try {
+          const item = await api.post(`/gantt/${assignment.id}/to-backlog`, { reason }, p);
+          setSelectedId(null);
+          await load();
+          setBlCollapsed(false);
+          setFoundBacklogId(item.id);
+          setBacklogToast(TXT.toBacklogDone(item.ref || assignment.ref || `#${item.id}`));
+          setTimeout(() => setBacklogToast(""), 6000);
+          resolve(item);
+        } catch (err) {
+          let msg = err.message;
+          try { msg = JSON.parse(err.message).detail || msg } catch { /* plain text */ }
+          reject(new Error(msg));
+        }
+      });
+    });
+  }
+
+  /* ---------------- board search: ref or free text ---------------- */
+
+  function scrollToSelector(selector) {
+    // After the state change has rendered (dock opened, view switched).
+    setTimeout(() => {
+      const el = document.querySelector(selector);
+      if (el) el.scrollIntoView({ block: "center", behavior: "smooth" });
+    }, 60);
+  }
+
+  function revealAssignment(a, engineer) {
+    if (!editMode && engineer?.hidden) {
+      setSearchMsg({ text: TXT.searchHidden(engineer.name) });
+      return;
+    }
+    if ((a.status === "done") !== doneView) {
+      if (editMode) {
+        setSearchMsg({ text: TXT.searchDone });
+        return;
+      }
+      setView(a.status === "done" ? "done" : "active");
+    }
+    setSelectedId(a.id);
+    setFoundBacklogId(null);
+    scrollToSelector(`[data-assignment-id="${a.id}"]`);
+  }
+
+  function revealBacklogItem(item, label) {
+    setBlCollapsed(false);
+    // Make sure no filter is hiding the row we are pointing at.
+    setBlPriorityFilter([]);
+    setBlOwnerFilter("");
+    setBlSearch(item.ref || "");
+    setBlSearchDebounced(item.ref || "");
+    setFoundBacklogId(item.id);
+    setSearchMsg({ text: label });
+    scrollToSelector(`[data-backlog-id="${item.id}"]`);
+  }
+
+  function runSearch(raw) {
+    const q = String(raw || "").trim();
+    setSearchMsg(null);
+    if (!q) return;
+    const assignmentsWithEng = [];
+    for (const e of draft.engineers || [])
+      for (const a of e.assignments || []) assignmentsWithEng.push({ a, e });
+
+    const ref = normalizeRef(q);
+    if (ref) {
+      const hit = assignmentsWithEng.find(({ a }) => a.ref === ref);
+      if (hit) { revealAssignment(hit.a, hit.e); return; }
+      const item = (draft.backlogItems || []).find((b) => b.ref === ref);
+      if (item) { revealBacklogItem(item, TXT.searchBacklog(ref)); return; }
+      // Not on this page — it may be an IT request. Ask the resolver when we
+      // already hold the password; never prompt for it just to search.
+      if (pwRef.current) {
+        api.get(`/ref/${ref}?password=${encodeURIComponent(pwRef.current)}`)
+          .then((r) => setSearchMsg(r.kind === "request"
+            ? { text: `${TXT.searchRequest(ref)}: ${r.title}`, href: r.url }
+            : { text: `${ref}: ${r.title}` }))
+          .catch(() => setSearchMsg({ text: TXT.searchNone(ref) }));
+      } else {
+        setSearchMsg({ text: TXT.searchNone(ref) });
+      }
+      return;
+    }
+
+    const needle = q.toLowerCase();
+    const matches = assignmentsWithEng.filter(({ a }) =>
+      `${a.project || ""} ${a.note || ""}`.toLowerCase().includes(needle)
+    );
+    if (matches.length) {
+      const cur = searchCursorRef.current;
+      const i = cur.q === needle ? (cur.i + 1) % matches.length : 0;
+      searchCursorRef.current = { q: needle, i };
+      revealAssignment(matches[i].a, matches[i].e);
+      if (matches.length > 1) setSearchMsg({ text: `${i + 1} / ${matches.length} — Enter →` });
+      return;
+    }
+    const inBacklog = (draft.backlogItems || []).some((b) =>
+      `${b.title || ""} ${b.description || ""}`.toLowerCase().includes(needle)
+    );
+    if (inBacklog) {
+      setBlCollapsed(false);
+      setBlSearch(q);
+      setBlSearchDebounced(q);
+      setFoundBacklogId(null);
+      return;
+    }
+    setSearchMsg({ text: TXT.searchNone(q) });
+  }
+
   /* ---------------- shared: row/bar click → task detail modal ---------------- */
   // A click opens the modal, UNLESS the pointer moved more than 5px between
   // mousedown and click (i.e. it was a completed drag, not a click). Shared
@@ -2197,6 +2470,16 @@ export default function TeamGantt() {
     [data.engineers, backlog, changeQueue]
   );
 
+  // /team-gantt?ref=IT-0162 — the link GET /api/ref/{ref} hands out.
+  useEffect(() => {
+    if (loading || urlRefHandledRef.current) return;
+    const ref = searchParams.get("ref");
+    if (!ref) return;
+    urlRefHandledRef.current = true;
+    setSearchQ(ref);
+    runSearch(ref);
+  }, [loading, searchParams]);
+
   // Display order for the backlog table: always grouped into priority blocks
   // (P0→P1→P2→ENABLER→GATED), manual order preserved within a block. A stable
   // sort (JS Array.sort) makes this the single source of truth for both
@@ -2243,7 +2526,7 @@ export default function TeamGantt() {
     if (blOwnerFilter && !(item.owner || "").toLowerCase().includes(blOwnerFilter.toLowerCase())) return false;
     if (blSearchDebounced.trim()) {
       const q = blSearchDebounced.trim().toLowerCase();
-      const haystack = `${item.title || ""} ${item.description || ""} ${item.source || ""}`.toLowerCase();
+      const haystack = `${item.ref || ""} ${item.title || ""} ${item.description || ""} ${item.source || ""}`.toLowerCase();
       if (!haystack.includes(q)) return false;
     }
     return true;
@@ -2613,6 +2896,26 @@ export default function TeamGantt() {
         <Link to="/review/august-2026" className="tg-btn" title="August 2026 monthly review">
           <CalendarGlyph /> Monthly review
         </Link>
+
+        <form
+          className="tg-search"
+          role="search"
+          onSubmit={(e) => { e.preventDefault(); runSearch(searchQ) }}
+        >
+          <input
+            className="tg-search-input"
+            type="search"
+            value={searchQ}
+            placeholder={TXT.search}
+            aria-label={TXT.search}
+            onChange={(e) => { setSearchQ(e.target.value); if (!e.target.value) setSearchMsg(null) }}
+          />
+          {searchMsg && (
+            <span className="tg-search-msg">
+              {searchMsg.href ? <Link to={searchMsg.href}>{searchMsg.text}</Link> : searchMsg.text}
+            </span>
+          )}
+        </form>
 
         <div className="tg-controls">
           <button className="tg-btn" onClick={syncFromReports}>⟳ Sync from reports</button>
@@ -3166,7 +3469,8 @@ export default function TeamGantt() {
                 <tr
                   key={row.item.id}
                   draggable={editMode && !hasActiveBacklogFilter}
-                  className={`bl-row${backlogDragId === row.item.id ? " bl-row-dragging" : ""}${
+                  data-backlog-id={row.item.id}
+                  className={`bl-row${foundBacklogId === row.item.id ? " bl-row-found" : ""}${backlogDragId === row.item.id ? " bl-row-dragging" : ""}${
                     backlogOverRow?.id === row.item.id ? ` bl-row-drop-${backlogOverRow.pos}` : ""
                   }${row.item.__pending ? " bl-row-pending" : ""}`}
                   onDragStart={(e) => handleBacklogRowDragStart(e, row.item.id)}
@@ -3178,7 +3482,8 @@ export default function TeamGantt() {
                 >
                   <td className="bl-td-grip">{editMode && <span className="bl-grip">⠿</span>}</td>
                   <td className="bl-td-num">{row.num}</td>
-                  <td className="bl-td-title">
+                  <td className="bl-td-title" title={row.item.ref ? `${row.item.ref} · ${row.item.title}` : row.item.title}>
+                    <RefChip value={row.item.ref} />
                     {row.item.title}
                     {row.item.__pending && <span className="tg-pending-badge bl-pending-badge" title="Unsaved change">unsaved</span>}
                   </td>
@@ -3274,6 +3579,8 @@ export default function TeamGantt() {
           onApply={updateAssignment}
           onDelete={deleteAssignment}
           onClose={() => setSelectedId(null)}
+          onReturnToBacklog={returnToBacklog}
+          returnBlocked={selectedId != null ? returnBlockedFor(assignmentsById[selectedId]) : null}
         />
       )}
 
@@ -3282,7 +3589,10 @@ export default function TeamGantt() {
           taskKey={`b-${detailBacklogItem.id}`}
           title={detailBacklogItem.title}
           titleEditable
-          badge={<span className={`bl-chip ${priorityChipClass(detailBacklogItem.priority)}`}>{detailBacklogItem.priority}</span>}
+          badge={<>
+            <RefChip value={detailBacklogItem.ref} />
+            <span className={`bl-chip ${priorityChipClass(detailBacklogItem.priority)}`}>{detailBacklogItem.priority}</span>
+          </>}
           body={detailBacklogItem.description}
           meta={[
             { label: "Owner", value: detailBacklogItem.owner || "—" },
@@ -3305,7 +3615,10 @@ export default function TeamGantt() {
           taskKey={`g-${detailAssignmentInfo.assignment.id}`}
           title={detailAssignmentInfo.assignment.project || "Untitled"}
           titleEditable={false}
-          badge={<GanttDetailBadge assignment={detailAssignmentInfo.assignment} />}
+          badge={<>
+            <RefChip value={detailAssignmentInfo.assignment.ref} />
+            <GanttDetailBadge assignment={detailAssignmentInfo.assignment} />
+          </>}
           body={detailAssignmentInfo.assignment.note}
           meta={ganttDetailMeta(detailAssignmentInfo.bar, detailAssignmentInfo.assignment, detailAssignmentInfo.engineerName)}
           editable={editMode}
@@ -3528,6 +3841,30 @@ function Style() {
       .tg-task-done .tg-task-name{color:var(--ios-label3);text-decoration:line-through}
       .tg-task-pct{font-size:12px;color:var(--ios-label3);text-align:right;padding-right:8px;
         font-variant-numeric:tabular-nums}
+      /* Task ref chip (IT-0162): monospace, click copies. */
+      .tg-ref{display:inline-block;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+        font-size:10.5px;font-weight:500;line-height:16px;padding:0 5px;margin-right:6px;
+        border-radius:5px;background:var(--ios-bg);color:var(--ios-label2, var(--ios-label3));
+        border:0.5px solid var(--ios-sep);cursor:copy;vertical-align:1px;white-space:nowrap;
+        text-decoration:none}
+      .tg-ref:hover{color:var(--ios-blue-ink);border-color:var(--ios-blue)}
+      .tg-ref.copied{color:var(--ios-green-text, var(--ios-blue-ink))}
+      .tg-ref-lg{font-size:11.5px;line-height:18px;margin-left:6px;vertical-align:2px}
+      .tg-search{flex:0 1 auto;display:flex;align-items:center;gap:8px;min-width:0;margin:0}
+      .tg-search-input{flex:none;width:150px;height:30px;box-sizing:border-box;padding:0 10px;border-radius:9px;
+        border:none;background:var(--ios-card);color:var(--ios-label);font-size:13px;font-family:inherit;
+        box-shadow:var(--ios-shadow-btn)}
+      .tg-search-input:focus{outline:2px solid var(--ios-blue);outline-offset:-1px}
+      .tg-search-msg{font-size:12px;color:var(--ios-label3);white-space:nowrap;overflow:hidden;
+        text-overflow:ellipsis;max-width:280px}
+      .tg-search-msg a{color:var(--ios-blue-ink)}
+      .tg-sp-return{margin-top:14px;padding-top:12px;border-top:0.5px solid var(--ios-sep)}
+      .tg-sp-return-btn{width:100%;justify-content:center;height:32px;color:var(--ios-label)}
+      .tg-sp-return-btn:disabled{opacity:.5;cursor:not-allowed}
+      .tg-sp-actions-tight{margin-top:8px}
+      .tg-sp-hint{font-size:11.5px;color:var(--ios-label3);margin-top:6px}
+      .tg-sp-error{font-size:12px;color:var(--ios-red-text, #d70015);margin-top:6px}
+      .bl-row-found td{background:var(--ios-blue-tint)}
       .tg-pending-dot{display:inline-block;width:5px;height:5px;border-radius:50%;
         background:var(--ios-blue);margin-left:5px;vertical-align:middle}
 
