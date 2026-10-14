@@ -1003,6 +1003,31 @@ def init_db():
             );
         """)
 
+    # ── Monthly review: project grouping + measured changes ──────────────────
+    # Empty project_* means "ungrouped" — every August 2026 row is, and the page
+    # renders those as a flat list exactly as before.
+    with conn.step("monthly_review_tasks project columns"):
+        conn.add_column_if_missing("monthly_review_tasks", "project_en", "TEXT DEFAULT ''")
+        conn.add_column_if_missing("monthly_review_tasks", "project_ru", "TEXT DEFAULT ''")
+
+    # Before → after figures shown under the engineers ("Измеренные изменения").
+    with conn.step("monthly_review_changes"):
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS monthly_review_changes (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                month        INTEGER NOT NULL,
+                year         INTEGER NOT NULL,
+                sort_order   INTEGER DEFAULT 0,
+                label_en     TEXT DEFAULT '',
+                label_ru     TEXT DEFAULT '',
+                note_en      TEXT DEFAULT '',
+                note_ru      TEXT DEFAULT '',
+                before_value TEXT DEFAULT '',
+                after_value  TEXT DEFAULT '',
+                updated_at   TEXT
+            );
+        """)
+
     conn.close()
 
 
@@ -7422,6 +7447,17 @@ class ReviewTask(BaseModel):
     value_note_en: str = ""
     value_note_ru: str = ""
     confidence: str = "none"
+    project_en: str = ""
+    project_ru: str = ""
+
+
+class ReviewChange(BaseModel):
+    label_en: str = ""
+    label_ru: str = ""
+    note_en: str = ""
+    note_ru: str = ""
+    before_value: str = ""
+    after_value: str = ""
 
 
 class ReviewOrder(BaseModel):
@@ -7447,6 +7483,20 @@ def _next_order(conn, table: str, month: int, year: int) -> int:
         (month, year),
     ).fetchone()
     return row[0]
+
+
+def _group_by_project(tasks):
+    """Bucket already-sorted tasks by project. A project sits where its first
+    task does, and tasks keep sort_order inside it. Ungrouped tasks (empty
+    project_*) form a bucket with empty names, which the page renders without a
+    band - so an all-ungrouped month like August 2026 stays a flat list."""
+    groups = {}
+    for t in tasks:
+        key = (t.get("project_en") or "", t.get("project_ru") or "")
+        if key not in groups:
+            groups[key] = {"name_en": key[0], "name_ru": key[1], "tasks": []}
+        groups[key]["tasks"].append(t)
+    return list(groups.values())
 
 
 @app.get("/api/monthly-review/latest")
@@ -7507,12 +7557,31 @@ def get_monthly_review(year: int, month: int):
     c.execute(
         "SELECT id, engineer_id, sort_order, title_en, title_ru, task_en, task_ru, "
         "       goal_en, goal_ru, benefit_en, benefit_ru, "
-        "       value_amount, value_note_en, value_note_ru, confidence "
+        "       value_amount, value_note_en, value_note_ru, confidence, "
+        "       project_en, project_ru "
         "FROM monthly_review_tasks WHERE month=? AND year=? ORDER BY sort_order, id",
         (month, year),
     )
     tasks = [dict(r) for r in c.fetchall()]
+
+    c.execute(
+        "SELECT id, sort_order, label_en, label_ru, note_en, note_ru, "
+        "       before_value, after_value "
+        "FROM monthly_review_changes WHERE month=? AND year=? ORDER BY sort_order, id",
+        (month, year),
+    )
+    changes = [dict(r) for r in c.fetchall()]
+
+    # Neighbours come from months that actually have a meta row, not month±1,
+    # so a gap in published months never yields a link to an empty review.
+    c.execute("SELECT year, month FROM monthly_review_meta")
+    published = sorted((r[0], r[1]) for r in c.fetchall())
     conn.close()
+    here = (year, month)
+    earlier = [ym for ym in published if ym < here]
+    later = [ym for ym in published if ym > here]
+    prev_ref = {"year": earlier[-1][0], "month": earlier[-1][1]} if earlier else None
+    next_ref = {"year": later[0][0], "month": later[0][1]} if later else None
 
     by_engineer = {}
     for t in tasks:
@@ -7521,6 +7590,7 @@ def get_monthly_review(year: int, month: int):
     for e in engineers:
         e["initials"] = _initials(e["name_en"])
         e["tasks"] = by_engineer.get(e["engineer_id"], [])
+        e["projects"] = _group_by_project(e["tasks"])
 
     listed = {e["engineer_id"] for e in engineers}
     return {
@@ -7528,6 +7598,9 @@ def get_monthly_review(year: int, month: int):
         "meta": meta,
         "summary": summary,
         "engineers": engineers,
+        "changes": changes,
+        "prev": prev_ref,
+        "next": next_ref,
         # Tasks belonging to nobody in _engineers would otherwise vanish from the
         # page with no sign; surface the count so it is visible, not silent.
         "orphan_tasks": sum(len(v) for k, v in by_engineer.items() if k not in listed),
@@ -7576,6 +7649,7 @@ def reorder_monthly_review(kind: str, data: ReviewOrder, password: str = ""):
         "summary":   "monthly_review_summary",
         "engineers": "monthly_review_engineers",
         "tasks":     "monthly_review_tasks",
+        "changes":   "monthly_review_changes",
     }.get(kind)
     if not table:
         raise HTTPException(404, "Unknown collection")
@@ -7633,6 +7707,53 @@ def delete_summary_card(card_id: int, password: str = ""):
         raise HTTPException(403, "Unauthorized")
     conn = get_db()
     conn.execute("DELETE FROM monthly_review_summary WHERE id=?", (card_id,))
+    conn.commit()
+    conn.close()
+    return {"ok": True}
+
+
+@app.post("/api/monthly-review/{year}/{month}/changes")
+def add_review_change(year: int, month: int, data: ReviewChange, password: str = ""):
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    conn = get_db()
+    cur = conn.execute(
+        "INSERT INTO monthly_review_changes "
+        "(month, year, sort_order, label_en, label_ru, note_en, note_ru, before_value, "
+        " after_value, updated_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?)",
+        (month, year, _next_order(conn, "monthly_review_changes", month, year),
+         data.label_en, data.label_ru, data.note_en, data.note_ru,
+         data.before_value, data.after_value, datetime.utcnow().isoformat()),
+    )
+    conn.commit()
+    cid = cur.lastrowid
+    conn.close()
+    return {"ok": True, "id": cid}
+
+
+@app.patch("/api/monthly-review/changes/{change_id}")
+def update_review_change(change_id: int, data: ReviewChange, password: str = ""):
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    conn = get_db()
+    conn.execute(
+        "UPDATE monthly_review_changes SET label_en=?, label_ru=?, note_en=?, note_ru=?, "
+        "before_value=?, after_value=?, updated_at=? WHERE id=?",
+        (data.label_en, data.label_ru, data.note_en, data.note_ru,
+         data.before_value, data.after_value, datetime.utcnow().isoformat(), change_id),
+    )
+    conn.commit()
+    conn.close()
+    return {"ok": True}
+
+
+@app.delete("/api/monthly-review/changes/{change_id}")
+def delete_review_change(change_id: int, password: str = ""):
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    conn = get_db()
+    conn.execute("DELETE FROM monthly_review_changes WHERE id=?", (change_id,))
     conn.commit()
     conn.close()
     return {"ok": True}
@@ -7716,14 +7837,15 @@ def add_review_task(year: int, month: int, data: ReviewTask, password: str = "")
         "INSERT INTO monthly_review_tasks "
         "(month, year, engineer_id, sort_order, title_en, title_ru, task_en, task_ru, "
         " goal_en, goal_ru, benefit_en, benefit_ru, value_amount, value_note_en, "
-        " value_note_ru, confidence, updated_at) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        " value_note_ru, confidence, project_en, project_ru, updated_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (month, year, data.engineer_id,
          _next_order(conn, "monthly_review_tasks", month, year),
          data.title_en, data.title_ru, data.task_en, data.task_ru,
          data.goal_en, data.goal_ru, data.benefit_en, data.benefit_ru,
          data.value_amount, data.value_note_en, data.value_note_ru,
-         data.confidence, datetime.utcnow().isoformat()),
+         data.confidence, data.project_en, data.project_ru,
+         datetime.utcnow().isoformat()),
     )
     conn.commit()
     tid = cur.lastrowid
@@ -7740,11 +7862,12 @@ def update_review_task(task_id: int, data: ReviewTask, password: str = ""):
     conn.execute(
         "UPDATE monthly_review_tasks SET engineer_id=?, title_en=?, title_ru=?, task_en=?, "
         "task_ru=?, goal_en=?, goal_ru=?, benefit_en=?, benefit_ru=?, value_amount=?, "
-        "value_note_en=?, value_note_ru=?, confidence=?, updated_at=? WHERE id=?",
+        "value_note_en=?, value_note_ru=?, confidence=?, project_en=?, project_ru=?, "
+        "updated_at=? WHERE id=?",
         (data.engineer_id, data.title_en, data.title_ru, data.task_en, data.task_ru,
          data.goal_en, data.goal_ru, data.benefit_en, data.benefit_ru,
          data.value_amount, data.value_note_en, data.value_note_ru, data.confidence,
-         datetime.utcnow().isoformat(), task_id),
+         data.project_en, data.project_ru, datetime.utcnow().isoformat(), task_id),
     )
     conn.commit()
     conn.close()

@@ -86,7 +86,7 @@ Key helpers:
 
 **SQLite/PostgreSQL tables**:
 `team_members`, `dev_metrics`, `support_metrics`, `docs_metrics`, `score_rules`, `config`, `ai_usage_cache`, `weekly_tasks`, `sync_log`, `api_key_mapping`, `ai_usage`, `daily_reports`, `ref_counter`,
-`monthly_review_meta`, `monthly_review_summary`, `monthly_review_engineers`, `monthly_review_tasks`, `ai_access`, `ai_access_events`, `ai_seat_imports`, `ai_services`, `ai_risks`
+`monthly_review_meta`, `monthly_review_summary`, `monthly_review_engineers`, `monthly_review_tasks`, `monthly_review_changes`, `ai_access`, `ai_access_events`, `ai_seat_imports`, `ai_services`, `ai_risks`
 
 **Key endpoints**:
 
@@ -105,11 +105,11 @@ Key helpers:
 | GET | `/api/ai-usage/test` | pw | Test Anthropic Admin API key |
 | GET/PUT | `/api/ai-key-mappings` | PUT needs pw | Engineer ↔ Anthropic key ID mapping |
 | GET | `/api/reports` | — | Daily reports by date |
-| GET | `/api/monthly-review/{year}/{month}` | — | Whole review in one call — meta, summary cards, engineers with nested tasks |
+| GET | `/api/monthly-review/{year}/{month}` | — | Whole review in one call — meta, summary cards, engineers with nested tasks and `projects`, `changes`, `prev`/`next` |
 | GET | `/api/monthly-review/latest` | — | `{year, month}` of the newest month with at least one task; 404 if none |
 | PUT | `/api/monthly-review/{year}/{month}/meta` | pw | Upsert the month's title + assumptions note |
-| POST/PATCH/DELETE | `/api/monthly-review/.../summary`, `/engineers`, `/tasks` | pw | Review content CRUD |
-| PATCH | `/api/monthly-review/{summary\|engineers\|tasks}/reorder` | pw | Reorder by id list |
+| POST/PATCH/DELETE | `/api/monthly-review/.../summary`, `/engineers`, `/tasks`, `/changes` | pw | Review content CRUD |
+| PATCH | `/api/monthly-review/{summary\|engineers\|tasks\|changes}/reorder` | pw | Reorder by id list |
 | POST | `/api/sync/jira` | pw | Trigger Jira sync |
 | POST | `/api/sync/github` | pw | Trigger GitHub PR sync |
 | GET | `/api/sync/github/debug` | — | Config + live API test + last 5 log entries |
@@ -236,14 +236,15 @@ published month via `GET /api/monthly-review/latest` and falls back to
 "Previous review" pointer (there was no July 2026 review), held in
 `PREVIOUS_REVIEW` on that page.
 
-Four tables keyed by `(month, year)`:
+Five tables keyed by `(month, year)`:
 
 | Table | Holds |
 |---|---|
 | `monthly_review_meta` | one row per month — bilingual title, assumptions note |
 | `monthly_review_summary` | the headline cards (`tone` uses the confidence scale) |
 | `monthly_review_engineers` | who appears, in what order, and the role held **that month** |
-| `monthly_review_tasks` | the work — task / goal / benefit / value + `confidence` |
+| `monthly_review_tasks` | the work — task / goal / benefit / value + `confidence`, optional `project_en`/`project_ru` |
+| `monthly_review_changes` | "measured changes" rows — label, one-line note, `before_value` → `after_value` |
 
 Bilingual content is stored as parallel `_en` / `_ru` columns; the page's
 `pick(row, field, lang)` reads the active half. Engineer name and colour come
@@ -260,6 +261,20 @@ Reads are public (the page is public); every write takes `?password=`.
 page shows a "not published" notice. A task whose engineer is not listed in
 `monthly_review_engineers` renders nowhere, so the GET reports `orphan_tasks`
 and the page warns rather than dropping it silently.
+
+**Projects.** Each engineer in the GET also carries `projects` — tasks bucketed
+by `project_*`, projects in order of first appearance by `sort_order`. Empty
+`project_*` means ungrouped. A month with **no** named project (August 2026)
+renders the original two-column grid untouched; any named project switches the
+page to collapsible engineer cards (first one open) with a tinted band per
+project and "Сделано / Выгода" task lines. Task PATCH is a full-row replace, so
+send `project_*` on every PATCH or it is cleared.
+
+**Month navigation.** `prev` / `next` in the GET are the nearest months that
+have a `monthly_review_meta` row — never month ± 1 — so a gap cannot produce a
+dead link. Creating a month's meta row therefore puts it in the navigation even
+before it has content (the page then shows the "not published" notice, with the
+nav buttons kept).
 
 **Importing a static review**: `scripts/migrate_review_to_db.py` parses a
 `frontend/src/data/<month><year>.js` module and writes it into these tables.
