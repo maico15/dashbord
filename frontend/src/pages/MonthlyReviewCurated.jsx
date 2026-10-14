@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { Link, useParams } from 'react-router-dom'
+import { Link, useNavigate, useParams } from 'react-router-dom'
 import { useTheme, toggleTheme } from '../hooks/useTheme'
 import { api } from '../api/client'
 import AppFooter from '../components/AppFooter'
@@ -20,6 +20,11 @@ import LangToggle from '../components/LangToggle'
  * input we do not have, names the missing input instead of guessing.
  *
  * Rows arrive with parallel _en/_ru columns; pick() reads the active language.
+ *
+ * Two engineer layouts. A month whose tasks carry no project_* (August 2026)
+ * renders the original two-column grid, unchanged. A month with any project
+ * renders collapsible engineer cards with tasks banded by project; tasks left
+ * without a project there still render flat, without a band.
  */
 
 const DEFAULT_MONTH = 8
@@ -49,6 +54,14 @@ const PREVIOUS_REVIEW = {
 const shiftMonth = (year, month, by) => {
   const i = month - 1 + by
   return { year: year + Math.floor(i / 12), month: ((i % 12) + 12) % 12 + 1 }
+}
+
+/** Russian count noun: pluralRu(5, ['проект', 'проекта', 'проектов']). */
+function pluralRu(n, forms) {
+  const n10 = n % 10, n100 = n % 100
+  if (n10 === 1 && n100 !== 11) return forms[0]
+  if (n10 >= 2 && n10 <= 4 && (n100 < 12 || n100 > 14)) return forms[1]
+  return forms[2]
 }
 
 const monthYear = (year, month, lang) => `${MONTH_NAMES[lang][month - 1]} ${year}`
@@ -114,6 +127,14 @@ const T = {
     orphanWarning: n => `${n} task${n === 1 ? '' : 's'} belong to an engineer who is not listed in this review and are not shown.`,
     footer: 'Engineering Dashboard · Sources: EOD/EOW reports, #devs-and-product, #devs-apollo',
     nextReview: d => `Next review: ${d} →`,
+    done: 'Done',
+    goalInline: 'Goal',
+    benefitInline: 'Benefit',
+    countProjects: n => `${n} project${n === 1 ? '' : 's'}`,
+    countTasks: n => `${n} task${n === 1 ? '' : 's'}`,
+    sectionChanges: 'Measured changes',
+    prevMonth: 'Previous review',
+    nextMonth: 'Next review',
     conf: {
       confirmed: 'Confirmed',
       estimate: 'Estimate',
@@ -147,6 +168,14 @@ const T = {
     orphanWarning: n => `${n} задач(и) относятся к инженеру, которого нет в этом обзоре, и не показаны.`,
     footer: 'Engineering Dashboard · Источники: EOD/EOW репорты, #devs-and-product, #devs-apollo',
     nextReview: d => `Следующий обзор: ${d} →`,
+    done: 'Сделано',
+    goalInline: 'Цель',
+    benefitInline: 'Выгода',
+    countProjects: n => `${n} ${pluralRu(n, ['проект', 'проекта', 'проектов'])}`,
+    countTasks: n => `${n} ${pluralRu(n, ['задача', 'задачи', 'задач'])}`,
+    sectionChanges: 'Измеренные изменения',
+    prevMonth: 'Предыдущий обзор',
+    nextMonth: 'Следующий обзор',
     conf: {
       confirmed: 'Подтверждено',
       estimate: 'Оценка',
@@ -249,7 +278,6 @@ function Line({ label, text, muted }) {
 }
 
 function TaskRow({ task, lang, t, last }) {
-  const color = confColor(task.confidence)
   return (
     <div style={{ padding: '12px 0', borderBottom: last ? 'none' : '1px solid var(--border)' }}>
       <div style={{ fontSize: 13, fontWeight: 600, lineHeight: 1.4, marginBottom: 7 }}>{pick(task, 'title', lang)}</div>
@@ -258,24 +286,161 @@ function TaskRow({ task, lang, t, last }) {
       <Line label={t.goal}    text={pick(task, 'goal', lang)}    muted />
       <Line label={t.benefit} text={pick(task, 'benefit', lang)} />
 
-      <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap', marginTop: 8 }}>
-        <span style={ROW_LABEL}>{t.amount}</span>
-        <span style={{ fontSize: 15, fontWeight: 700, letterSpacing: '-.01em', color }}>{task.value_amount}</span>
-        <ConfidenceBadge level={task.confidence} t={t} />
-        <span style={{ fontSize: 11, color: 'var(--muted)', lineHeight: 1.5, flex: 1, minWidth: 160 }}>{pick(task, 'value_note', lang)}</span>
+      <ValueLine task={task} lang={lang} t={t} />
+    </div>
+  )
+}
+
+/** AMOUNT + confidence pill + note — shared by both task layouts. */
+function ValueLine({ task, lang, t }) {
+  const color = confColor(task.confidence)
+  return (
+    <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap', marginTop: 8 }}>
+      <span style={ROW_LABEL}>{t.amount}</span>
+      <span style={{ fontSize: 15, fontWeight: 700, letterSpacing: '-.01em', color }}>{task.value_amount}</span>
+      <ConfidenceBadge level={task.confidence} t={t} />
+      <span style={{ fontSize: 11, color: 'var(--muted)', lineHeight: 1.5, flex: 1, minWidth: 160 }}>{pick(task, 'value_note', lang)}</span>
+    </div>
+  )
+}
+
+// ── Project-grouped layout ────────────────────────────────────────────────────
+/** A project bucket with a name gets a band; the nameless one is "ungrouped". */
+const isNamedProject = p => Boolean(p.name_en || p.name_ru)
+
+function InlineLine({ label, text, muted }) {
+  return (
+    <div style={{ fontSize: 13, color: muted ? 'var(--muted)' : 'var(--text)', lineHeight: 1.55, marginBottom: 3 }}>
+      <span style={{ fontWeight: 600, color: 'var(--muted)' }}>{label}:</span>{' '}{text}
+    </div>
+  )
+}
+
+/** Title, then Цель (when set), Сделано, Выгода; the amount line only when
+ *  there is an amount. */
+function ProjectTaskRow({ task, lang, t, last }) {
+  const goal = pick(task, 'goal', lang)
+  return (
+    <div style={{ padding: '12px 0', borderBottom: last ? 'none' : '1px solid var(--border)' }}>
+      <div style={{ fontSize: 13, fontWeight: 700, lineHeight: 1.4, marginBottom: 6 }}>{pick(task, 'title', lang)}</div>
+      {goal && <InlineLine label={t.goalInline} text={goal} muted />}
+      <InlineLine label={t.done} text={pick(task, 'task', lang)} />
+      <InlineLine label={t.benefitInline} text={pick(task, 'benefit', lang)} />
+      {task.value_amount && <ValueLine task={task} lang={lang} t={t} />}
+    </div>
+  )
+}
+
+function ProjectBand({ project, lang, t }) {
+  return (
+    <div style={{
+      display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10,
+      marginTop: 14, padding: '8px 12px', borderRadius: 8,
+      background: 'color-mix(in srgb, var(--accent1) 10%, transparent)',
+      border: '1px solid color-mix(in srgb, var(--accent1) 25%, transparent)',
+    }}>
+      <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text)' }}>{pick(project, 'name', lang)}</span>
+      <span style={{ fontSize: 11, color: 'var(--muted)', whiteSpace: 'nowrap' }}>{t.countTasks(project.tasks.length)}</span>
+    </div>
+  )
+}
+
+function EngineerCard({ eng, lang, t, open, onToggle, scoreInput }) {
+  const projects = eng.projects ?? []
+  const named = projects.filter(isNamedProject).length
+  return (
+    <div style={{ background: 'var(--card)', border: '1px solid var(--border)', borderRadius: 12, padding: '16px 24px' }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
+        <button
+          onClick={onToggle}
+          aria-expanded={open}
+          style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0, flex: 1, background: 'none', border: 'none', padding: 0, cursor: 'pointer', color: 'inherit', textAlign: 'left', font: 'inherit' }}
+        >
+          <span style={{ fontSize: 10, color: 'var(--muted)', width: 12, flexShrink: 0, transition: 'transform .15s', transform: open ? 'rotate(90deg)' : 'none' }}>▶</span>
+          <div style={{ width: 30, height: 30, borderRadius: '50%', background: eng.color, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 11, fontWeight: 700, color: 'var(--bg)', flexShrink: 0 }}>{eng.initials}</div>
+          <div style={{ minWidth: 0 }}>
+            <div style={{ fontSize: 14, fontWeight: 600 }}>{lang === 'ru' && eng.name_ru ? eng.name_ru : eng.name_en}</div>
+            <div style={{ fontSize: 11, color: 'var(--muted)', marginTop: 1 }}>
+              {[pick(eng, 'role', lang), t.countProjects(named), t.countTasks(eng.tasks.length)].filter(Boolean).join(' · ')}
+            </div>
+          </div>
+        </button>
+        {scoreInput}
+      </div>
+      {open && (
+        <div style={{ marginTop: 6 }}>
+          {projects.map(project => (
+            <div key={`${project.name_en}|${project.name_ru}`}>
+              {isNamedProject(project) && <ProjectBand project={project} lang={lang} t={t} />}
+              <div style={{ paddingLeft: isNamedProject(project) ? 12 : 0 }}>
+                {project.tasks.map((task, ti) => (
+                  <ProjectTaskRow key={task.id} task={task} lang={lang} t={t} last={ti === project.tasks.length - 1} />
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+/** "← August 2026" / "October 2026 →". Targets come from the API's prev/next,
+ *  which only ever point at months that have a review, so there is no dead
+ *  link across a gap. Disabled at either end. */
+function MonthNavButton({ target, dir, lang, t }) {
+  const navigate = useNavigate()
+  const hint = dir < 0 ? t.prevMonth : t.nextMonth
+  const label = target ? monthYear(target.year, target.month, lang) : hint
+  return (
+    <button
+      disabled={!target}
+      onClick={() => target && navigate(`/review/${target.year}/${target.month}`)}
+      title={hint}
+      style={{
+        height: 32, padding: '0 12px', borderRadius: 8, fontSize: 12, fontWeight: 500,
+        border: '1px solid var(--border)', background: 'var(--card)',
+        color: target ? 'var(--text)' : 'var(--muted)',
+        opacity: target ? 1 : 0.45, cursor: target ? 'pointer' : 'default', whiteSpace: 'nowrap',
+      }}
+    >
+      {dir < 0 ? `← ${label}` : `${label} →`}
+    </button>
+  )
+}
+
+function MeasuredChanges({ changes, lang, t }) {
+  return (
+    <div style={{ marginBottom: 52 }}>
+      <SectionLabel>{t.sectionChanges}</SectionLabel>
+      <div style={{ background: 'var(--card)', border: '1px solid var(--border)', borderRadius: 12, padding: '4px 24px' }}>
+        {changes.map((c, i) => (
+          <div key={c.id} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16, padding: '14px 0', borderBottom: i === changes.length - 1 ? 'none' : '1px solid var(--border)' }}>
+            <div style={{ minWidth: 0 }}>
+              <div style={{ fontSize: 13, fontWeight: 700 }}>{pick(c, 'label', lang)}</div>
+              <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 3, lineHeight: 1.5 }}>{pick(c, 'note', lang)}</div>
+            </div>
+            <div style={{ fontSize: 15, fontWeight: 600, whiteSpace: 'nowrap', flexShrink: 0 }}>
+              <span style={{ color: 'var(--muted)' }}>{c.before_value}</span>
+              <span style={{ color: 'var(--muted)', margin: '0 8px' }}>→</span>
+              <span style={{ color: 'var(--success)', fontWeight: 700 }}>{c.after_value}</span>
+            </div>
+          </div>
+        ))}
       </div>
     </div>
   )
 }
 
 /** Loading / error / empty state, styled as the page rather than bare text. */
-function Notice({ title, text, lang }) {
+function Notice({ title, text, lang, children }) {
   return (
     <div style={{ minHeight: '100vh', background: 'var(--bg)', display: 'flex', flexDirection: 'column' }}>
       <div style={{ flex: '1 1 auto', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 40 }}>
       <div style={{ background: 'var(--card)', border: '1px solid var(--border)', borderRadius: 12, padding: '28px 32px', maxWidth: 460, textAlign: 'center' }}>
         {title && <div style={{ fontSize: 15, fontWeight: 600, marginBottom: 8 }}>{title}</div>}
         <div style={{ fontSize: 13, color: 'var(--muted)', lineHeight: 1.6 }}>{text}</div>
+        {children}
         <Link to="/" style={{ display: 'inline-block', marginTop: 18, fontSize: 13, color: 'var(--accent1)', textDecoration: 'none' }}>← Dashboard</Link>
         </div>
       </div>
@@ -294,6 +459,9 @@ export default function MonthlyReviewCurated() {
   const [failedId, setFailedId] = useState(null)
   const [review, setReview] = useState(null)
   const [loadError, setLoadError] = useState(false)
+  // Expanded engineer cards (review-engineer row id → true). Component state
+  // only; reset to "first one open" whenever a month loads.
+  const [openEng, setOpenEng] = useState({})
 
   // /review/:year/:month — the legacy /review/august-2026 path has no params.
   const params = useParams()
@@ -309,7 +477,11 @@ export default function MonthlyReviewCurated() {
     setReview(null)
     setLoadError(false)
     api.get(`/monthly-review/${reviewYear}/${reviewMonth}`)
-      .then(setReview)
+      .then(r => {
+        setReview(r)
+        const first = r?.engineers?.[0]
+        setOpenEng(first ? { [first.id]: true } : {})
+      })
       .catch(err => { console.error('Monthly review load error:', err); setLoadError(true) })
   }, [reviewYear, reviewMonth])
 
@@ -339,6 +511,11 @@ export default function MonthlyReviewCurated() {
 
   const engineers = review?.engineers ?? []
   const summary = review?.summary ?? []
+  const changes = review?.changes ?? []
+  // Any named project switches the month to the grouped layout; otherwise the
+  // original grid renders untouched (August 2026).
+  const projectLayout = engineers.some(e => (e.projects ?? []).some(isNamedProject))
+  const toggleEng = id => setOpenEng(prev => ({ ...prev, [id]: !prev[id] }))
   const totalTasks = engineers.reduce((n, e) => n + e.tasks.length, 0)
   const monthLabel = monthYear(reviewYear, reviewMonth, lang)
   const periodLabel = pick(review?.meta, 'label', lang) || monthLabel
@@ -358,7 +535,16 @@ export default function MonthlyReviewCurated() {
         title={t.emptyTitle}
         text={t.emptyBody(monthYearInProse(reviewYear, reviewMonth, lang))}
         lang={lang}
-      />
+      >
+        {/* A month with a meta row but no content yet is still a prev/next
+            target, so keep the way out of it. */}
+        {(review.prev || review.next) && (
+          <div style={{ display: 'flex', gap: 8, justifyContent: 'center', marginTop: 16 }}>
+            <MonthNavButton target={review.prev} dir={-1} lang={lang} t={t} />
+            <MonthNavButton target={review.next} dir={1} lang={lang} t={t} />
+          </div>
+        )}
+      </Notice>
     )
   }
 
@@ -384,6 +570,10 @@ export default function MonthlyReviewCurated() {
           </div>
         </div>
         <div style={{ textAlign: 'right', paddingTop: 8 }}>
+          <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginBottom: 12 }}>
+            <MonthNavButton target={review.prev} dir={-1} lang={lang} t={t} />
+            <MonthNavButton target={review.next} dir={1} lang={lang} t={t} />
+          </div>
           <div style={{ fontSize: 12, color: 'var(--muted)', lineHeight: 2.2 }}>
             {previousReview && <div>{t.prevReview}: <strong style={{ color: 'var(--text)' }}>{previousReview}</strong></div>}
             <div>{t.teamSize}: <strong style={{ color: 'var(--text)' }}>{engineers.length}</strong></div>
@@ -451,6 +641,31 @@ export default function MonthlyReviewCurated() {
               ⚠ {t.orphanWarning(review.orphan_tasks)}
             </div>
           )}
+          {projectLayout ? (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+              {engineers.map(eng => (
+                <EngineerCard
+                  key={eng.id}
+                  eng={eng}
+                  lang={lang}
+                  t={t}
+                  open={Boolean(openEng[eng.id])}
+                  onToggle={() => toggleEng(eng.id)}
+                  scoreInput={
+                    <ScoreInput
+                      engId={eng.engineer_id}
+                      color={eng.color}
+                      scores={scores}
+                      saveScore={saveScore}
+                      savedId={savedId}
+                      failedId={failedId}
+                      t={t}
+                    />
+                  }
+                />
+              ))}
+            </div>
+          ) : (
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 12, alignItems: 'start' }}>
             {engineers.map(eng => (
               <div key={eng.id} style={{ background: 'var(--card)', border: '1px solid var(--border)', borderRadius: 12, padding: '20px 24px' }}>
@@ -478,7 +693,11 @@ export default function MonthlyReviewCurated() {
               </div>
             ))}
           </div>
+          )}
         </div>
+
+        {/* ── MEASURED CHANGES ── hidden when the month has none */}
+        {changes.length > 0 && <MeasuredChanges changes={changes} lang={lang} t={t} />}
 
         {/* ── Footer ── */}
         <div style={{ paddingTop: 20, borderTop: '1px solid var(--border)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 16, fontSize: 12, color: 'var(--muted)' }}>
