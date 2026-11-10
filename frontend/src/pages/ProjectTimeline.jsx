@@ -85,6 +85,7 @@ function buildProjects(activity) {
       name,
       weeks,
       talk: talk[name] || {},
+      items: (activity.items || {})[name] || {},
       activeWeeks: active,
       first: active[0] || null,
       last: active[active.length - 1] || null,
@@ -263,7 +264,10 @@ export default function ProjectTimeline() {
                             <b>{p.activeWeeks.length}</b>
                             <span className="pt-dur-sub">/{scale.weeks.length}</span>
                           </div>
-                          <Track weeks={scale.weeks} counts={p.weeks} talk={p.talk} name={p.name} />
+                          <Track
+                            weeks={scale.weeks} counts={p.weeks} talk={p.talk}
+                            items={p.items} name={p.name} only={LEADS}
+                          />
                         </div>
 
                         {isOpen && p.people.map(([who, n]) => (
@@ -277,7 +281,10 @@ export default function ProjectTimeline() {
                                 {Object.keys(p.byPerson[who] || {}).length} нед
                               </span>
                             </div>
-                            <Track weeks={scale.weeks} counts={p.byPerson[who] || {}} talk={{}} name={who} />
+                            <Track
+                              weeks={scale.weeks} counts={p.byPerson[who] || {}} talk={{}}
+                              items={p.items} name={`${p.name} · ${lastName(who)}`} only={[who]}
+                            />
                           </div>
                         ))}
                       </div>
@@ -319,7 +326,23 @@ export default function ProjectTimeline() {
   )
 }
 
-function Track({ weeks, counts, talk, name }) {
+/* Подсказка недели — это сами строки из отчётов за ту неделю, а не её счёт:
+ * «3 пункта» не говорит, что было сделано, а ради этого на доску и смотрят. */
+function weekTitle({ name, week, n, t, lines, only }) {
+  const head = `${name} · неделя с ${fmtWeek(week)}`
+  const body = (lines || [])
+    .filter((it) => !only || only.includes(it.who))
+    .map((it) => `• ${lastName(it.who)}, ${fmtWeek(it.day)}: ${it.text}`)
+  const rest = n - body.length
+  const tail = []
+  if (rest > 0) tail.push(`…и ещё ${rest} ${rest === 1 ? 'пункт' : rest < 5 ? 'пункта' : 'пунктов'}`)
+  if (t) tail.push(`Обсуждали на Dev meet: ${t} ${t === 1 ? 'раз' : 'встреч'}`)
+  if (!body.length && !tail.length) return `${head}: в отчётах не упоминался`
+  if (!body.length) return [head, ...tail].join('\n')
+  return [head, ...body, ...tail].join('\n')
+}
+
+function Track({ weeks, counts, talk, items, name, only }) {
   const w = 100 / Math.max(1, weeks.length)
   return (
     <div className="pt-track">
@@ -334,9 +357,7 @@ function Track({ weeks, counts, talk, name }) {
             data-level={n ? levelOf(n) : 0}
             data-talk={!n && t ? 1 : 0}
             style={{ left: `${i * w}%`, width: `${w}%` }}
-            title={`${name} · неделя с ${fmtWeek(week)}: ${
-              n ? `${n} пунктов в отчётах` : 'в отчётах не упоминался'
-            }${t ? `, обсуждали на ${t} Dev meet` : ''}`}
+            title={weekTitle({ name, week, n, t, lines: (items || {})[week], only })}
           />
         )
       })}
