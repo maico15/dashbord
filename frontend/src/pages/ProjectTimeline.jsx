@@ -358,8 +358,14 @@ export default function ProjectTimeline() {
             <p className="pt-foot">
               <b>Откуда цифры.</b> Ежедневные отчёты за {activity.weeks?.[0] && fmtWeek(activity.weeks[0])} —{' '}
               {lastWeek && fmtWeek(lastWeek)}: {activity.items_matched} из {activity.items_total} пунктов
-              удалось отнести к проекту по отличительному слову в тексте. Остальные — общие
-              формулировки без названия проекта, их никуда не приписывали. Отсчёт идёт
+              удалось отнести к проекту{activity.matched_by?.prefix
+                ? `: ${activity.matched_by.prefix} по метке, которую автор поставил сам
+                   («Passport 2: …», «Apollo: …»), ${activity.matched_by.keyword || 0} по
+                   отличительному слову в тексте`
+                : ' по отличительному слову в тексте'}. Метка автора сильнее слова: строка
+              «CRM Apollo: … deployed via Drone CI» — это работа по Apollo, а не по
+              инфраструктуре. Остальные — общие формулировки без названия проекта, их
+              никуда не приписывали. Отсчёт идёт
               с 6 июля — начала доски команды; отчёты за конец мая и июнь в базе есть,
               но на этой странице не считаются.
               {devmeet.weeks.length > 0 && (
