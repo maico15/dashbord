@@ -24,7 +24,7 @@
 """
 import hashlib
 import re
-from collections import defaultdict
+from collections import Counter, defaultdict
 from datetime import date, timedelta
 
 # (имя проекта, отличительные слова). Порядок не важен: пункт попадает во все
@@ -42,15 +42,60 @@ RULES = [
     ("Partner Success OS", r"Partner Success"),
     ("Сайты и веб", r"WordPress|WP Rocket|лендинг|[Ww]eb ?[Ff]orms?|дисклеймер|Cloudflare"),
     ("Автоматизации n8n и агенты", r"\bn8n\b|LiteLLM|OpenRouter|\bNewo\b"),
-    ("Инфраструктура и деплой", r"\bAWS\b|\bECS\b|\bRender\b|Postgres|Drone"),
+    # Drone CI отсюда убран намеренно: это инструмент выкатки, он упоминается
+    # внутри чужих задач («CRM Apollo: … deployed via Drone CI»), и по нему
+    # работа уезжала из своего проекта в инфраструктуру.
+    ("Инфраструктура и деплой", r"\bAWS\b|\bECS\b|\bRender\b|Postgres|Qdrant"),
     ("Home Alliance OS", r"\bHA OS\b|HAOS|Home Alliance OS|Central Brain|Customer Brain"),
     ("База знаний и SEO", r"Knowledge Panel|Search Console|llms\.txt|\bSEO\b|[Бб]аза знаний"),
     ("Доступы, безопасность, офбординг", r"\b2FA\b|\bVPN\b|офбординг|offboard|\bDMARC\b|фишинг|phishing|LastPass|Bitwarden"),
-    ("Расходы и AI-подписки", r"Lovable|подписк|биллинг|invoice|инвойс"),
+    # Ни Lovable, ни invoice сюда не годятся: на Lovable команда строит
+    # продукты, а invoice — это фича Паспорта (история счетов клиента), а не
+    # счёт за AI-сервис. Оставлены только слова про сами расходы.
+    ("Расходы и AI-подписки",
+     r"подписк|биллинг|paid seats?|AI tools? (usage|audit|access)|AI-аккаунт|"
+     r"[Аа]удит AI|AI access register|cost (per|of) (seat|token)"),
     ("Проект Тадэжа", r"Tadej|Тадэж"),
     ("Передача дел Минина", r"передач[аиу] доступов|передачу дел"),
 ]
 _COMPILED = [(name, re.compile(pat, re.I)) for name, pat in RULES]
+
+# Инженеры сами помечают проект в начале строки: «Passport 2: …», «Apollo: …»,
+# «Call Center: …». Так размечено 729 строк из 1064, и это куда надёжнее
+# поиска слова где угодно в тексте: «CRM Apollo: … deployed via Drone CI» —
+# это работа по Apollo, а не по инфраструктуре, хотя Drone в строке есть.
+# Поэтому префикс решает: совпал — пункт идёт только в этот проект, и слова
+# из остального текста уже не смотрим.
+_PREFIX = re.compile(r"^([A-Za-zА-Яа-я0-9 /&.\-]{2,34}?)\s*[:—–]\s")
+
+PREFIX_RULES = [
+    ("Passport", r"^passport"),
+    ("CRM Apollo и интеграции", r"^(crm )?apollo|^legacy apollo|^apollo exporter"),
+    ("Колл-центр и телефония",
+     r"^call ?cent|^callcenter|^missed calls|^call routing|^outbound|^robocall"),
+    ("Home Alliance ID", r"^(home ?alliance|ha) id"),
+    ("Hiring Intelligence / HR CRM", r"^hr crm|^hiring intelligence"),
+    ("FOS и бухгалтерия", r"^fos\b|^ha-fos|^finance data"),
+    ("TechApp / Alliance Connect",
+     r"^tech ?app|^alliance connect|^message ts|^communication server"),
+    ("Home Alliance OS", r"^ha os|^haos|^home alliance os|^central brain"),
+    ("Автоматизации n8n и агенты", r"^newo|^n8n|^.*ai agent$|^litellm"),
+    ("Сайты и веб", r"^ha web|^wordpress"),
+    ("Partner Success OS", r"^partner success"),
+]
+_PREFIX_COMPILED = [(name, re.compile(pat, re.I)) for name, pat in PREFIX_RULES]
+
+
+def project_by_prefix(text: str):
+    """Проект по метке, которую автор поставил сам. None — метки нет."""
+    m = _PREFIX.match(text)
+    if not m:
+        return None
+    head = m.group(1).strip()
+    for name, rx in _PREFIX_COMPILED:
+        if rx.search(head):
+            return name
+    return None
 
 # Поля отчёта, которые описывают работу. Заголовки и пустые строки не считаем.
 REPORT_FIELDS = ("completed", "next_tasks", "delayed_risks", "invisible_work")
@@ -104,6 +149,7 @@ def weekly_activity(rows):
     # число пунктов само по себе не говорит, что было сделано.
     items = defaultdict(lambda: defaultdict(list))
     weeks = set()
+    by_source = Counter()   # чем распознали: меткой автора или словом
     total = matched = 0
 
     for day, engineer, report in rows:
@@ -111,21 +157,30 @@ def weekly_activity(rows):
         weeks.add(week)
         for text in items_of(report):
             total += 1
-            hit = False
-            for name, rx in _COMPILED:
-                if rx.search(text):
-                    counts[name][week] += 1
-                    parallel[engineer][week].add(name)
-                    people[name][engineer] += 1
-                    by_person[name][engineer][week] += 1
-                    bucket = items[name][week]
-                    if len(bucket) < MAX_SAMPLES:
-                        t = _trim(text)
-                        bucket.append({"who": engineer, "day": day, "text": t,
-                                       "h": text_hash(t)})
-                    hit = True
-            if hit:
+
+            # Метка автора решает. Нет метки — ищем слова, и тогда пункт может
+            # попасть в несколько проектов: отчёты пишут прозой, и одна строка
+            # правда бывает про два проекта сразу.
+            tagged = project_by_prefix(text)
+            if tagged:
+                names, by = [tagged], "prefix"
+            else:
+                names = [name for name, rx in _COMPILED if rx.search(text)]
+                by = "keyword"
+
+            for name in names:
+                counts[name][week] += 1
+                parallel[engineer][week].add(name)
+                people[name][engineer] += 1
+                by_person[name][engineer][week] += 1
+                bucket = items[name][week]
+                if len(bucket) < MAX_SAMPLES:
+                    t = _trim(text)
+                    bucket.append({"who": engineer, "day": day, "text": t,
+                                   "h": text_hash(t), "by": by})
+            if names:
                 matched += 1
+                by_source[by] += 1
 
     weeks = sorted(weeks)
     team = {}
@@ -155,4 +210,5 @@ def weekly_activity(rows):
         "team_week": team,
         "items_total": total,
         "items_matched": matched,
+        "matched_by": dict(by_source),
     }
