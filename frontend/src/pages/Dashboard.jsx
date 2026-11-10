@@ -419,6 +419,7 @@ export default function Dashboard() {
             />
           ))}
           {activeDept === IT_DEPT_ID && <Tab label="📅 Gantt" to="/team-gantt" />}
+          {activeDept === IT_DEPT_ID && <Tab label="🗂 Проекты" to="/projects" />}
           {/* The public intake form. Triage stays out of the tab bar — it is in
             * the footer's Admin group and at its own URL, like /it-backlog. */}
           <Tab label={requestsTabLabel} to="/it-requests/home" />
