@@ -1,6 +1,7 @@
 import os
 import threading
 from contextlib import asynccontextmanager
+import project_rules
 from fastapi import FastAPI, HTTPException, Header, Body, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -5149,6 +5150,33 @@ def get_report_days(start: str, end: str):
         days.setdefault(str(row["engineer_id"]), []).append(row["report_date"])
     conn.close()
     return {"start": start, "end": end, "days": days}
+
+
+@app.get("/api/projects/activity")
+def get_projects_activity(start: str, end: str):
+    """Недельная интенсивность по проектам из ежедневных отчётов.
+
+    Метод и его границы описаны в backend/project_rules.py. Коротко: пункт
+    отчёта относится к проекту по отличительному слову, общие слова в правила
+    не берутся, поэтому часть работы не попадает никуда — отсюда items_total
+    и items_matched в ответе, страница показывает охват честно.
+    """
+    conn = get_db()
+    c = conn.cursor()
+    c.execute(
+        "SELECT r.report_date, m.name, r.* FROM daily_reports r "
+        "JOIN team_members m ON m.id = r.engineer_id "
+        "WHERE r.report_date >= ? AND r.report_date <= ? ORDER BY r.report_date",
+        (start, end),
+    )
+    rows = []
+    for raw in c.fetchall():
+        row = dict(raw)
+        rows.append((row["report_date"], row["name"], _deserialize_report(row)))
+    conn.close()
+    result = project_rules.weekly_activity(rows)
+    result["start"], result["end"] = start, end
+    return result
 
 
 @app.get("/api/weekly-tasks")
