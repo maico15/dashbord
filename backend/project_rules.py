@@ -103,12 +103,12 @@ def weekly_activity(rows):
     weeks = sorted(weeks)
     team = {}
     for week in weeks:
-        projects, people = set(), 0
+        projects, reported = set(), 0
         for engineer, by_week in parallel.items():
             if week in by_week:
                 projects |= by_week[week]
-                people += 1
-        team[week] = {"projects": len(projects), "engineers": people}
+                reported += 1
+        team[week] = {"projects": len(projects), "engineers": reported}
 
     return {
         "weeks": weeks,
