@@ -52,6 +52,7 @@ const PROJECT_PEOPLE = {
   'Звонки: аналитика и качество': ['Azizbek Turgunov', 'Andrey Pogrebnyak'],
   'Сайты и веб': ['Azizbek Turgunov'],
   'Partner Success OS': ['Azizbek Turgunov'],
+  'Finance Data': ['Andrey Pogrebnyak'],
 }
 
 /* Проекты, которые на эту доску не идут совсем. */
