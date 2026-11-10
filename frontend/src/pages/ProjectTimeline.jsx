@@ -29,10 +29,10 @@ const LEADS = ['Andrey Pogrebnyak', 'Andrey Brunetkin', 'Azizbek Turgunov']
 const BOARD_START = '2026-07-06'
 
 const SORTS = {
+  owner: 'по разработчику',
   gaps: 'по числу возвратов',
   weeks: 'по неделям работы',
   items: 'по объёму работы',
-  owner: 'по разработчику',
 }
 const ZOOMS = { all: 'весь период', quarter: 'последний квартал' }
 
@@ -195,7 +195,7 @@ export default function ProjectTimeline() {
   const [about, setAbout] = useState(PROJECT_ABOUT)
   const [error, setError] = useState(null)
   const [zoom, setZoom] = useState('all')
-  const [sort, setSort] = useState('gaps')
+  const [sort, setSort] = useState('owner')
   const [opened, setOpened] = useState(() => new Set())
 
   const today = iso(new Date())
