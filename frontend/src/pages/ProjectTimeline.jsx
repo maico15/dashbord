@@ -156,33 +156,37 @@ function buildProjects(engineers, today) {
   return out
 }
 
-/* Состояние одной недели проекта:
- *   active   — есть задача этой недели и её исполнитель в ту неделю отчитывался
- *   planned  — задача есть, отчётов нет: по доске работа шла, подтверждения нет
- *   vacation — единственные исполнители недели были в отпуске
- *   none     — задач на эту неделю нет */
-function weekState(project, weekStart, reportDaysByEngineer, vacations) {
+/* Что было в эту неделю по проекту.
+ *
+ *   work     — в отчётах есть пункты по этому проекту; level 1..3 по объёму
+ *   vacation — задача есть, но все её исполнители были в отпуске
+ *   idle     — задача на доске есть, а в отчётах по проекту ни одного пункта.
+ *              Это и есть «проект лежит»: открыт, но работа шла не по нему
+ *   none     — задач на эту неделю нет
+ *
+ * Объём — число пунктов ежедневных отчётов, отнесённых к проекту
+ * (backend/project_rules.py). Шкала грубая нарочно: разницу между 1 и 2
+ * пунктами показывать нечестно, а между 1 и 30 — нужно. */
+function weekCell(project, weekStart, activity, vacations) {
   const weekEnd = iso(new Date(new Date(weekStart).getTime() + 6 * DAY))
+  const count = (activity[project.name] || {})[weekStart] || 0
+  if (count > 0) {
+    return { state: 'work', count, level: count >= 10 ? 3 : count >= 3 ? 2 : 1 }
+  }
   const inWeek = project.tasks.filter((t) => t.start <= weekEnd && t.end >= weekStart)
-  if (!inWeek.length) return 'none'
+  if (!inWeek.length) return { state: 'none', count: 0 }
 
   const owners = [...new Set(inWeek.map((t) => t.who))]
-  const away = owners.filter((who) =>
+  const away = owners.every((who) =>
     (vacations.get(who) || []).some((v) => v.start <= weekEnd && v.end >= weekStart))
-  if (away.length === owners.length) return 'vacation'
-
-  const reported = inWeek.some((t) => {
-    const days = reportDaysByEngineer[String(t.engineerId)] || []
-    return days.some((d) => d >= weekStart && d <= weekEnd)
-  })
-  return reported ? 'active' : 'planned'
+  return { state: away ? 'vacation' : 'idle', count: 0 }
 }
 
 export default function ProjectTimeline() {
   const [engineers, setEngineers] = useState(null)
   const [overview, setOverview] = useState(null)
   const [teamXp, setTeamXp] = useState(0)
-  const [reportDays, setReportDays] = useState({})
+  const [activity, setActivity] = useState(null)
   const [error, setError] = useState(null)
   const [zoom, setZoom] = useState('board')
   const [sort, setSort] = useState('duration')
@@ -195,9 +199,9 @@ export default function ProjectTimeline() {
     api.get('/gantt')
       .then((d) => { if (alive) setEngineers(d.engineers || []) })
       .catch((e) => { if (alive) setError(e.message) })
-    api.get(`/reports/days?start=${GIT_START}&end=${today}`)
-      .then((d) => { if (alive) setReportDays(d.days || {}) })
-      .catch(() => { /* без отчётов неделя просто остаётся «по плану» */ })
+    api.get(`/projects/activity?start=${GIT_START}&end=${today}`)
+      .then((d) => { if (alive) setActivity(d) })
+      .catch(() => { /* без отчётов недели останутся в состоянии «задача есть» */ })
     // Шапка страницы — та же, что на остальном дашборде.
     api.get('/overview').then((d) => { if (alive) setOverview(d) }).catch(() => {})
     api.get('/leaderboard')
@@ -211,6 +215,11 @@ export default function ProjectTimeline() {
     [engineers, today],
   )
   const vacations = useMemo(() => readVacations(engineers), [engineers])
+  const byProject = activity?.projects || {}
+  /* Сколько проектов команда вела одновременно в последнюю неделю с отчётами —
+   * вторая половина ответа на «человек тянет один проект». */
+  const lastWeek = activity?.weeks?.[activity.weeks.length - 1]
+  const parallel = lastWeek ? activity.team_week?.[lastWeek] : null
 
   /* В режиме «по разработчику» строки собираются в группы с шапкой на человека —
    * тогда его отпуск виден одной полосой сразу по всем его проектам. */
@@ -271,7 +280,7 @@ export default function ProjectTimeline() {
   const openProjects = projects.filter((p) => !p.finished)
   const longest = openProjects.reduce((a, p) => (!a || p.span > a.span ? p : a), null)
   const taskCount = projects.reduce((s, p) => s + p.tasks.length, 0)
-  const hasReports = Object.keys(reportDays).length > 0
+  const hasActivity = Boolean(activity)
 
   return (
     <>
@@ -296,9 +305,9 @@ export default function ProjectTimeline() {
 
         <h1 className="pt-h1">Проекты</h1>
       <p className="pt-lede">
-        Сколько тянется каждый проект, а не сколько тасков закрыто. Неделя закрашена, когда по
-        проекту была открытая задача и её исполнитель в ту неделю сдавал отчёты; пустая неделя —
-        разрыв, штриховка — отпуск.
+        Сколько тянется проект и сколько по нему на самом деле работали. Насыщенность недели —
+        объём работы по отчётам за ту неделю; бледная неделя значит, что задача открыта, а работа
+        шла не по ней; штриховка — отпуск. Открытый проект и проект в работе — разные вещи.
       </p>
 
       {error && <div className="pt-note pt-note-err">Не удалось загрузить доску: {error}</div>}
@@ -311,6 +320,7 @@ export default function ProjectTimeline() {
             <Stat value={openProjects.length} label="открыто" />
             <Stat value={projects.length - openProjects.length} label="закрыто" />
             <Stat value={taskCount} label="задач" />
+            {parallel && <Stat value={parallel.projects} label="проектов в работе на прошлой неделе" />}
             {longest && <Stat value={`${longest.span} дн`} label={`дольше всех открыт: ${longest.name}`} wide />}
           </div>
 
@@ -379,21 +389,25 @@ export default function ProjectTimeline() {
                         <div className={`pt-c pt-dur${!p.finished && p.span >= 150 ? ' is-hot' : ''}`}>
                           <b>{p.span}</b>&nbsp;дн{p.git && <sup title="длительность по git">*</sup>}
                         </div>
-                        <div className="pt-track" title={projectTitle(p, hasReports)}>
+                        <div className="pt-track" title={projectTitle(p, hasActivity, byProject)}>
                           <span
                             className={`pt-span${p.finished ? ' is-done' : ''}`}
                             style={{ left: `${scale.pos(p.start)}%`, width: `${Math.max(scale.pos(p.end) - scale.pos(p.start), 0.6)}%` }}
                           />
                           {scale.weeks.map((w) => {
-                            const st = weekState(p, w, reportDays, vacations)
-                            if (st === 'none') return null
+                            const cell = weekCell(p, w, byProject, vacations)
+                            if (cell.state === 'none') return null
                             const wEnd = iso(new Date(new Date(w).getTime() + 6 * DAY))
                             return (
                               <span
                                 key={w}
                                 className="pt-wk"
-                                data-state={st}
+                                data-state={cell.state}
+                                data-level={cell.level || 0}
                                 data-done={p.finished ? '1' : '0'}
+                                title={cell.count
+                                  ? `${fmtDate(w)}: ${cell.count} пунктов отчётов по проекту`
+                                  : `${fmtDate(w)}: по проекту ничего в отчётах`}
                                 style={{ left: `${scale.pos(w)}%`, width: `${Math.max(scale.pos(wEnd) - scale.pos(w), 0.4)}%` }}
                               />
                             )
@@ -453,8 +467,10 @@ export default function ProjectTimeline() {
           </div>
 
           <div className="pt-legend">
-            <span><i className="pt-k" data-state="active" />работа подтверждена отчётами</span>
-            <span><i className="pt-k" data-state="planned" />задача есть, отчётов нет</span>
+            <span><i className="pt-k" data-state="work" data-level="1" />1–2 пункта за неделю</span>
+            <span><i className="pt-k" data-state="work" data-level="2" />3–9</span>
+            <span><i className="pt-k" data-state="work" data-level="3" />10 и больше</span>
+            <span><i className="pt-k" data-state="idle" />задача открыта, работы по ней нет</span>
             <span><i className="pt-k" data-state="vacation" />отпуск</span>
             <span><i className="pt-k pt-k-done" />проект закрыт</span>
             <span><i className="pt-k pt-k-today" />сегодня</span>
@@ -462,15 +478,18 @@ export default function ProjectTimeline() {
           </div>
 
           <p className="pt-foot">
-            <b>Три источника, не смешаны.</b> Задачи и отпуска — доска Team Gantt, она начинается
-            6 июля 2026. Недельная закраска — ежедневные отчёты: берётся только факт «в этот день
-            человек отчитался», текст отчётов не разбирается, потому что совпадение слова не
-            доказывает работу по проекту. Длительность четырёх проектов — карта Брюнеткина из git
-            (14 репозиториев, 1 573 коммита, 1 026 заметок, с 6 апреля); его линии «Call center»,
-            «Alliance Connect», «CRMv2» и «DWH» с доской не сведены — это его участки работы, а не
-            те же проекты. Пустая неделя означает «подтверждения нет», а не «никто не работал»:
-            отчёты сдают не все и не каждый день. Группировка задач в проекты —
-            <code> frontend/src/lib/projectMap.js</code>.
+            <b>Открытый проект и проект в работе — разные вещи.</b> Длительность берётся с доски
+            Team Gantt (с 6 июля 2026), а насыщенность недели — из ежедневных отчётов: сколько
+            пунктов за ту неделю относятся к проекту. Пункт относится к проекту по отличительному
+            слову — «HA ID», «Apollo», «n8n», «QuickBooks»; общие слова вроде «CRM», «доступ» или
+            «Claude» в правила не взяты, они встречаются почти в каждом отчёте.
+            {activity && ` Поэтому из ${activity.items_total} пунктов за период в проекты попали
+            ${activity.items_matched} — остальное тоже работа, просто не привязанная к этим
+            проектам, и выдавать её за ноль было бы неверно.`} Правила —
+            <code> backend/project_rules.py</code>, группировка задач доски —
+            <code> frontend/src/lib/projectMap.js</code>; имена проектов в обоих файлах обязаны
+            совпадать. Длительность четырёх проектов — карта Брюнеткина из git (с 6 апреля);
+            его линии «Call center», «Alliance Connect», «CRMv2» и «DWH» с доской не сведены.
           </p>
         </>
       )}
@@ -480,7 +499,7 @@ export default function ProjectTimeline() {
   )
 }
 
-const projectTitle = (p, hasReports) => [
+const projectTitle = (p, hasActivity, byProject) => [
   p.name,
   `Ведёт: ${p.lead}`,
   `Участвуют: ${p.team.join(', ')}`,
@@ -488,7 +507,9 @@ const projectTitle = (p, hasReports) => [
   p.git ? `В git с ${fmtDate(p.git.start)} — ${p.git.stages} этапов, карта Брюнеткина` : null,
   p.finished ? `Закрыт ${fmtDate(p.lastEnd)}` : `Открыт до сих пор, ${p.span} дн`,
   `Задачи: ${p.doneCount} из ${p.tasks.length} закрыто${p.openCount ? `, ${p.openCount} в работе` : ''}`,
-  hasReports ? null : 'Отчёты не загрузились — недели показаны по доске',
+  hasActivity
+    ? `Недель с работой по отчётам: ${Object.keys(byProject[p.name] || {}).length}`
+    : 'Отчёты не загрузились — недели показаны по доске',
 ].filter(Boolean).join('\n')
 
 const taskTitle = (t) => [
@@ -575,10 +596,12 @@ function Style() {
   background:var(--accent1-bg);border:1px solid var(--accent1-border)}
 .pt-span.is-done{background:var(--success-bg);border-color:transparent}
 .pt-wk{position:absolute;top:50%;transform:translateY(-50%);height:20px}
-.pt-wk[data-state="active"]{background:var(--accent1);opacity:.85}
-.pt-wk[data-state="active"][data-done="1"]{background:var(--success)}
-.pt-wk[data-state="planned"]{background:var(--accent1);opacity:.26}
-.pt-wk[data-state="planned"][data-done="1"]{background:var(--success);opacity:.26}
+.pt-wk[data-state="work"]{background:var(--accent1)}
+.pt-wk[data-state="work"][data-level="1"]{opacity:.32}
+.pt-wk[data-state="work"][data-level="2"]{opacity:.62}
+.pt-wk[data-state="work"][data-level="3"]{opacity:1}
+.pt-wk[data-state="work"][data-done="1"]{background:var(--success)}
+.pt-wk[data-state="idle"]{background:var(--border-strong);opacity:.4}
 .pt-wk[data-state="vacation"]{background:repeating-linear-gradient(45deg,
   var(--border-strong) 0 3px,transparent 3px 6px)}
 .pt-lbl{position:absolute;left:8px;top:50%;transform:translateY(-50%);font-size:11px;font-weight:600;
@@ -605,8 +628,10 @@ function Style() {
   border:1px solid var(--border-strong)}
 .pt-legend{display:flex;flex-wrap:wrap;gap:14px;margin-top:13px;font-size:12px;color:var(--muted)}
 .pt-k{display:inline-block;width:12px;height:12px;border-radius:3px;margin-right:6px;vertical-align:-2px}
-.pt-k[data-state="active"]{background:var(--accent1)}
-.pt-k[data-state="planned"]{background:var(--accent1);opacity:.26}
+.pt-k[data-state="work"]{background:var(--accent1)}
+.pt-k[data-state="work"][data-level="1"]{opacity:.32}
+.pt-k[data-state="work"][data-level="2"]{opacity:.62}
+.pt-k[data-state="idle"]{background:var(--border-strong);opacity:.4}
 .pt-k[data-state="vacation"]{background:repeating-linear-gradient(45deg,var(--border-strong) 0 3px,transparent 3px 6px)}
 .pt-k-done{background:var(--success)}
 .pt-k-today{background:var(--danger);width:2px;border-radius:0}
