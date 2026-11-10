@@ -49,16 +49,26 @@ function weekRange(from, to) {
 const levelOf = (n) => (n >= 10 ? 3 : n >= 3 ? 2 : 1)
 
 /* Проекты собираются целиком из ответа /api/projects/activity. */
+/* Страница считает ТОЛЬКО по этим троим — и в строке проекта, и внутри неё.
+ * Пункты остальных инженеров не красят неделю и не попадают в «кто»: иначе
+ * строка Брюнеткина загоралась бы от того, что по тому же проекту написал
+ * Мисан. Проект попадает на доску, если по нему писал хоть кто-то из троих. */
 function buildProjects(activity) {
-  const byWeek = activity.projects || {}
-  const people = activity.people || {}
   const byPerson = activity.by_person || {}
   const talk = devmeet.projects || {}
 
-  return Object.keys(byWeek).map((name) => {
-    const weeks = byWeek[name] || {}
+  return Object.keys(byPerson).map((name) => {
+    const mine = Object.entries(byPerson[name] || {}).filter(([who]) => LEADS.includes(who))
+
+    /* Недели проекта — сумма по трём, а не общий счёт из ответа. */
+    const weeks = {}
+    for (const [, byWeek] of mine) {
+      for (const [w, n] of Object.entries(byWeek)) weeks[w] = (weeks[w] || 0) + n
+    }
     const active = Object.keys(weeks).filter((w) => weeks[w] > 0).sort()
-    const who = Object.entries(people[name] || {}).sort((a, b) => b[1] - a[1])
+    const who = mine
+      .map(([n, byWeek]) => [n, Object.values(byWeek).reduce((s, x) => s + x, 0)])
+      .sort((a, b) => b[1] - a[1])
     /* Сколько раз к проекту возвращались после паузы: число непрерывных
      * отрезков минус один. Ровный проект — 0, рваный — много. */
     let runs = 0
@@ -75,9 +85,9 @@ function buildProjects(activity) {
       first: active[0] || null,
       last: active[active.length - 1] || null,
       items: Object.values(weeks).reduce((s, n) => s + n, 0),
-      lead: who.length ? who[0][0] : '—',
+      lead: who.length ? who[0][0] : null,
       people: who,
-      byPerson: byPerson[name] || {},
+      byPerson: Object.fromEntries(mine),
       runs,
       returns: Math.max(0, runs - 1),
     }
@@ -108,7 +118,7 @@ export default function ProjectTimeline() {
   }, [today])
 
   const all = useMemo(() => (activity ? buildProjects(activity) : []), [activity])
-  const shown = useMemo(() => all.filter((p) => LEADS.includes(p.lead)), [all])
+  const shown = useMemo(() => all.filter((p) => p.lead && p.activeWeeks.length), [all])
 
   const ordered = useMemo(() => {
     const list = [...shown]
@@ -206,8 +216,9 @@ export default function ProjectTimeline() {
             </div>
 
             <p className="pt-filtered">
-              На доске — проекты троих: Погребняк, Брюнеткин, Тургунов. Ведущий проекта —
-              тот, у кого по нему больше всего пунктов в отчётах.
+              На доске только Погребняк, Брюнеткин и Тургунов — и в строке проекта, и внутри
+              неё. Пункты остальных инженеров не считаются совсем, поэтому «недель» и
+              насыщенность клеток — это работа троих, а не всей команды.
             </p>
 
             <div className="pt-board">
@@ -330,8 +341,8 @@ function Track({ weeks, counts, talk, name }) {
 const plural = (n) => {
   const t = n % 10
   if (n % 100 >= 11 && n % 100 <= 14) return 'раз'
-  if (t === 1) return 'раз'
-  return 'раза'
+  if (t >= 2 && t <= 4) return 'раза'
+  return 'раз'
 }
 
 const projectTitle = (p) => [
