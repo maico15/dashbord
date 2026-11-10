@@ -35,6 +35,10 @@ const ZOOMS = {
   git: { from: GIT_START, label: 'git: с 6 апреля' },
   quarter: { from: null, months: 3, label: 'квартал' },
 }
+/* Кого показываем при открытии. Остальных можно вернуть прямо на странице —
+ * это фильтр отображения, ничего не скрывает в данных. */
+const DEFAULT_LEADS = ['Andrey Pogrebnyak', 'Andrey Brunetkin', 'Azizbek Turgunov']
+
 const SORTS = {
   duration: 'по длительности',
   owner: 'по разработчику',
@@ -190,6 +194,7 @@ export default function ProjectTimeline() {
   const [error, setError] = useState(null)
   const [zoom, setZoom] = useState('board')
   const [sort, setSort] = useState('duration')
+  const [leads, setLeads] = useState(null)   // null = ещё не выбирали, берём DEFAULT_LEADS
   const [opened, setOpened] = useState(() => new Set())
 
   const today = iso(new Date())
@@ -223,17 +228,31 @@ export default function ProjectTimeline() {
 
   /* В режиме «по разработчику» строки собираются в группы с шапкой на человека —
    * тогда его отпуск виден одной полосой сразу по всем его проектам. */
+  /* Все, кто что-то ведёт, в порядке числа проектов — для строки фильтра. */
+  const allLeads = useMemo(() => {
+    const c = new Map()
+    for (const p of projects) c.set(p.lead, (c.get(p.lead) || 0) + 1)
+    return [...c.entries()].sort((a, b) => b[1] - a[1]).map(([name]) => name)
+  }, [projects])
+
+  const shown = useMemo(() => {
+    if (!allLeads.length) return projects
+    const picked = leads ?? allLeads.filter((n) => DEFAULT_LEADS.includes(n))
+    if (!picked.length) return projects
+    return projects.filter((p) => picked.includes(p.lead))
+  }, [projects, leads, allLeads])
+
   const groups = useMemo(() => {
     const byDuration = (a, b) => (a.finished - b.finished) || (b.span - a.span)
     if (sort !== 'owner') {
-      const list = [...projects]
+      const list = [...shown]
       if (sort === 'start') list.sort((a, b) => a.start.localeCompare(b.start))
       else if (sort === 'size') list.sort((a, b) => b.tasks.length - a.tasks.length)
       else list.sort(byDuration)
       return [{ key: null, projects: list }]
     }
     const byLead = new Map()
-    for (const p of projects) {
+    for (const p of shown) {
       if (!byLead.has(p.lead)) byLead.set(p.lead, [])
       byLead.get(p.lead).push(p)
     }
@@ -249,10 +268,10 @@ export default function ProjectTimeline() {
         }
       })
       .sort((a, b) => b.longest - a.longest || b.projects.length - a.projects.length)
-  }, [projects, sort])
+  }, [shown, sort])
 
   const scale = useMemo(() => {
-    const last = projects.reduce((m, p) => (p.end > m ? p.end : m), today)
+    const last = shown.reduce((m, p) => (p.end > m ? p.end : m), today)
     const to = new Date(last)
     to.setMonth(to.getMonth() + 1, 0)
     let from = ZOOMS[zoom].from
@@ -269,7 +288,7 @@ export default function ProjectTimeline() {
       weeks: weeksBetween(from, iso(to)),
       pos: (d) => Math.max(0, Math.min(100, ((new Date(d) - t0) / DAY / span) * 100)),
     }
-  }, [projects, zoom, today])
+  }, [shown, zoom, today])
 
   const toggle = (name) => setOpened((prev) => {
     const next = new Set(prev)
@@ -277,9 +296,9 @@ export default function ProjectTimeline() {
     return next
   })
 
-  const openProjects = projects.filter((p) => !p.finished)
+  const openProjects = shown.filter((p) => !p.finished)
   const longest = openProjects.reduce((a, p) => (!a || p.span > a.span ? p : a), null)
-  const taskCount = projects.reduce((s, p) => s + p.tasks.length, 0)
+  const taskCount = shown.reduce((s, p) => s + p.tasks.length, 0)
   const hasActivity = Boolean(activity)
 
   return (
@@ -316,9 +335,9 @@ export default function ProjectTimeline() {
       {engineers && !error && (
         <>
           <div className="pt-stats">
-            <Stat value={projects.length} label="проектов" />
+            <Stat value={shown.length} label="проектов" />
             <Stat value={openProjects.length} label="открыто" />
-            <Stat value={projects.length - openProjects.length} label="закрыто" />
+            <Stat value={shown.length - openProjects.length} label="закрыто" />
             <Stat value={taskCount} label="задач" />
             {parallel && <Stat value={parallel.projects} label="проектов в работе на прошлой неделе" />}
             {longest && <Stat value={`${longest.span} дн`} label={`дольше всех открыт: ${longest.name}`} wide />}
@@ -328,6 +347,34 @@ export default function ProjectTimeline() {
             <Group title="Масштаб" options={ZOOMS} value={zoom} onChange={setZoom} />
             <Group title="Сортировка" options={SORTS} value={sort} onChange={setSort} />
           </div>
+
+          <div className="pt-controls">
+            <div className="pt-ctl">
+              <em>Разработчики</em>
+              {allLeads.map((name) => {
+                const picked = (leads ?? allLeads.filter((n) => DEFAULT_LEADS.includes(n))).includes(name)
+                return (
+                  <button
+                    key={name} type="button" className="pt-chip" aria-pressed={picked}
+                    onClick={() => setLeads((prev) => {
+                      const base = prev ?? allLeads.filter((n) => DEFAULT_LEADS.includes(n))
+                      return base.includes(name) ? base.filter((n) => n !== name) : [...base, name]
+                    })}
+                  >
+                    {lastName(name)}
+                  </button>
+                )
+              })}
+              <button type="button" className="pt-chip" onClick={() => setLeads(allLeads)}>все</button>
+            </div>
+          </div>
+
+          {shown.length < projects.length && (
+            <p className="pt-filtered">
+              Показаны проекты троих: {shown.length} из {projects.length}. Остальные скрыты
+              фильтром, из данных ничего не убрано.
+            </p>
+          )}
 
           <div className="pt-board">
             <div className="pt-scroll">
@@ -626,6 +673,7 @@ function Style() {
 .pt-vacband{position:absolute;top:4px;bottom:4px;border-radius:4px;
   background:repeating-linear-gradient(45deg,var(--border-strong) 0 4px,transparent 4px 8px);
   border:1px solid var(--border-strong)}
+.pt-filtered{color:var(--muted);font-size:12.5px;margin:0 0 10px}
 .pt-legend{display:flex;flex-wrap:wrap;gap:14px;margin-top:13px;font-size:12px;color:var(--muted)}
 .pt-k{display:inline-block;width:12px;height:12px;border-radius:3px;margin-right:6px;vertical-align:-2px}
 .pt-k[data-state="work"]{background:var(--accent1)}
