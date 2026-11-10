@@ -55,6 +55,51 @@ const PROJECT_PEOPLE = {
   'Finance Data': ['Andrey Pogrebnyak'],
 }
 
+/* Короткое описание проекта — в подсказке на строке. Собрано из заметок по
+ * проектам и самих отчётов. Правится без выкатки:
+ * PUT /api/blobs/project_descriptions. */
+const PROJECT_ABOUT = {
+  'Home Alliance ID':
+    'Единая учётка сотрудника на все системы компании и справочник оргструктуры, '
+    + 'синхронный с Google Workspace и Slack.',
+  'FOS и бухгалтерия':
+    'Financial OS: учёт работ и выплат техникам вместо гугл-таблиц по каждой компании. '
+    + 'Фаза 1 — перенос 7 компаний по 11-шаговому чек-листу, плюс стыковка с QuickBooks.',
+  'CRM Apollo и интеграции':
+    'Основная CRM компании и всё, что в неё входит и из неё выходит: лиды из GoHighLevel, '
+    + 'выгрузки, витрины отчётности, разбор упавших эндпоинтов.',
+  'Колл-центр и телефония':
+    'Уход с Twilio Flex на собственный маршрутизатор звонков: админка колл-центра, '
+    + 'блокировка робозвонков, разбор потерянных вызовов.',
+  'Passport':
+    'Личный кабинет клиента: подписки, история работ и счетов, AI-ассистент. '
+    + 'Идёт перенос с Supabase на Next.js + Postgres.',
+  'TechApp / Alliance Connect':
+    'Рабочее приложение техника в поле: наряды, переписка с клиентом, SMS-мост. '
+    + 'Новая версия Alliance Connect на React + Laravel.',
+  'Home Alliance OS':
+    'Сбор данных компании в одно хранилище: события CRM, звонки, распознавание речи, '
+    + 'витрины для воронки продаж.',
+  'Автоматизации n8n и агенты':
+    'Автоматические сценарии в n8n и голосовые AI-агенты Newo: обработка заявок с сайтов, '
+    + 'уведомления, маршрутизация лидов.',
+  'Звонки: аналитика и качество':
+    'Оценка качества звонков и опросы клиентов: рубрика из 6 критериев, CSAT, '
+    + 'выгрузка результатов для разбора.',
+  'Сайты и веб':
+    'Поддержка сайтов компании: защита форм от спама через Cloudflare Turnstile, '
+    + 'чат-бот HA-Chat, разбор падений и потерянных доступов.',
+  'Hiring Intelligence / HR CRM':
+    'Наём и учёт выданных доступов: у каждого токена есть владелец, при увольнении '
+    + 'доступы снимаются и компания перестаёт за них платить. Переезд с Abacus.',
+  'Partner Success OS':
+    'Работа с партнёрами: сведение данных в один реестр, очередь звонков, '
+    + 'сверка телефонов техников.',
+  'Finance Data':
+    'Выгрузка и сверка платежей: синхронизация с Authorize.Net, ingest-эндпоинты, '
+    + 'поиск двойных списаний.',
+}
+
 /* Проекты, которые на эту доску не идут совсем. */
 const HIDDEN_PROJECTS = [
   'Инфраструктура и деплой',
@@ -147,6 +192,7 @@ export default function ProjectTimeline() {
   const [activity, setActivity] = useState(null)
   const [devmeet, setDevmeet] = useState(EMPTY_DEVMEET)
   const [roster, setRoster] = useState(null)
+  const [about, setAbout] = useState(PROJECT_ABOUT)
   const [error, setError] = useState(null)
   const [zoom, setZoom] = useState('all')
   const [sort, setSort] = useState('gaps')
@@ -168,6 +214,9 @@ export default function ProjectTimeline() {
     api.get('/blobs/project_people')
       .then((d) => { if (alive && d?.value?.people) setRoster(d.value) })
       .catch(() => { /* нет записи — работает список в коде */ })
+    api.get('/blobs/project_descriptions')
+      .then((d) => { if (alive && d?.value) setAbout({ ...PROJECT_ABOUT, ...d.value }) })
+      .catch(() => { /* нет записи — работают описания из кода */ })
     api.get('/overview').then((d) => { if (alive) setOverview(d) }).catch(() => {})
     api.get('/leaderboard')
       .then((d) => { if (alive) setTeamXp((d || []).reduce((s, m) => s + (m.total_score || 0), 0)) })
@@ -306,7 +355,7 @@ export default function ProjectTimeline() {
                           role="button" tabIndex={0}
                           onClick={() => toggle(p.name)}
                           onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(p.name) } }}
-                          title={projectTitle(p)}
+                          title={projectTitle(p, about[p.name])}
                         >
                           <div className="pt-c">
                             <span className="pt-tog">▶</span>
@@ -482,8 +531,9 @@ const plural = (n) => {
   return 'раз'
 }
 
-const projectTitle = (p) => [
+const projectTitle = (p, about) => [
   p.name,
+  about && `\n${about}\n`,
   `ведёт ${p.lead}`,
   `${p.activeWeeks.length} недель с работой, ${p.items} пунктов в отчётах`,
   p.first && `первое упоминание ${fmtWeek(p.first)}, последнее ${fmtWeek(p.last)}`,
