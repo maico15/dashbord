@@ -54,6 +54,17 @@ _COMPILED = [(name, re.compile(pat, re.I)) for name, pat in RULES]
 # Поля отчёта, которые описывают работу. Заголовки и пустые строки не считаем.
 REPORT_FIELDS = ("completed", "next_tasks", "delayed_risks", "invisible_work")
 
+# Сколько пунктов показываем в подсказке за одну неделю и до какой длины режем.
+# Ограничение держит ответ в разумном размере: иначе в него уезжает весь текст
+# всех отчётов за полгода.
+MAX_SAMPLES = 8
+MAX_CHARS = 220
+
+
+def _trim(text: str) -> str:
+    one = " ".join(str(text).split())
+    return one if len(one) <= MAX_CHARS else one[:MAX_CHARS - 1].rstrip() + "…"
+
 
 def monday_of(day: str) -> str:
     d = date.fromisoformat(day)
@@ -81,6 +92,9 @@ def weekly_activity(rows):
     parallel = defaultdict(lambda: defaultdict(set))   # инженер -> неделя -> проекты
     people = defaultdict(lambda: defaultdict(int))     # проект -> инженер -> пунктов
     by_person = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
+    # проект -> неделя -> что именно писали. Нужно для подсказки при наведении:
+    # число пунктов само по себе не говорит, что было сделано.
+    items = defaultdict(lambda: defaultdict(list))
     weeks = set()
     total = matched = 0
 
@@ -96,6 +110,9 @@ def weekly_activity(rows):
                     parallel[engineer][week].add(name)
                     people[name][engineer] += 1
                     by_person[name][engineer][week] += 1
+                    bucket = items[name][week]
+                    if len(bucket) < MAX_SAMPLES:
+                        bucket.append({"who": engineer, "day": day, "text": _trim(text)})
                     hit = True
             if hit:
                 matched += 1
@@ -120,6 +137,7 @@ def weekly_activity(rows):
             name: {who: dict(by_week) for who, by_week in whos.items()}
             for name, whos in by_person.items()
         },
+        "items": {name: dict(by_week) for name, by_week in items.items()},
         "per_engineer": {
             engineer: {week: sorted(p) for week, p in by_week.items()}
             for engineer, by_week in parallel.items()
