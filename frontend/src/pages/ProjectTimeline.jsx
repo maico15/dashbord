@@ -70,6 +70,12 @@ function buildProjects(activity) {
       for (const [w, n] of Object.entries(byWeek)) weeks[w] = (weeks[w] || 0) + n
     }
     const active = Object.keys(weeks).filter((w) => weeks[w] > 0).sort()
+
+    /* Что именно делали — строки отчётов троих, новые сверху. */
+    const lines = (activity.items || {})[name] || {}
+    const work = Object.entries(lines)
+      .flatMap(([week, list]) => list.filter((it) => LEADS.includes(it.who)).map((it) => ({ ...it, week })))
+      .sort((a, b) => b.day.localeCompare(a.day))
     const who = mine
       .map(([n, byWeek]) => [n, Object.values(byWeek).reduce((s, x) => s + x, 0)])
       .sort((a, b) => b[1] - a[1])
@@ -85,7 +91,9 @@ function buildProjects(activity) {
       name,
       weeks,
       talk: talk[name] || {},
-      lines: (activity.items || {})[name] || {},
+      lines,
+      work,
+      workMore: Math.max(0, Object.values(weeks).reduce((s, n) => s + n, 0) - work.length),
       activeWeeks: active,
       first: active[0] || null,
       last: active[active.length - 1] || null,
@@ -270,23 +278,54 @@ export default function ProjectTimeline() {
                           />
                         </div>
 
-                        {isOpen && p.people.map(([who, n]) => (
-                          <div key={who} className="pt-row pt-sub">
-                            <div className="pt-c">
-                              <span className="pt-nm pt-nm-sub">{who}</span>
-                            </div>
-                            <div className="pt-c pt-who"><span className="pt-who-sub">{n} п.</span></div>
-                            <div className="pt-c pt-dur">
-                              <span className="pt-dur-sub">
-                                {Object.keys(p.byPerson[who] || {}).length} нед
-                              </span>
-                            </div>
-                            <Track
-                              weeks={scale.weeks} counts={p.byPerson[who] || {}} talk={{}}
-                              items={p.lines} name={`${p.name} · ${lastName(who)}`} only={[who]}
-                            />
-                          </div>
-                        ))}
+                        {isOpen && (
+                          <>
+                            {p.people.map(([who, n]) => (
+                              <div key={who} className="pt-row pt-sub">
+                                <div className="pt-c">
+                                  <span className="pt-nm pt-nm-sub">{who}</span>
+                                </div>
+                                <div className="pt-c pt-who"><span className="pt-who-sub">{n} п.</span></div>
+                                <div className="pt-c pt-dur">
+                                  <span className="pt-dur-sub">
+                                    {Object.keys(p.byPerson[who] || {}).length} нед
+                                  </span>
+                                </div>
+                                <Track
+                                  weeks={scale.weeks} counts={p.byPerson[who] || {}} talk={{}}
+                                  items={p.lines} name={`${p.name} · ${lastName(who)}`} only={[who]}
+                                />
+                              </div>
+                            ))}
+
+                            {/* Сама работа: строки из отчётов, новые сверху. Раньше здесь
+                              * были задачи с Ганта — их заменяет то, что реально писали. */}
+                            {p.work.map((it, k) => (
+                              <div key={`${it.day}-${k}`} className="pt-row pt-work" title={`${it.who}, ${fmtWeek(it.day)}\n${it.text}`}>
+                                <div className="pt-c">
+                                  <span className="pt-nm pt-nm-work">{it.text}</span>
+                                </div>
+                                <div className="pt-c pt-who">
+                                  <span className="pt-who-sub">{lastName(it.who)}</span>
+                                </div>
+                                <div className="pt-c pt-dur">
+                                  <span className="pt-dur-sub">{fmtWeek(it.day)}</span>
+                                </div>
+                                <Mark weeks={scale.weeks} week={it.week} />
+                              </div>
+                            ))}
+
+                            {p.workMore > 0 && (
+                              <div className="pt-row pt-sub">
+                                <div className="pt-c">
+                                  <span className="pt-nm pt-nm-sub">
+                                    …и ещё {p.workMore} пунктов за недели, где их было больше 20
+                                  </span>
+                                </div>
+                              </div>
+                            )}
+                          </>
+                        )}
                       </div>
                     )
                   })}
@@ -361,6 +400,18 @@ function Track({ weeks, counts, talk, items, name, only }) {
           />
         )
       })}
+    </div>
+  )
+}
+
+/** Одна отметка на шкале — неделя, в которую попал этот пункт отчёта. */
+function Mark({ weeks, week }) {
+  const i = weeks.indexOf(week)
+  if (i < 0) return <div className="pt-track" />
+  const w = 100 / Math.max(1, weeks.length)
+  return (
+    <div className="pt-track">
+      <span className="pt-wk pt-wk-one" style={{ left: `${i * w}%`, width: `${w}%` }} />
     </div>
   )
 }
@@ -461,6 +512,14 @@ function Style() {
 .pt-more{flex:0 0 auto;font-size:10px;color:var(--muted)}
 .pt-sub .pt-track{height:30px}
 .pt-sub .pt-wk{height:14px}
+.pt-work{background:var(--card)}
+.pt-work:hover{background:var(--row-hover)}
+.pt-work .pt-c{padding-top:5px;padding-bottom:5px;align-items:flex-start}
+.pt-work .pt-track{height:26px;padding:4px 0}
+.pt-nm-work{font-weight:400;font-size:12px;color:var(--text-secondary);padding-left:21px;
+  line-height:1.4;white-space:normal;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;
+  overflow:hidden}
+.pt-wk-one{height:10px;border-radius:2px;background:var(--accent1);opacity:.85}
 .pt-filtered{color:var(--muted);font-size:12.5px;margin:0 0 10px;max-width:82ch}
 .pt-legend{display:flex;flex-wrap:wrap;gap:14px;margin-top:13px;font-size:12px;color:var(--muted)}
 .pt-k{display:inline-block;width:12px;height:12px;border-radius:3px;margin-right:6px;vertical-align:-2px;
