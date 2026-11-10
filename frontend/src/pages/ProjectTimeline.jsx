@@ -25,6 +25,10 @@ const DAY = 864e5
 /* Показываем проекты только этих троих. Ведущий считается по отчётам. */
 const LEADS = ['Andrey Pogrebnyak', 'Andrey Brunetkin', 'Azizbek Turgunov']
 
+/* Отсчёт ведём с 6 июля — это начало доски команды, и так считает Александр.
+ * Отчёты в базе есть с 29 мая, но май и июнь на эту страницу не берём. */
+const BOARD_START = '2026-07-06'
+
 const SORTS = {
   gaps: 'по числу возвратов',
   weeks: 'по неделям работы',
@@ -107,7 +111,7 @@ export default function ProjectTimeline() {
 
   useEffect(() => {
     let alive = true
-    api.get(`/projects/activity?start=2026-01-01&end=${today}`)
+    api.get(`/projects/activity?start=${BOARD_START}&end=${today}`)
       .then((d) => { if (alive) setActivity(d) })
       .catch((e) => { if (alive) setError(e.message) })
     api.get('/overview').then((d) => { if (alive) setOverview(d) }).catch(() => {})
@@ -298,7 +302,9 @@ export default function ProjectTimeline() {
               <b>Откуда цифры.</b> Ежедневные отчёты за {activity.weeks?.[0] && fmtWeek(activity.weeks[0])} —{' '}
               {lastWeek && fmtWeek(lastWeek)}: {activity.items_matched} из {activity.items_total} пунктов
               удалось отнести к проекту по отличительному слову в тексте. Остальные — общие
-              формулировки без названия проекта, их никуда не приписывали.
+              формулировки без названия проекта, их никуда не приписывали. Отсчёт идёт
+              с 6 июля — начала доски команды; отчёты за конец мая и июнь в базе есть,
+              но на этой странице не считаются.
               {' '}<b>Dev meet</b> из Fireflies: {devmeet.meetings} встреч за {devmeet.weeks.length} недель
               ({fmtWeek(devmeet.weeks[0])} — {fmtWeek(devmeet.weeks[devmeet.weeks.length - 1])}), из них{' '}
               {devmeet.matched} с упоминанием проекта. В июле записей встреч нет — там пусто не
