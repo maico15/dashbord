@@ -8,6 +8,7 @@ import MonthlyReview from './pages/MonthlyReview'
 import MonthlyReviewCurated from './pages/MonthlyReviewCurated'
 import MonthlyReviewLive from './pages/MonthlyReviewLive'
 import TeamGantt from './pages/TeamGantt'
+import ProjectTimeline from './pages/ProjectTimeline'
 import TeamPlan from './pages/TeamPlan'
 import TaskBoard from './pages/TaskBoard'
 import Roadmap from './pages/Roadmap'
@@ -39,6 +40,7 @@ export default function App() {
       <Route path="/review/:year/:month" element={<MonthlyReviewCurated />} />
       <Route path="/monthly-review" element={<MonthlyReviewLive />} />
       <Route path="/team-gantt" element={<TeamGantt />} />
+      <Route path="/projects" element={<ProjectTimeline />} />
       <Route path="/team-plan" element={<TeamPlan />} />
       <Route path="/tasks" element={<TaskBoard />} />
       <Route path="/roadmap" element={<Roadmap />} />
