@@ -1,40 +1,45 @@
 /* ProjectTimeline — «Проекты», /projects.
  *
- * Отвечает на один вопрос, который Сардор задал на IT Weekly 06.11:
- * «Как долго человек тянет проект и не заканчивает его». Поэтому единица
- * строки — проект, а не таск, и первая колонка после названия — длительность.
+ * Отвечает на вопрос, который Сардор задал на IT Weekly 06.11: «как долго
+ * человек тянет проект и не заканчивает его». Поэтому строка — проект, а не
+ * таск, и первая колонка после названия — длительность.
  *
- * Данные: GET /api/gantt (тот же ответ, что у TeamGantt). Группировка в
- * проекты живёт в lib/projectMap.js — страница ничего не пишет в базу.
+ * Строка проекта разбита по неделям, и неделя закрашена только когда работа
+ * действительно шла: по проекту была открытая задача И её исполнитель в ту
+ * неделю сдавал ежедневные отчёты. Неделя без отчётов остаётся пустой — это и
+ * есть разрыв. Отпуск штрихуется отдельно.
  *
- * Две шкалы времени, и они не смешаны: доска начинается 6 июля 2026, история
- * из git (карта Брюнеткина) — 6 апреля. Где проект есть в обеих, длительность
- * показана по git со звёздочкой, а состав задач — по доске.
+ * Данные: GET /api/gantt (задачи и отпуска) и GET /api/reports/days (в какие
+ * дни кто отчитывался). Страница ничего не пишет.
+ *
+ * Привязка задачи к проекту к отчётам не имеет отношения: она идёт только с
+ * доски, через lib/projectMap.js. Текст отчётов не разбирается — совпадение
+ * слова не считается доказательством работы по проекту.
  */
 import { useState, useEffect, useMemo } from 'react'
 import { Link } from 'react-router-dom'
 import { api } from '../api/client'
-import { RequestsStyle } from './itRequestsStyle'
-import { projectOf, GIT_HISTORY, BOARD_START, GIT_START } from '../lib/projectMap'
+import {
+  projectOf, GIT_HISTORY, BOARD_START, GIT_START, VACATION, VACATION_WORKING,
+} from '../lib/projectMap'
 
 const MONTHS_RU = ['янв', 'фев', 'мар', 'апр', 'май', 'июн', 'июл', 'авг', 'сен', 'окт', 'ноя', 'дек']
 const DAY = 864e5
 const OPEN_STATUSES = ['active', 'queued', 'continuous']
+const STATUS_RU = { done: 'закрыто', active: 'в работе', queued: 'в очереди', continuous: 'постоянная' }
 
 const ZOOMS = {
   board: { from: BOARD_START, label: 'доска: с 6 июля' },
   git: { from: GIT_START, label: 'git: с 6 апреля' },
-  quarter: { from: null, label: 'квартал', months: 3 },
+  quarter: { from: null, months: 3, label: 'квартал' },
 }
-const SORTS = {
-  duration: 'по длительности',
-  start: 'по началу',
-  size: 'по числу задач',
-}
-const STATUS_RU = { done: 'закрыто', active: 'в работе', queued: 'в очереди', continuous: 'постоянная' }
+const SORTS = { duration: 'по длительности', start: 'по началу', size: 'по числу задач' }
 
 const iso = (d) => d.toISOString().slice(0, 10)
-const addWorkingDays = (start, days) => {
+const fmtDate = (s) => new Date(s).toLocaleDateString('ru-RU', { day: 'numeric', month: 'short' })
+const daysBetween = (a, b) => Math.round((new Date(b) - new Date(a)) / DAY)
+
+function addWorkingDays(start, days) {
   const d = new Date(start)
   let left = Math.max(1, days || 1) - 1
   while (left > 0) {
@@ -43,10 +48,55 @@ const addWorkingDays = (start, days) => {
   }
   return iso(d)
 }
-const daysBetween = (a, b) => Math.round((new Date(b) - new Date(a)) / DAY)
-const fmtDate = (s) => new Date(s).toLocaleDateString('ru-RU', { day: 'numeric', month: 'short' })
 
-/** Задачи с доски → проекты с подзадачами. */
+/** Понедельник недели, в которую попадает дата. */
+function mondayOf(dateStr) {
+  const d = new Date(dateStr)
+  const shift = (d.getDay() + 6) % 7
+  d.setDate(d.getDate() - shift)
+  return iso(d)
+}
+
+function weeksBetween(from, to) {
+  const out = []
+  const cur = new Date(mondayOf(from))
+  const end = new Date(to)
+  while (cur <= end) {
+    out.push(iso(cur))
+    cur.setDate(cur.getDate() + 7)
+  }
+  return out
+}
+
+function monthsBetween(from, to) {
+  const out = []
+  const end = new Date(to)
+  const cur = new Date(new Date(from).getFullYear(), new Date(from).getMonth(), 1)
+  while (cur <= end) {
+    out.push(new Date(cur))
+    cur.setMonth(cur.getMonth() + 1)
+  }
+  return out
+}
+
+/** Отпуска с доски: по инженеру — отрезки, когда его не было. */
+function readVacations(engineers) {
+  const byEngineer = new Map()
+  for (const eng of engineers || []) {
+    for (const a of eng.assignments || []) {
+      if (!a.start_date || !VACATION.test(a.project || '')) continue
+      if (VACATION_WORKING.test(a.project || '')) continue
+      if (!byEngineer.has(eng.name)) byEngineer.set(eng.name, [])
+      byEngineer.get(eng.name).push({
+        start: a.start_date,
+        end: addWorkingDays(a.start_date, a.est_days),
+        label: a.project,
+      })
+    }
+  }
+  return byEngineer
+}
+
 function buildProjects(engineers, today) {
   const byName = new Map()
   for (const eng of engineers || []) {
@@ -59,7 +109,8 @@ function buildProjects(engineers, today) {
         ref: a.ref,
         title: a.project || 'Без названия',
         who: eng.name,
-        color: eng.color,
+        engineerId: eng.id,
+        color: eng.color || 'var(--accent1)',
         start: a.start_date,
         end: addWorkingDays(a.start_date, a.est_days),
         days: a.est_days,
@@ -79,54 +130,45 @@ function buildProjects(engineers, today) {
     const git = GIT_HISTORY[name] || null
     const start = git ? git.start : boardStart
     const end = finished ? (git && git.last > lastEnd ? git.last : lastEnd) : today
-    const lead = [...tasks.reduce((m, t) => m.set(t.who, (m.get(t.who) || 0) + 1), new Map())]
-      .sort((a, b) => b[1] - a[1])[0][0]
+    const counts = tasks.reduce((m, t) => m.set(t.who, (m.get(t.who) || 0) + 1), new Map())
     out.push({
-      name,
-      tasks,
-      git,
-      boardStart,
-      start,
-      end,
-      lastEnd,
-      finished,
+      name, tasks, git, boardStart, lastEnd, start, end, finished,
       span: daysBetween(start, end),
       openCount: open.length,
       doneCount: tasks.filter((t) => t.status === 'done').length,
       percent: Math.round(tasks.reduce((s, t) => s + (t.percent ?? 0), 0) / tasks.length),
-      lead,
-      team: [...new Set(tasks.map((t) => t.who))],
+      lead: [...counts].sort((a, b) => b[1] - a[1])[0][0],
+      team: [...counts.keys()],
     })
   }
   return out
 }
 
-function monthsBetween(from, to) {
-  const out = []
-  const end = new Date(to)
-  const c = new Date(new Date(from).getFullYear(), new Date(from).getMonth(), 1)
-  while (c <= end) {
-    out.push(new Date(c))
-    c.setMonth(c.getMonth() + 1)
-  }
-  return out
-}
+/* Состояние одной недели проекта:
+ *   active   — есть задача этой недели и её исполнитель в ту неделю отчитывался
+ *   planned  — задача есть, отчётов нет: по доске работа шла, подтверждения нет
+ *   vacation — единственные исполнители недели были в отпуске
+ *   none     — задач на эту неделю нет */
+function weekState(project, weekStart, reportDaysByEngineer, vacations) {
+  const weekEnd = iso(new Date(new Date(weekStart).getTime() + 6 * DAY))
+  const inWeek = project.tasks.filter((t) => t.start <= weekEnd && t.end >= weekStart)
+  if (!inWeek.length) return 'none'
 
-function Bar({ left, width, tone, label, fill, tall }) {
-  return (
-    <div
-      className={`pt-bar${tall ? ' pt-bar-lg' : ''}`}
-      data-tone={tone}
-      style={{ left: `${left}%`, width: `${Math.max(width, 0.6)}%` }}
-    >
-      {fill > 0 && fill < 100 && <span className="pt-bar-fill" style={{ width: `${fill}%` }} />}
-      <span className="pt-bar-label">{label}</span>
-    </div>
-  )
+  const owners = [...new Set(inWeek.map((t) => t.who))]
+  const away = owners.filter((who) =>
+    (vacations.get(who) || []).some((v) => v.start <= weekEnd && v.end >= weekStart))
+  if (away.length === owners.length) return 'vacation'
+
+  const reported = inWeek.some((t) => {
+    const days = reportDaysByEngineer[String(t.engineerId)] || []
+    return days.some((d) => d >= weekStart && d <= weekEnd)
+  })
+  return reported ? 'active' : 'planned'
 }
 
 export default function ProjectTimeline() {
   const [engineers, setEngineers] = useState(null)
+  const [reportDays, setReportDays] = useState({})
   const [error, setError] = useState(null)
   const [zoom, setZoom] = useState('board')
   const [sort, setSort] = useState('duration')
@@ -139,13 +181,17 @@ export default function ProjectTimeline() {
     api.get('/gantt')
       .then((d) => { if (alive) setEngineers(d.engineers || []) })
       .catch((e) => { if (alive) setError(e.message) })
+    api.get(`/reports/days?start=${GIT_START}&end=${today}`)
+      .then((d) => { if (alive) setReportDays(d.days || {}) })
+      .catch(() => { /* без отчётов неделя просто остаётся «по плану» */ })
     return () => { alive = false }
-  }, [])
+  }, [today])
 
   const projects = useMemo(
     () => (engineers ? buildProjects(engineers, today) : []),
     [engineers, today],
   )
+  const vacations = useMemo(() => readVacations(engineers), [engineers])
 
   const sorted = useMemo(() => {
     const list = [...projects]
@@ -168,9 +214,9 @@ export default function ProjectTimeline() {
     const t0 = new Date(from)
     const span = (to - t0) / DAY || 1
     return {
-      from,
-      to: iso(to),
+      from, to: iso(to),
       months: monthsBetween(from, iso(to)),
+      weeks: weeksBetween(from, iso(to)),
       pos: (d) => Math.max(0, Math.min(100, ((new Date(d) - t0) / DAY / span) * 100)),
     }
   }, [projects, zoom, today])
@@ -184,25 +230,25 @@ export default function ProjectTimeline() {
   const openProjects = projects.filter((p) => !p.finished)
   const longest = openProjects.reduce((a, p) => (!a || p.span > a.span ? p : a), null)
   const taskCount = projects.reduce((s, p) => s + p.tasks.length, 0)
+  const hasReports = Object.keys(reportDays).length > 0
 
   return (
     <div className="pt-page">
-      <RequestsStyle />
       <Style />
 
-      <div className="pt-head">
-        <Link to="/" className="pt-back">← Дашборд</Link>
-        <h1 className="pt-title">Проекты</h1>
-        <Link to="/team-gantt" className="pt-back">Гант по задачам →</Link>
+      <div className="pt-top">
+        <Link to="/" className="pt-link">← Дашборд</Link>
+        <h1 className="pt-h1">Проекты</h1>
+        <Link to="/team-gantt" className="pt-link">Гант по задачам →</Link>
       </div>
-      <p className="pt-sub">
-        Сколько тянется каждый проект, а не сколько тасков закрыто. Задачи с доски Team Gantt,
-        свёрнутые в проекты. По четырём проектам длительность взята из карты Брюнеткина (git,
-        с 6 апреля) и помечена звёздочкой — доска начинается только 6 июля.
+      <p className="pt-lede">
+        Сколько тянется каждый проект, а не сколько тасков закрыто. Неделя закрашена, когда по
+        проекту была открытая задача и её исполнитель в ту неделю сдавал отчёты; пустая неделя —
+        разрыв, штриховка — отпуск.
       </p>
 
-      {error && <div className="pt-state pt-state-err">Не удалось загрузить: {error}</div>}
-      {!engineers && !error && <div className="pt-state">Загружаю доску…</div>}
+      {error && <div className="pt-note pt-note-err">Не удалось загрузить доску: {error}</div>}
+      {!engineers && !error && <div className="pt-note">Загружаю доску…</div>}
 
       {engineers && !error && (
         <>
@@ -211,7 +257,7 @@ export default function ProjectTimeline() {
             <Stat value={openProjects.length} label="открыто" />
             <Stat value={projects.length - openProjects.length} label="закрыто" />
             <Stat value={taskCount} label="задач" />
-            {longest && <Stat value={`${longest.span} дн`} label={`дольше всех открыт: ${longest.name}`} />}
+            {longest && <Stat value={`${longest.span} дн`} label={`дольше всех открыт: ${longest.name}`} wide />}
           </div>
 
           <div className="pt-controls">
@@ -222,72 +268,94 @@ export default function ProjectTimeline() {
           <div className="pt-board">
             <div className="pt-scroll">
               <div className="pt-grid">
-                <div className="pt-row pt-header">
-                  <div className="pt-cell">Проект</div>
-                  <div className="pt-cell pt-dur">Тянется</div>
-                  <div className="pt-track pt-months" style={{ gridTemplateColumns: `repeat(${scale.months.length}, 1fr)` }}>
-                    {scale.months.map((m) => (
-                      <span key={+m} className="pt-month">{MONTHS_RU[m.getMonth()]}</span>
-                    ))}
+                <div className="pt-row pt-head">
+                  <div className="pt-c">Проект</div>
+                  <div className="pt-c pt-dur">Тянется</div>
+                  <div className="pt-track pt-months" style={{ gridTemplateColumns: `repeat(${scale.months.length},1fr)` }}>
+                    {scale.months.map((m) => <span key={+m} className="pt-mo">{MONTHS_RU[m.getMonth()]}</span>)}
                   </div>
                 </div>
 
                 {sorted.map((p) => {
                   const isOpen = opened.has(p.name)
-                  const left = scale.pos(p.start)
                   return (
-                    <div key={p.name} className="pt-group">
+                    <div key={p.name} className="pt-g">
                       <div
-                        className={`pt-row pt-project${isOpen ? ' is-open' : ''}`}
+                        className={`pt-row pt-proj${isOpen ? ' is-open' : ''}`}
+                        role="button" tabIndex={0} aria-expanded={isOpen}
                         onClick={() => toggle(p.name)}
                         onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(p.name) } }}
-                        role="button"
-                        tabIndex={0}
-                        aria-expanded={isOpen}
                       >
-                        <div className="pt-cell">
+                        <div className="pt-c">
                           <span className="pt-tog" aria-hidden="true">▶</span>
-                          <span className="pt-name" title={p.name}>{p.name}</span>
+                          <span className="pt-nm" title={p.name}>{p.name}</span>
+                          <span className={`pt-pill${p.finished ? ' is-done' : ''}`}>
+                            {p.finished ? 'закрыт' : `${p.openCount} в работе`}
+                          </span>
                         </div>
-                        <div className={`pt-cell pt-dur${!p.finished && p.span >= 150 ? ' is-hot' : ''}`}>
+                        <div className={`pt-c pt-dur${!p.finished && p.span >= 150 ? ' is-hot' : ''}`}>
                           <b>{p.span}</b>&nbsp;дн{p.git && <sup title="длительность по git">*</sup>}
                         </div>
-                        <div
-                          className="pt-track"
-                          title={projectTitle(p)}
-                        >
-                          <Bar
-                            left={left}
-                            width={scale.pos(p.end) - left}
-                            tone={p.finished ? 'done' : 'open'}
-                            fill={p.finished ? 0 : p.percent}
-                            label={`${p.lead} · ${p.doneCount}/${p.tasks.length}`}
-                            tall
+                        <div className="pt-track" title={projectTitle(p, hasReports)}>
+                          <span
+                            className={`pt-span${p.finished ? ' is-done' : ''}`}
+                            style={{ left: `${scale.pos(p.start)}%`, width: `${Math.max(scale.pos(p.end) - scale.pos(p.start), 0.6)}%` }}
                           />
+                          {scale.weeks.map((w) => {
+                            const st = weekState(p, w, reportDays, vacations)
+                            if (st === 'none') return null
+                            const wEnd = iso(new Date(new Date(w).getTime() + 6 * DAY))
+                            return (
+                              <span
+                                key={w}
+                                className="pt-wk"
+                                data-state={st}
+                                data-done={p.finished ? '1' : '0'}
+                                style={{ left: `${scale.pos(w)}%`, width: `${Math.max(scale.pos(wEnd) - scale.pos(w), 0.4)}%` }}
+                              />
+                            )
+                          })}
                           <span className="pt-today" style={{ left: `${scale.pos(today)}%` }} />
+                          <span className="pt-lbl">{p.lead} · {p.doneCount}/{p.tasks.length}</span>
                         </div>
                       </div>
 
-                      {isOpen && p.tasks.map((t) => {
-                        const tl = scale.pos(t.start)
-                        return (
-                          <div key={t.ref || t.title} className="pt-row pt-task">
-                            <div className="pt-cell">
-                              <span className="pt-name pt-name-sub" title={t.title}>{t.title}</span>
-                            </div>
-                            <div className="pt-cell pt-dur pt-dur-sub">{t.days}&nbsp;р.д.</div>
-                            <div className="pt-track" title={taskTitle(t)}>
-                              <Bar
-                                left={tl}
-                                width={scale.pos(t.end) - tl}
-                                tone={t.status === 'done' ? 'done' : t.status === 'active' ? 'open' : 'idle'}
-                                fill={0}
-                                label={t.who}
-                              />
-                            </div>
+                      {isOpen && p.tasks.map((t) => (
+                        <div key={t.ref || t.title} className="pt-row pt-task">
+                          <div className="pt-c">
+                            <span className="pt-nm pt-nm-sub" title={t.title}>{t.title}</span>
                           </div>
-                        )
-                      })}
+                          <div className="pt-c pt-dur pt-dur-sub">{t.days}&nbsp;р.д.</div>
+                          <div className="pt-track" title={taskTitle(t)}>
+                            <span
+                              className="pt-bar"
+                              data-status={t.status}
+                              style={{
+                                left: `${scale.pos(t.start)}%`,
+                                width: `${Math.max(scale.pos(t.end) - scale.pos(t.start), 0.6)}%`,
+                                background: t.status === 'done' ? 'var(--border-strong)' : t.color,
+                              }}
+                            >
+                              <i>{t.who}</i>
+                            </span>
+                            {/* Отпуск показываем только внутри самой задачи — иначе
+                              * штриховка висит в пустоте, где работы и не было. */}
+                            {(vacations.get(t.who) || []).map((v) => {
+                              const from = v.start > t.start ? v.start : t.start
+                              const to = v.end < t.end ? v.end : t.end
+                              if (from > to) return null
+                              return (
+                                <span
+                                  key={v.start}
+                                  className="pt-vac"
+                                  title={`${t.who}: ${v.label}, ${fmtDate(v.start)} — ${fmtDate(v.end)}`}
+                                  style={{ left: `${scale.pos(from)}%`, width: `${Math.max(scale.pos(to) - scale.pos(from), 0.4)}%` }}
+                                />
+                              )
+                            })}
+                          </div>
+                        </div>
+                      ))}
                     </div>
                   )
                 })}
@@ -296,21 +364,24 @@ export default function ProjectTimeline() {
           </div>
 
           <div className="pt-legend">
-            <span><i data-tone="open" />проект открыт</span>
-            <span><i data-tone="done" />проект закрыт</span>
-            <span><i data-tone="idle" />задача в очереди или постоянная</span>
-            <span><i className="pt-legend-today" />сегодня</span>
-            <span>* длительность по git, не по доске</span>
+            <span><i className="pt-k" data-state="active" />работа подтверждена отчётами</span>
+            <span><i className="pt-k" data-state="planned" />задача есть, отчётов нет</span>
+            <span><i className="pt-k" data-state="vacation" />отпуск</span>
+            <span><i className="pt-k pt-k-done" />проект закрыт</span>
+            <span><i className="pt-k pt-k-today" />сегодня</span>
+            <span>* длительность по git</span>
           </div>
 
-          <p className="pt-note">
-            <b>Два источника, не смешаны.</b> Доска Team Gantt начинается 6 июля 2026 — раньше
-            задачи в ней не велись. Карта проектов Андрея Брюнеткина построена из git
-            (14 репозиториев, 1 573 коммита, 1 026 заметок) и начинается 6 апреля. Где проект
-            есть в обеих, длительность показана по git, а состав задач — по доске. Его линии
-            «Call center», «Alliance Connect», «CRMv2» и «DWH» с доской не сведены: это его
-            участки работы, а не те же проекты. Группировка задач в проекты живёт в
-            <code> frontend/src/lib/projectMap.js</code> и правится там же. Отпуска исключены.
+          <p className="pt-foot">
+            <b>Три источника, не смешаны.</b> Задачи и отпуска — доска Team Gantt, она начинается
+            6 июля 2026. Недельная закраска — ежедневные отчёты: берётся только факт «в этот день
+            человек отчитался», текст отчётов не разбирается, потому что совпадение слова не
+            доказывает работу по проекту. Длительность четырёх проектов — карта Брюнеткина из git
+            (14 репозиториев, 1 573 коммита, 1 026 заметок, с 6 апреля); его линии «Call center»,
+            «Alliance Connect», «CRMv2» и «DWH» с доской не сведены — это его участки работы, а не
+            те же проекты. Пустая неделя означает «подтверждения нет», а не «никто не работал»:
+            отчёты сдают не все и не каждый день. Группировка задач в проекты —
+            <code> frontend/src/lib/projectMap.js</code>.
           </p>
         </>
       )}
@@ -318,7 +389,7 @@ export default function ProjectTimeline() {
   )
 }
 
-const projectTitle = (p) => [
+const projectTitle = (p, hasReports) => [
   p.name,
   `Ведёт: ${p.lead}`,
   `Участвуют: ${p.team.join(', ')}`,
@@ -326,6 +397,7 @@ const projectTitle = (p) => [
   p.git ? `В git с ${fmtDate(p.git.start)} — ${p.git.stages} этапов, карта Брюнеткина` : null,
   p.finished ? `Закрыт ${fmtDate(p.lastEnd)}` : `Открыт до сих пор, ${p.span} дн`,
   `Задачи: ${p.doneCount} из ${p.tasks.length} закрыто${p.openCount ? `, ${p.openCount} в работе` : ''}`,
+  hasReports ? null : 'Отчёты не загрузились — недели показаны по доске',
 ].filter(Boolean).join('\n')
 
 const taskTitle = (t) => [
@@ -336,9 +408,9 @@ const taskTitle = (t) => [
   t.ref ? `Номер: ${t.ref}` : null,
 ].filter(Boolean).join('\n')
 
-function Stat({ value, label }) {
+function Stat({ value, label, wide }) {
   return (
-    <div className="pt-stat">
+    <div className={`pt-stat${wide ? ' is-wide' : ''}`}>
       <b>{value}</b>
       <span>{label}</span>
     </div>
@@ -347,15 +419,12 @@ function Stat({ value, label }) {
 
 function Group({ title, options, value, onChange }) {
   return (
-    <div className="pt-group-ctl">
+    <div className="pt-ctl">
       <em>{title}</em>
       {Object.entries(options).map(([key, opt]) => (
         <button
-          key={key}
-          type="button"
-          className="pt-chip"
-          aria-pressed={key === value}
-          onClick={() => onChange(key)}
+          key={key} type="button" className="pt-chip"
+          aria-pressed={key === value} onClick={() => onChange(key)}
         >
           {typeof opt === 'string' ? opt : opt.label}
         </button>
@@ -367,70 +436,84 @@ function Group({ title, options, value, onChange }) {
 function Style() {
   return (
     <style>{`
-.pt-page{font-family:var(--ios-font);background:var(--ios-bg);color:var(--ios-label);
-  min-height:100vh;padding:24px max(16px,env(safe-area-inset-left,0px)) 56px max(16px,env(safe-area-inset-right,0px))}
-.pt-head{display:flex;align-items:center;gap:14px;flex-wrap:wrap;max-width:1200px;margin:0 auto 4px}
-.pt-title{font-size:26px;margin:0;letter-spacing:-.02em;flex:1;min-width:0}
-.pt-back{color:var(--ios-blue-text);text-decoration:none;font-size:13px;font-weight:500;white-space:nowrap}
-.pt-back:hover{text-decoration:underline}
-.pt-sub,.pt-note,.pt-state,.pt-stats,.pt-controls,.pt-board,.pt-legend{max-width:1200px;margin-left:auto;margin-right:auto}
-.pt-sub{color:var(--ios-label2);font-size:13.5px;line-height:1.5;margin:0 0 16px;max-width:78ch}
-.pt-state{background:var(--ios-card);border:1px solid var(--ios-sep);border-radius:12px;
-  padding:18px;color:var(--ios-label2);font-size:14px}
-.pt-state-err{color:var(--ios-orange-text);background:var(--ios-orange-tint)}
+.pt-page{background:var(--base);color:var(--text);min-height:100vh;
+  padding:24px max(16px,env(safe-area-inset-left,0px)) 56px max(16px,env(safe-area-inset-right,0px))}
+.pt-top,.pt-lede,.pt-stats,.pt-controls,.pt-board,.pt-legend,.pt-foot,.pt-note{max-width:1240px;margin-left:auto;margin-right:auto}
+.pt-top{display:flex;align-items:center;gap:16px;flex-wrap:wrap;margin-bottom:4px}
+.pt-h1{font-size:26px;margin:0;flex:1;min-width:0;letter-spacing:-.01em}
+.pt-link{color:var(--accent1);text-decoration:none;font-size:13px;font-weight:600;white-space:nowrap}
+.pt-link:hover{text-decoration:underline}
+.pt-lede{color:var(--muted);font-size:13.5px;line-height:1.55;margin:0 0 16px;max-width:82ch}
+.pt-note{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);
+  padding:16px;color:var(--muted);font-size:14px}
+.pt-note-err{color:var(--danger);border-color:var(--danger)}
 .pt-stats{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:14px}
-.pt-stat{background:var(--ios-card);border:1px solid var(--ios-sep);border-radius:10px;padding:9px 13px}
-.pt-stat b{display:block;font-size:19px;font-variant-numeric:tabular-nums}
-.pt-stat span{color:var(--ios-label3);font-size:11px;text-transform:uppercase;letter-spacing:.06em}
-.pt-controls{display:flex;flex-wrap:wrap;gap:16px;align-items:center;margin-bottom:12px}
-.pt-group-ctl{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
-.pt-group-ctl>em{font-style:normal;color:var(--ios-label3);font-size:11px;text-transform:uppercase;letter-spacing:.06em}
-.pt-chip{border:1px solid var(--ios-sep);background:var(--ios-card);color:var(--ios-label2);
-  border-radius:999px;padding:5px 12px;font-size:12.5px;cursor:pointer;font-family:inherit}
-.pt-chip[aria-pressed="true"]{background:var(--ios-blue-fill);border-color:var(--ios-blue-fill);color:#fff}
-.pt-chip:focus-visible{outline:2px solid var(--ios-blue);outline-offset:2px}
-.pt-board{background:var(--ios-card);border:1px solid var(--ios-sep);border-radius:14px;
-  box-shadow:var(--ios-shadow);overflow:hidden}
+.pt-stat{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:9px 14px}
+.pt-stat.is-wide{flex:1;min-width:230px}
+.pt-stat b{display:block;font-size:19px;font-variant-numeric:tabular-nums;color:var(--text)}
+.pt-stat span{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.06em}
+.pt-controls{display:flex;flex-wrap:wrap;gap:18px;align-items:center;margin-bottom:12px}
+.pt-ctl{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.pt-ctl>em{font-style:normal;color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.06em}
+.pt-chip{border:1px solid var(--border);background:var(--card);color:var(--muted);border-radius:999px;
+  padding:5px 12px;font-size:12.5px;cursor:pointer;font-family:inherit}
+.pt-chip:hover{border-color:var(--border-strong);color:var(--text)}
+.pt-chip[aria-pressed="true"]{background:var(--fill-accent);border-color:var(--fill-accent);color:var(--on-accent);font-weight:600}
+.pt-chip:focus-visible{outline:2px solid var(--accent1);outline-offset:2px}
+.pt-board{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);overflow:hidden}
 .pt-scroll{overflow-x:auto}
-.pt-grid{min-width:900px}
-.pt-row{display:grid;grid-template-columns:250px 92px 1fr;border-bottom:1px solid var(--ios-sep)}
-.pt-group:last-child .pt-row:last-child{border-bottom:0}
-.pt-header{position:sticky;top:0;background:var(--ios-card);z-index:3}
-.pt-header .pt-cell,.pt-header .pt-month{font-size:11px;text-transform:uppercase;
-  letter-spacing:.07em;color:var(--ios-label3)}
-.pt-cell{padding:8px 14px;display:flex;align-items:center;gap:7px;min-width:0}
-.pt-project{cursor:pointer;background:color-mix(in srgb,var(--ios-label) 5%,transparent)}
-.pt-project:hover{filter:brightness(.985)}
-.pt-project:focus-visible{outline:2px solid var(--ios-blue);outline-offset:-2px}
-.pt-tog{width:14px;flex:0 0 14px;font-size:9px;color:var(--ios-label3);transition:transform .14s}
-.pt-project.is-open .pt-tog{transform:rotate(90deg)}
-.pt-name{font-weight:600;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;min-width:0}
-.pt-name-sub{font-weight:400;font-size:12.5px;color:var(--ios-label2);padding-left:21px}
-.pt-dur{justify-content:flex-end;font-variant-numeric:tabular-nums;font-size:13px;white-space:nowrap}
-.pt-dur b{font-weight:600}
-.pt-dur.is-hot b{color:var(--ios-orange-text)}
-.pt-dur-sub{color:var(--ios-label3);font-size:11.5px}
-.pt-track{position:relative;min-width:0;padding:8px 0}
-.pt-months{display:grid;padding:0}
-.pt-month{padding:8px 0 8px 8px;border-left:1px solid var(--ios-sep);overflow:hidden;white-space:nowrap}
-.pt-bar{position:absolute;top:50%;transform:translateY(-50%);height:18px;border-radius:5px;
-  display:flex;align-items:center;padding:0 7px;font-size:10.5px;overflow:hidden;white-space:nowrap}
-.pt-bar-lg{height:23px;font-weight:600;font-size:11px}
-.pt-bar[data-tone="done"]{background:#2f5d50;color:#fff}
-.pt-bar[data-tone="open"]{background:#b4701f;color:#fff}
-.pt-bar[data-tone="idle"]{background:#9a9da6;color:#fff}
-.pt-bar-fill{position:absolute;left:0;top:0;bottom:0;background:rgba(255,255,255,.24)}
-.pt-bar-label{position:relative}
-.pt-today{position:absolute;top:0;bottom:0;width:2px;background:#d02040;z-index:2}
-.pt-legend{display:flex;flex-wrap:wrap;gap:14px;margin-top:13px;font-size:12px;color:var(--ios-label3)}
-.pt-legend i{display:inline-block;width:11px;height:11px;border-radius:3px;margin-right:6px;vertical-align:-1px}
-.pt-legend i[data-tone="done"]{background:#2f5d50}
-.pt-legend i[data-tone="open"]{background:#b4701f}
-.pt-legend i[data-tone="idle"]{background:#9a9da6}
-.pt-legend-today{background:#d02040;width:2px!important;border-radius:0!important}
-.pt-note{color:var(--ios-label3);font-size:12.5px;line-height:1.55;margin-top:14px;max-width:78ch}
-.pt-note code{font-size:11.5px}
-@media(max-width:560px){.pt-row{grid-template-columns:150px 74px 1fr}.pt-title{font-size:21px}}
+.pt-grid{min-width:920px}
+.pt-row{display:grid;grid-template-columns:262px 92px 1fr;border-bottom:1px solid var(--border)}
+.pt-g:last-child .pt-row:last-child{border-bottom:0}
+.pt-head{position:sticky;top:0;background:var(--card);z-index:3}
+.pt-head .pt-c,.pt-mo{font-size:11px;text-transform:uppercase;letter-spacing:.07em;color:var(--muted)}
+.pt-c{padding:8px 14px;display:flex;align-items:center;gap:8px;min-width:0}
+.pt-proj{cursor:pointer;background:var(--card2)}
+.pt-proj:hover{background:var(--row-hover)}
+.pt-proj:focus-visible{outline:2px solid var(--accent1);outline-offset:-2px}
+.pt-tog{width:13px;flex:0 0 13px;font-size:9px;color:var(--muted);transition:transform .14s}
+.pt-proj.is-open .pt-tog{transform:rotate(90deg)}
+.pt-nm{font-weight:600;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;min-width:0}
+.pt-nm-sub{font-weight:400;font-size:12.5px;color:var(--muted);padding-left:21px}
+.pt-pill{flex:0 0 auto;font-size:10px;padding:2px 7px;border-radius:999px;white-space:nowrap;
+  background:var(--accent1-bg);color:var(--text-accent);border:1px solid var(--accent1-border)}
+.pt-pill.is-done{background:var(--success-bg);color:var(--success);border-color:transparent}
+.pt-dur{justify-content:flex-end;font-variant-numeric:tabular-nums;font-size:13px;white-space:nowrap;color:var(--text)}
+.pt-dur.is-hot b{color:var(--danger)}
+.pt-dur-sub{color:var(--muted);font-size:11.5px}
+.pt-track{position:relative;min-width:0;padding:9px 0;height:38px}
+.pt-months{display:grid;padding:0;height:auto}
+.pt-mo{padding:8px 0 8px 8px;border-left:1px solid var(--border);overflow:hidden;white-space:nowrap}
+.pt-span{position:absolute;top:50%;transform:translateY(-50%);height:20px;border-radius:4px;
+  background:var(--accent1-bg);border:1px solid var(--accent1-border)}
+.pt-span.is-done{background:var(--success-bg);border-color:transparent}
+.pt-wk{position:absolute;top:50%;transform:translateY(-50%);height:20px}
+.pt-wk[data-state="active"]{background:var(--accent1);opacity:.85}
+.pt-wk[data-state="active"][data-done="1"]{background:var(--success)}
+.pt-wk[data-state="planned"]{background:var(--accent1);opacity:.26}
+.pt-wk[data-state="planned"][data-done="1"]{background:var(--success);opacity:.26}
+.pt-wk[data-state="vacation"]{background:repeating-linear-gradient(45deg,
+  var(--border-strong) 0 3px,transparent 3px 6px)}
+.pt-lbl{position:absolute;left:8px;top:50%;transform:translateY(-50%);font-size:11px;font-weight:600;
+  color:var(--text);text-shadow:0 0 4px var(--card),0 0 4px var(--card);pointer-events:none;white-space:nowrap}
+.pt-bar{position:absolute;top:50%;transform:translateY(-50%);height:17px;border-radius:4px;
+  display:flex;align-items:center;padding:0 6px;overflow:hidden}
+.pt-bar i{font-style:normal;font-size:10px;color:#06091a;font-weight:600;white-space:nowrap}
+.pt-bar[data-status="done"] i{color:var(--text)}
+.pt-vac{position:absolute;top:50%;transform:translateY(-50%);height:17px;border-radius:4px;
+  background:repeating-linear-gradient(45deg,var(--border-strong) 0 3px,transparent 3px 6px)}
+.pt-today{position:absolute;top:0;bottom:0;width:2px;background:var(--danger);z-index:2}
+.pt-legend{display:flex;flex-wrap:wrap;gap:14px;margin-top:13px;font-size:12px;color:var(--muted)}
+.pt-k{display:inline-block;width:12px;height:12px;border-radius:3px;margin-right:6px;vertical-align:-2px}
+.pt-k[data-state="active"]{background:var(--accent1)}
+.pt-k[data-state="planned"]{background:var(--accent1);opacity:.26}
+.pt-k[data-state="vacation"]{background:repeating-linear-gradient(45deg,var(--border-strong) 0 3px,transparent 3px 6px)}
+.pt-k-done{background:var(--success)}
+.pt-k-today{background:var(--danger);width:2px;border-radius:0}
+.pt-foot{color:var(--muted);font-size:12.5px;line-height:1.6;margin-top:14px;max-width:82ch}
+.pt-foot b{color:var(--text)}
+.pt-foot code{font-size:11.5px;color:var(--text-secondary)}
+@media(max-width:560px){.pt-row{grid-template-columns:152px 74px 1fr}.pt-h1{font-size:21px}.pt-pill{display:none}}
     `}</style>
   )
 }
