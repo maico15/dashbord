@@ -867,6 +867,35 @@ def init_db():
             );
         """)
 
+    # ── Переводы и выгрузки, которые раньше требовали деплоя ─────────────────
+    # Тексты отчётов пишутся по-английски, а страница /projects читается
+    # по-русски. Перевод держим в базе и наливаем через API: иначе каждое
+    # обновление перевода — это пересборка фронта.
+    with conn.step("text_translations"):
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS text_translations (
+                hash       TEXT NOT NULL,
+                lang       TEXT NOT NULL DEFAULT 'ru',
+                source     TEXT NOT NULL,
+                text       TEXT NOT NULL,
+                updated_at TEXT DEFAULT (datetime('now')),
+                PRIMARY KEY (hash, lang)
+            );
+        """)
+
+    # То же для выгрузок, которым неоткуда взяться на сервере: Fireflies
+    # недоступен из бэкенда, а класть его JSON в репозиторий — значит катить
+    # фронт ради новых данных. Ключ-значение, значение — JSON-текст.
+    with conn.step("data_blobs"):
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS data_blobs (
+                key        TEXT PRIMARY KEY,
+                value      TEXT NOT NULL,
+                note       TEXT DEFAULT '',
+                updated_at TEXT DEFAULT (datetime('now'))
+            );
+        """)
+
     # ── AI access register (admin page at /ai-access) ────────────────────────
     # Who uses which AI tool, on whose approval, at what cost. Its own step so an
     # existing database picks the table up on the next boot. Dates are TEXT like
@@ -5153,7 +5182,7 @@ def get_report_days(start: str, end: str):
 
 
 @app.get("/api/projects/activity")
-def get_projects_activity(start: str, end: str):
+def get_projects_activity(start: str, end: str, lang: str = "ru"):
     """Недельная интенсивность по проектам из ежедневных отчётов.
 
     Метод и его границы описаны в backend/project_rules.py. Коротко: пункт
@@ -5173,10 +5202,155 @@ def get_projects_activity(start: str, end: str):
     for raw in c.fetchall():
         row = dict(raw)
         rows.append((row["report_date"], row["name"], _deserialize_report(row)))
-    conn.close()
     result = project_rules.weekly_activity(rows)
+
+    # Подставляем перевод там, где он уже налит. Переводов может не быть
+    # совсем — тогда страница покажет исходный английский текст.
+    if lang:
+        c.execute("SELECT hash, text FROM text_translations WHERE lang=?", (lang,))
+        ru = {r["hash"]: r["text"] for r in (dict(x) for x in c.fetchall())}
+        done = 0
+        for by_week in result.get("items", {}).values():
+            for bucket in by_week.values():
+                for item in bucket:
+                    hit = ru.get(item.get("h"))
+                    if hit:
+                        item["text_" + lang] = hit
+                        done += 1
+        result["translated"] = {"lang": lang, "items": done}
+
+    conn.close()
     result["start"], result["end"] = start, end
     return result
+
+
+# ── Переводы ────────────────────────────────────────────────────────────────
+# Тексты ежедневных отчётов написаны по-английски, страница /projects читается
+# по-русски. Перевод лежит в базе и наливается этим API, чтобы обновление
+# перевода не требовало выкатывать фронт.
+
+@app.get("/api/translations")
+def list_translations(lang: str = "ru", missing_from: str = "", missing_to: str = ""):
+    """Что уже переведено, и — по запросу — чего ещё не хватает.
+
+    `missing_from` / `missing_to` просят пройти отчёты за период и вернуть
+    строки, для которых перевода нет: это рабочий список для заливки.
+    """
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT hash, source, text, updated_at FROM text_translations WHERE lang=?", (lang,))
+    have = [dict(r) for r in c.fetchall()]
+    out = {"lang": lang, "count": len(have)}
+
+    if missing_from and missing_to:
+        known = {r["hash"] for r in have}
+        c.execute(
+            "SELECT r.report_date, m.name, r.* FROM daily_reports r "
+            "JOIN team_members m ON m.id = r.engineer_id "
+            "WHERE r.report_date >= ? AND r.report_date <= ? ORDER BY r.report_date",
+            (missing_from, missing_to),
+        )
+        rows = []
+        for raw in c.fetchall():
+            row = dict(raw)
+            rows.append((row["report_date"], row["name"], _deserialize_report(row)))
+        activity = project_rules.weekly_activity(rows)
+        missing = {}
+        for by_week in activity.get("items", {}).values():
+            for bucket in by_week.values():
+                for item in bucket:
+                    if item["h"] not in known:
+                        missing[item["h"]] = item["text"]
+        out["missing"] = [{"hash": h, "source": s} for h, s in missing.items()]
+        out["missing_count"] = len(missing)
+    else:
+        out["items"] = have
+
+    conn.close()
+    return out
+
+
+@app.post("/api/translations")
+def put_translations(data: dict, password: str = ""):
+    """Залить переводы пачкой: {lang, items: [{hash | source, text}]}.
+
+    `hash` можно не присылать — он считается из `source` тем же способом,
+    что и при чтении, так что перепутать ключ нельзя.
+    """
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    lang = (data.get("lang") or "ru").strip()
+    items = data.get("items") or []
+    if not isinstance(items, list):
+        raise HTTPException(400, "items must be a list")
+
+    conn = get_db()
+    c = conn.cursor()
+    written = skipped = 0
+    for it in items:
+        source = (it.get("source") or "").strip()
+        text = (it.get("text") or "").strip()
+        h = (it.get("hash") or "").strip() or (project_rules.text_hash(source) if source else "")
+        if not h or not text:
+            skipped += 1
+            continue
+        c.execute(
+            "INSERT INTO text_translations (hash, lang, source, text, updated_at) "
+            "VALUES (?,?,?,?,datetime('now')) "
+            "ON CONFLICT (hash, lang) DO UPDATE SET "
+            "  text = excluded.text, source = excluded.source, "
+            "  updated_at = excluded.updated_at",
+            (h, lang, source[:500], text),
+        )
+        written += 1
+    conn.commit()
+    c.execute("SELECT COUNT(*) AS n FROM text_translations WHERE lang=?", (lang,))
+    total = dict(c.fetchone())["n"]
+    conn.close()
+    return {"lang": lang, "written": written, "skipped": skipped, "total": total}
+
+
+# ── Выгрузки, которым неоткуда взяться на сервере ───────────────────────────
+# Fireflies из бэкенда недоступен. Раньше его выгрузка лежала файлом во
+# фронте, и новые данные означали деплой. Теперь — строка в базе.
+
+@app.get("/api/blobs/{key}")
+def get_blob(key: str):
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT key, value, note, updated_at FROM data_blobs WHERE key=?", (key,))
+    row = c.fetchone()
+    conn.close()
+    if not row:
+        raise HTTPException(404, "No such blob")
+    row = dict(row)
+    try:
+        value = json_lib.loads(row["value"])
+    except Exception:
+        value = row["value"]
+    return {"key": row["key"], "value": value,
+            "note": row["note"], "updated_at": row["updated_at"]}
+
+
+@app.put("/api/blobs/{key}")
+def put_blob(key: str, data: dict, password: str = ""):
+    if password != ADMIN_PASSWORD:
+        raise HTTPException(403, "Unauthorized")
+    value = data.get("value")
+    if value is None:
+        raise HTTPException(400, "value is required")
+    conn = get_db()
+    c = conn.cursor()
+    c.execute(
+        "INSERT INTO data_blobs (key, value, note, updated_at) "
+        "VALUES (?,?,?,datetime('now')) "
+        "ON CONFLICT (key) DO UPDATE SET "
+        "  value = excluded.value, note = excluded.note, updated_at = excluded.updated_at",
+        (key, json_lib.dumps(value, ensure_ascii=False), (data.get("note") or "")[:500]),
+    )
+    conn.commit()
+    conn.close()
+    return {"key": key, "ok": True}
 
 
 @app.get("/api/weekly-tasks")

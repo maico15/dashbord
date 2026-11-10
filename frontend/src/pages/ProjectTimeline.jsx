@@ -17,7 +17,6 @@ import { Link } from 'react-router-dom'
 import { api } from '../api/client'
 import TopBar from '../components/TopBar'
 import AppFooter from '../components/AppFooter'
-import devmeet from '../data/devmeet.json'
 
 const MONTHS_RU = ['янв', 'фев', 'мар', 'апр', 'май', 'июн', 'июл', 'авг', 'сен', 'окт', 'ноя', 'дек']
 const DAY = 864e5
@@ -36,6 +35,9 @@ const SORTS = {
   owner: 'по разработчику',
 }
 const ZOOMS = { all: 'весь период', quarter: 'последний квартал' }
+
+/* Пока выгрузка Dev meet не пришла из API, страница работает без её точек. */
+const EMPTY_DEVMEET = { projects: {}, weeks: [], meetings: 0, matched: 0 }
 
 /** Фамилия — в колонке «Кто»: имена английские, фамилии не повторяются. */
 const lastName = (full) => (full || '').trim().split(/\s+/).pop()
@@ -57,7 +59,7 @@ const levelOf = (n) => (n >= 10 ? 3 : n >= 3 ? 2 : 1)
  * Пункты остальных инженеров не красят неделю и не попадают в «кто»: иначе
  * строка Брюнеткина загоралась бы от того, что по тому же проекту написал
  * Мисан. Проект попадает на доску, если по нему писал хоть кто-то из троих. */
-function buildProjects(activity) {
+function buildProjects(activity, devmeet) {
   const byPerson = activity.by_person || {}
   const talk = devmeet.projects || {}
 
@@ -74,7 +76,7 @@ function buildProjects(activity) {
     /* Что именно делали — строки отчётов троих, новые сверху. */
     const lines = (activity.items || {})[name] || {}
     const work = Object.entries(lines)
-      .flatMap(([week, list]) => list.filter((it) => LEADS.includes(it.who)).map((it) => ({ ...it, week })))
+      .flatMap(([week, list]) => list.filter((it) => LEADS.includes(it.who)).map((it) => ({ ...it, week, text: it.text_ru || it.text })))
       .sort((a, b) => b.day.localeCompare(a.day))
     const who = mine
       .map(([n, byWeek]) => [n, Object.values(byWeek).reduce((s, x) => s + x, 0)])
@@ -111,6 +113,7 @@ export default function ProjectTimeline() {
   const [overview, setOverview] = useState(null)
   const [teamXp, setTeamXp] = useState(0)
   const [activity, setActivity] = useState(null)
+  const [devmeet, setDevmeet] = useState(EMPTY_DEVMEET)
   const [error, setError] = useState(null)
   const [zoom, setZoom] = useState('all')
   const [sort, setSort] = useState('gaps')
@@ -123,6 +126,11 @@ export default function ProjectTimeline() {
     api.get(`/projects/activity?start=${BOARD_START}&end=${today}`)
       .then((d) => { if (alive) setActivity(d) })
       .catch((e) => { if (alive) setError(e.message) })
+    /* Выгрузка Dev meet лежит в базе, а не в репозитории: обновить её можно
+     * PUT /api/blobs/devmeet, деплой фронта для этого не нужен. */
+    api.get('/blobs/devmeet')
+      .then((d) => { if (alive && d?.value?.projects) setDevmeet(d.value) })
+      .catch(() => { /* выгрузки ещё нет — страница живёт без точек Dev meet */ })
     api.get('/overview').then((d) => { if (alive) setOverview(d) }).catch(() => {})
     api.get('/leaderboard')
       .then((d) => { if (alive) setTeamXp((d || []).reduce((s, m) => s + (m.total_score || 0), 0)) })
@@ -130,7 +138,10 @@ export default function ProjectTimeline() {
     return () => { alive = false }
   }, [today])
 
-  const all = useMemo(() => (activity ? buildProjects(activity) : []), [activity])
+  const all = useMemo(
+    () => (activity ? buildProjects(activity, devmeet) : []),
+    [activity, devmeet],
+  )
   const shown = useMemo(() => all.filter((p) => p.lead && p.activeWeeks.length), [all])
 
   const ordered = useMemo(() => {
@@ -351,10 +362,15 @@ export default function ProjectTimeline() {
               формулировки без названия проекта, их никуда не приписывали. Отсчёт идёт
               с 6 июля — начала доски команды; отчёты за конец мая и июнь в базе есть,
               но на этой странице не считаются.
-              {' '}<b>Dev meet</b> из Fireflies: {devmeet.meetings} встреч за {devmeet.weeks.length} недель
-              ({fmtWeek(devmeet.weeks[0])} — {fmtWeek(devmeet.weeks[devmeet.weeks.length - 1])}), из них{' '}
-              {devmeet.matched} с упоминанием проекта. В июле записей встреч нет — там пусто не
-              потому, что не работали, а потому, что встречи не записывались.
+              {devmeet.weeks.length > 0 && (
+                <>
+                  {' '}<b>Dev meet</b> из Fireflies: {devmeet.meetings} встреч за{' '}
+                  {devmeet.weeks.length} недель ({fmtWeek(devmeet.weeks[0])} —{' '}
+                  {fmtWeek(devmeet.weeks[devmeet.weeks.length - 1])}), из них {devmeet.matched} с
+                  упоминанием проекта. В июле записей встреч нет — там пусто не потому, что не
+                  работали, а потому, что встречи не записывались.
+                </>
+              )}
               {' '}<b>Доска Ганта в расчёте не участвует.</b>
             </p>
           </>
@@ -371,7 +387,7 @@ function weekTitle({ name, week, n, t, lines, only }) {
   const head = `${name} · неделя с ${fmtWeek(week)}`
   const body = (lines || [])
     .filter((it) => !only || only.includes(it.who))
-    .map((it) => `• ${lastName(it.who)}, ${fmtWeek(it.day)}: ${it.text}`)
+    .map((it) => `• ${lastName(it.who)}, ${fmtWeek(it.day)}: ${it.text_ru || it.text}`)
   const rest = n - body.length
   const tail = []
   if (rest > 0) tail.push(`…и ещё ${rest} ${rest === 1 ? 'пункт' : rest < 5 ? 'пункта' : 'пунктов'}`)
