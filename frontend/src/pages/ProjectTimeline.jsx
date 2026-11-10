@@ -19,6 +19,8 @@
 import { Fragment, useState, useEffect, useMemo } from 'react'
 import { Link } from 'react-router-dom'
 import { api } from '../api/client'
+import TopBar from '../components/TopBar'
+import AppFooter from '../components/AppFooter'
 import {
   projectOf, GIT_HISTORY, BOARD_START, GIT_START, VACATION, VACATION_WORKING,
 } from '../lib/projectMap'
@@ -178,6 +180,8 @@ function weekState(project, weekStart, reportDaysByEngineer, vacations) {
 
 export default function ProjectTimeline() {
   const [engineers, setEngineers] = useState(null)
+  const [overview, setOverview] = useState(null)
+  const [teamXp, setTeamXp] = useState(0)
   const [reportDays, setReportDays] = useState({})
   const [error, setError] = useState(null)
   const [zoom, setZoom] = useState('board')
@@ -194,6 +198,11 @@ export default function ProjectTimeline() {
     api.get(`/reports/days?start=${GIT_START}&end=${today}`)
       .then((d) => { if (alive) setReportDays(d.days || {}) })
       .catch(() => { /* без отчётов неделя просто остаётся «по плану» */ })
+    // Шапка страницы — та же, что на остальном дашборде.
+    api.get('/overview').then((d) => { if (alive) setOverview(d) }).catch(() => {})
+    api.get('/leaderboard')
+      .then((d) => { if (alive) setTeamXp((d || []).reduce((sum, m) => sum + (m.total_score || 0), 0)) })
+      .catch(() => {})
     return () => { alive = false }
   }, [today])
 
@@ -265,14 +274,27 @@ export default function ProjectTimeline() {
   const hasReports = Object.keys(reportDays).length > 0
 
   return (
-    <div className="pt-page">
-      <Style />
+    <>
+      <TopBar
+        teamName={overview?.team_name}
+        week={overview?.current_week}
+        year={overview?.current_year}
+        totalScore={teamXp}
+      />
+      <div className="page">
+        <Style />
 
-      <div className="pt-top">
-        <Link to="/" className="pt-link">← Дашборд</Link>
+        {/* Та же полоса вкладок, что на дашборде. Здесь только те, за которыми
+          * стоит свой адрес: вкладки-состояния живут на самом дашборде. */}
+        <div className="tabs">
+          <Link to="/" className="tab-btn">← Дашборд</Link>
+          <Link to="/team-gantt" className="tab-btn">📅 Gantt</Link>
+          <span className="tab-btn active">🗂 Проекты</span>
+          <Link to="/it-requests/home" className="tab-btn">IT request</Link>
+          <Link to="/team-plan" className="tab-btn">Team Plan</Link>
+        </div>
+
         <h1 className="pt-h1">Проекты</h1>
-        <Link to="/team-gantt" className="pt-link">Гант по задачам →</Link>
-      </div>
       <p className="pt-lede">
         Сколько тянется каждый проект, а не сколько тасков закрыто. Неделя закрашена, когда по
         проекту была открытая задача и её исполнитель в ту неделю сдавал отчёты; пустая неделя —
@@ -452,7 +474,9 @@ export default function ProjectTimeline() {
           </p>
         </>
       )}
-    </div>
+      </div>
+      <AppFooter />
+    </>
   )
 }
 
@@ -503,14 +527,10 @@ function Group({ title, options, value, onChange }) {
 function Style() {
   return (
     <style>{`
-.pt-page{background:var(--base);color:var(--text);min-height:100vh;
-  padding:24px max(16px,env(safe-area-inset-left,0px)) 56px max(16px,env(safe-area-inset-right,0px))}
-.pt-top,.pt-lede,.pt-stats,.pt-controls,.pt-board,.pt-legend,.pt-foot,.pt-note{max-width:1240px;margin-left:auto;margin-right:auto}
-.pt-top{display:flex;align-items:center;gap:16px;flex-wrap:wrap;margin-bottom:4px}
-.pt-h1{font-size:26px;margin:0;flex:1;min-width:0;letter-spacing:-.01em}
-.pt-link{color:var(--accent1);text-decoration:none;font-size:13px;font-weight:600;white-space:nowrap}
-.pt-link:hover{text-decoration:underline}
-.pt-lede{color:var(--muted);font-size:13.5px;line-height:1.55;margin:0 0 16px;max-width:82ch}
+.tabs .tab-btn{text-decoration:none;display:inline-flex;align-items:center}
+.tabs span.tab-btn{cursor:default}
+.pt-h1{font-size:24px;margin:20px 0 6px;letter-spacing:-.01em}
+.pt-lede{color:var(--muted);font-size:13.5px;line-height:1.55;margin:0 0 18px;max-width:82ch}
 .pt-note{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);
   padding:16px;color:var(--muted);font-size:14px}
 .pt-note-err{color:var(--danger);border-color:var(--danger)}
@@ -590,7 +610,7 @@ function Style() {
 .pt-k[data-state="vacation"]{background:repeating-linear-gradient(45deg,var(--border-strong) 0 3px,transparent 3px 6px)}
 .pt-k-done{background:var(--success)}
 .pt-k-today{background:var(--danger);width:2px;border-radius:0}
-.pt-foot{color:var(--muted);font-size:12.5px;line-height:1.6;margin-top:14px;max-width:82ch}
+.pt-foot{color:var(--muted);font-size:12.5px;line-height:1.6;margin:14px 0 0;max-width:82ch}
 .pt-foot b{color:var(--text)}
 .pt-foot code{font-size:11.5px;color:var(--text-secondary)}
 @media(max-width:860px){.pt-row{grid-template-columns:200px 108px 78px 1fr}.pt-more{display:none}}
