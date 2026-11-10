@@ -30,9 +30,10 @@ from datetime import date, timedelta
 # проекты, чьи слова в нём нашлись.
 RULES = [
     ("Home Alliance ID", r"Home ?Alliance ID|HomeAlliance ID|\bHA ID\b|\bHAID\b"),
-    ("Passport", r"\bPassport\b"),
-    ("TechApp / Alliance Connect", r"\bTech ?App\b|Alliance Connect|communication[- ]server"),
-    ("FOS и бухгалтерия", r"\bFOS\b|QuickBooks|\bQBO\b|Intuit"),
+    ("Passport", r"\bPassport\b|[Пп]аспорт"),
+    ("TechApp / Alliance Connect",
+     r"\bTech ?App\b|Alliance Connect|communication[- ]server|[Тт]ех[- ]?[ахХА]п|TechHub|[Тт]ех[- ]?[Хх]аб|[Тт]ихаб"),
+    ("FOS и бухгалтерия", r"\bFOS\b|QuickBooks|\bQBO\b|Intuit|\bФОС\b|\bФОКС"),
     ("Hiring Intelligence / HR CRM", r"Hiring Intelligence|\bHR CRM\b|HRCRM"),
     ("Колл-центр и телефония", r"[Кк]олл-?центр|\b[Cc]all [Cc]ent|cc-agent|cc-routing|voicemail|голосов[аы]|\bDSR\b|Twilio Flex"),
     ("CRM Apollo и интеграции", r"\bApollo\b|GoHighLevel|\bGHL\b"),
@@ -78,6 +79,8 @@ def weekly_activity(rows):
     """
     counts = defaultdict(lambda: defaultdict(int))     # проект -> неделя -> пунктов
     parallel = defaultdict(lambda: defaultdict(set))   # инженер -> неделя -> проекты
+    people = defaultdict(lambda: defaultdict(int))     # проект -> инженер -> пунктов
+    by_person = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
     weeks = set()
     total = matched = 0
 
@@ -91,6 +94,8 @@ def weekly_activity(rows):
                 if rx.search(text):
                     counts[name][week] += 1
                     parallel[engineer][week].add(name)
+                    people[name][engineer] += 1
+                    by_person[name][engineer][week] += 1
                     hit = True
             if hit:
                 matched += 1
@@ -108,6 +113,13 @@ def weekly_activity(rows):
     return {
         "weeks": weeks,
         "projects": {name: dict(by_week) for name, by_week in counts.items()},
+        # Кто ведёт проект — тот, у кого по нему больше всего пунктов в отчётах.
+        # Доска Ганта в этом больше не участвует, «кто» берётся отсюда.
+        "people": {name: dict(who) for name, who in people.items()},
+        "by_person": {
+            name: {who: dict(by_week) for who, by_week in whos.items()}
+            for name, whos in by_person.items()
+        },
         "per_engineer": {
             engineer: {week: sorted(p) for week, p in by_week.items()}
             for engineer, by_week in parallel.items()
