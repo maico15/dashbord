@@ -85,7 +85,7 @@ function buildProjects(activity) {
       name,
       weeks,
       talk: talk[name] || {},
-      items: (activity.items || {})[name] || {},
+      lines: (activity.items || {})[name] || {},
       activeWeeks: active,
       first: active[0] || null,
       last: active[active.length - 1] || null,
@@ -266,7 +266,7 @@ export default function ProjectTimeline() {
                           </div>
                           <Track
                             weeks={scale.weeks} counts={p.weeks} talk={p.talk}
-                            items={p.items} name={p.name} only={LEADS}
+                            items={p.lines} name={p.name} only={LEADS}
                           />
                         </div>
 
@@ -283,7 +283,7 @@ export default function ProjectTimeline() {
                             </div>
                             <Track
                               weeks={scale.weeks} counts={p.byPerson[who] || {}} talk={{}}
-                              items={p.items} name={`${p.name} · ${lastName(who)}`} only={[who]}
+                              items={p.lines} name={`${p.name} · ${lastName(who)}`} only={[who]}
                             />
                           </div>
                         ))}
