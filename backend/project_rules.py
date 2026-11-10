@@ -75,7 +75,10 @@ PREFIX_RULES = [
      r"^call ?cent|^callcenter|^missed calls|^call routing|^outbound|^robocall"),
     ("Home Alliance ID", r"^(home ?alliance|ha) id"),
     ("Hiring Intelligence / HR CRM", r"^hr crm|^hiring intelligence"),
-    ("FOS и бухгалтерия", r"^fos\b|^ha-fos|^finance data"),
+    ("FOS и бухгалтерия", r"^fos\b|^ha-fos"),
+    # Finance Data — отдельный проект, а не часть ФОСа: это выгрузка
+    # платежей из Authorize.Net, а не учёт выплат техникам.
+    ("Finance Data", r"^finance data"),
     ("TechApp / Alliance Connect",
      r"^tech ?app|^alliance connect|^message ts|^communication server"),
     ("Home Alliance OS", r"^ha os|^haos|^home alliance os|^central brain"),
