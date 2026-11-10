@@ -22,6 +22,7 @@
 имена присваиваются задачам с доски, и страница кладёт недельный счёт в строку
 по имени. Переименовали здесь — переименуйте и там.
 """
+import hashlib
 import re
 from collections import defaultdict
 from datetime import date, timedelta
@@ -64,6 +65,13 @@ MAX_CHARS = 220
 def _trim(text: str) -> str:
     one = " ".join(str(text).split())
     return one if len(one) <= MAX_CHARS else one[:MAX_CHARS - 1].rstrip() + "…"
+
+
+def text_hash(text: str) -> str:
+    """Ключ перевода. Считается от уже обрезанного текста — именно он и
+
+    показывается на странице, так что переводится ровно то, что видно."""
+    return hashlib.sha1(_trim(text).encode("utf-8")).hexdigest()[:16]
 
 
 def monday_of(day: str) -> str:
@@ -112,7 +120,9 @@ def weekly_activity(rows):
                     by_person[name][engineer][week] += 1
                     bucket = items[name][week]
                     if len(bucket) < MAX_SAMPLES:
-                        bucket.append({"who": engineer, "day": day, "text": _trim(text)})
+                        t = _trim(text)
+                        bucket.append({"who": engineer, "day": day, "text": t,
+                                       "h": text_hash(t)})
                     hit = True
             if hit:
                 matched += 1
