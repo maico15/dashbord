@@ -5284,6 +5284,7 @@ def put_translations(data: dict, password: str = ""):
     if not isinstance(items, list):
         raise HTTPException(400, "items must be a list")
 
+    now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
     conn = get_db()
     c = conn.cursor()
     written = skipped = 0
@@ -5294,13 +5295,15 @@ def put_translations(data: dict, password: str = ""):
         if not h or not text:
             skipped += 1
             continue
+        # Время считаем здесь: datetime('now') — функция SQLite, в PostgreSQL
+        # её нет, и шим переписывает её только в определении таблицы.
         c.execute(
             "INSERT INTO text_translations (hash, lang, source, text, updated_at) "
-            "VALUES (?,?,?,?,datetime('now')) "
-            "ON CONFLICT (hash, lang) DO UPDATE SET "
-            "  text = excluded.text, source = excluded.source, "
-            "  updated_at = excluded.updated_at",
-            (h, lang, source[:500], text),
+            "VALUES (?,?,?,?,?) "
+            "ON CONFLICT(hash, lang) DO UPDATE SET "
+            "text = excluded.text, source = excluded.source, "
+            "updated_at = excluded.updated_at",
+            (h, lang, source[:500], text, now),
         )
         written += 1
     conn.commit()
@@ -5343,10 +5346,11 @@ def put_blob(key: str, data: dict, password: str = ""):
     c = conn.cursor()
     c.execute(
         "INSERT INTO data_blobs (key, value, note, updated_at) "
-        "VALUES (?,?,?,datetime('now')) "
-        "ON CONFLICT (key) DO UPDATE SET "
-        "  value = excluded.value, note = excluded.note, updated_at = excluded.updated_at",
-        (key, json_lib.dumps(value, ensure_ascii=False), (data.get("note") or "")[:500]),
+        "VALUES (?,?,?,?) "
+        "ON CONFLICT(key) DO UPDATE SET "
+        "value = excluded.value, note = excluded.note, updated_at = excluded.updated_at",
+        (key, json_lib.dumps(value, ensure_ascii=False), (data.get("note") or "")[:500],
+         datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")),
     )
     conn.commit()
     conn.close()
