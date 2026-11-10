@@ -31,7 +31,7 @@ const BOARD_START = '2026-07-06'
 const SORTS = {
   owner: 'по разработчику',
   gaps: 'по числу возвратов',
-  weeks: 'по неделям работы',
+  weeks: 'по дням работы',
   items: 'по объёму работы',
 }
 const ZOOMS = { all: 'весь период', quarter: 'последний квартал' }
@@ -149,6 +149,15 @@ function buildProjects(activity, devmeet, roster) {
     }
     const active = Object.keys(weeks).filter((w) => weeks[w] > 0).sort()
 
+    /* Дней с работой — сколько отдельных дней по проекту вообще были пункты
+     * в отчётах у допущенных. Неделя слишком крупная: один день работы и
+     * пять выглядят одинаково. */
+    const dayMap = (activity.days || {})[name] || {}
+    const days = new Set()
+    for (const who of Object.keys(dayMap)) {
+      if (allowed.includes(who)) for (const d of dayMap[who]) days.add(d)
+    }
+
     /* Что именно делали — строки отчётов троих, новые сверху. */
     const lines = (activity.items || {})[name] || {}
     const work = Object.entries(lines)
@@ -170,6 +179,8 @@ function buildProjects(activity, devmeet, roster) {
       weeks,
       talk: talk[name] || {},
       allowed,
+      days: days.size,
+      dayMap,
       lines,
       work,
       workMore: Math.max(0, Object.values(weeks).reduce((s, n) => s + n, 0) - work.length),
@@ -232,7 +243,7 @@ export default function ProjectTimeline() {
 
   const ordered = useMemo(() => {
     const list = [...shown]
-    if (sort === 'weeks') list.sort((a, b) => b.activeWeeks.length - a.activeWeeks.length)
+    if (sort === 'weeks') list.sort((a, b) => b.days - a.days)
     else if (sort === 'items') list.sort((a, b) => b.items - a.items)
     else if (sort === 'owner') {
       list.sort((a, b) => a.lead.localeCompare(b.lead) || b.items - a.items)
@@ -308,7 +319,7 @@ export default function ProjectTimeline() {
           <>
             <div className="pt-stats">
               <Stat value={shown.length} label="проектов" />
-              <Stat value={scale.weeks.length} label="недель под наблюдением" />
+              <Stat value={activity.report_days || 0} label="дней с отчётами в периоде" />
               <Stat value={totalItems} label="пунктов отчётов по ним" />
               {parallel && <Stat value={parallel.projects} label="проектов в работе на прошлой неделе" />}
               {choppiest && (
@@ -337,7 +348,7 @@ export default function ProjectTimeline() {
                   <div className="pt-row pt-head">
                     <div className="pt-c">Проект</div>
                     <div className="pt-c pt-who">Кто</div>
-                    <div className="pt-c pt-dur">Недель</div>
+                    <div className="pt-c pt-dur">Дней</div>
                     <div
                       className="pt-track pt-months"
                       style={{ gridTemplateColumns: scale.months.map((m) => `${m.span}fr`).join(' ') }}
@@ -366,8 +377,10 @@ export default function ProjectTimeline() {
                             {p.people.length > 1 && <span className="pt-more">+{p.people.length - 1}</span>}
                           </div>
                           <div className="pt-c pt-dur">
-                            <b>{p.activeWeeks.length}</b>
-                            <span className="pt-dur-sub">/{scale.weeks.length}</span>
+                            <b>{p.days}</b>
+                            <span className="pt-dur-sub">
+                              /{activity.report_days || scale.weeks.length * 5}
+                            </span>
                           </div>
                           <Track
                             weeks={scale.weeks} counts={p.weeks} talk={p.talk}
@@ -385,7 +398,7 @@ export default function ProjectTimeline() {
                                 <div className="pt-c pt-who"><span className="pt-who-sub">{n} п.</span></div>
                                 <div className="pt-c pt-dur">
                                   <span className="pt-dur-sub">
-                                    {Object.keys(p.byPerson[who] || {}).length} нед
+                                    {(p.dayMap[who] || []).length} дн
                                   </span>
                                 </div>
                                 <Track
@@ -535,7 +548,7 @@ const projectTitle = (p, about) => [
   p.name,
   about && `\n${about}\n`,
   `ведёт ${p.lead}`,
-  `${p.activeWeeks.length} недель с работой, ${p.items} пунктов в отчётах`,
+  `${p.days} дней с работой за ${p.activeWeeks.length} недель, ${p.items} пунктов в отчётах`,
   p.first && `первое упоминание ${fmtWeek(p.first)}, последнее ${fmtWeek(p.last)}`,
   p.returns ? `возвращались после паузы ${p.returns} ${plural(p.returns)}` : 'шёл без перерывов',
 ].filter(Boolean).join('\n')
