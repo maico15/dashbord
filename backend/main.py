@@ -5127,6 +5127,30 @@ def get_reports(date: str = None):
     return result
 
 
+@app.get("/api/reports/days")
+def get_report_days(start: str, end: str):
+    """Which days each engineer filed a daily report, over a date range.
+
+    One call instead of one per date — the projects page needs four months of
+    them. Only the dates, never the bodies: the question it answers is "was
+    this person reporting work that week", and a project's attribution comes
+    from the Gantt, not from matching words in a report.
+    """
+    conn = get_db()
+    c = conn.cursor()
+    c.execute(
+        "SELECT engineer_id, report_date FROM daily_reports "
+        "WHERE report_date >= ? AND report_date <= ? ORDER BY report_date",
+        (start, end),
+    )
+    days = {}
+    for r in c.fetchall():
+        row = dict(r)
+        days.setdefault(str(row["engineer_id"]), []).append(row["report_date"])
+    conn.close()
+    return {"start": start, "end": end, "days": days}
+
+
 @app.get("/api/weekly-tasks")
 def get_weekly_tasks_all(week: Optional[int] = None, year: Optional[int] = None):
     conn = get_db()
