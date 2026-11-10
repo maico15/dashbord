@@ -151,6 +151,11 @@ def weekly_activity(rows):
     # проект -> неделя -> что именно писали. Нужно для подсказки при наведении:
     # число пунктов само по себе не говорит, что было сделано.
     items = defaultdict(lambda: defaultdict(list))
+    # проект -> инженер -> в какие дни по нему вообще что-то делали. Неделя
+    # слишком крупная мера: один пункт в понедельник и пять за всю неделю
+    # выглядят одинаково, а «дней работы» — это то, что считают людьми.
+    days = defaultdict(lambda: defaultdict(set))
+    all_days = set()
     weeks = set()
     by_source = Counter()   # чем распознали: меткой автора или словом
     total = matched = 0
@@ -158,6 +163,7 @@ def weekly_activity(rows):
     for day, engineer, report in rows:
         week = monday_of(day)
         weeks.add(week)
+        all_days.add(day)
         for text in items_of(report):
             total += 1
 
@@ -173,6 +179,7 @@ def weekly_activity(rows):
 
             for name in names:
                 counts[name][week] += 1
+                days[name][engineer].add(day)
                 parallel[engineer][week].add(name)
                 people[name][engineer] += 1
                 by_person[name][engineer][week] += 1
@@ -201,6 +208,9 @@ def weekly_activity(rows):
         # Кто ведёт проект — тот, у кого по нему больше всего пунктов в отчётах.
         # Доска Ганта в этом больше не участвует, «кто» берётся отсюда.
         "people": {name: dict(who) for name, who in people.items()},
+        "days": {name: {who: sorted(ds) for who, ds in whos.items()}
+                 for name, whos in days.items()},
+        "report_days": len(all_days),
         "by_person": {
             name: {who: dict(by_week) for who, by_week in whos.items()}
             for name, whos in by_person.items()
