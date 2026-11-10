@@ -16,7 +16,7 @@
  * доски, через lib/projectMap.js. Текст отчётов не разбирается — совпадение
  * слова не считается доказательством работы по проекту.
  */
-import { useState, useEffect, useMemo } from 'react'
+import { Fragment, useState, useEffect, useMemo } from 'react'
 import { Link } from 'react-router-dom'
 import { api } from '../api/client'
 import {
@@ -33,7 +33,16 @@ const ZOOMS = {
   git: { from: GIT_START, label: 'git: с 6 апреля' },
   quarter: { from: null, months: 3, label: 'квартал' },
 }
-const SORTS = { duration: 'по длительности', start: 'по началу', size: 'по числу задач' }
+const SORTS = {
+  duration: 'по длительности',
+  owner: 'по разработчику',
+  start: 'по началу',
+  size: 'по числу задач',
+}
+
+/** Фамилия — в колонке «Кто». Имена на доске английские и фамилии не повторяются,
+ *  так что двух Андреев и двух Дмитриев она различает, а имя целиком не влезает. */
+const lastName = (full) => (full || '').trim().split(/\s+/).pop()
 
 const iso = (d) => d.toISOString().slice(0, 10)
 const fmtDate = (s) => new Date(s).toLocaleDateString('ru-RU', { day: 'numeric', month: 'short' })
@@ -131,13 +140,14 @@ function buildProjects(engineers, today) {
     const start = git ? git.start : boardStart
     const end = finished ? (git && git.last > lastEnd ? git.last : lastEnd) : today
     const counts = tasks.reduce((m, t) => m.set(t.who, (m.get(t.who) || 0) + 1), new Map())
+    const lead = [...counts].sort((a, b) => b[1] - a[1])[0][0]
     out.push({
-      name, tasks, git, boardStart, lastEnd, start, end, finished,
+      name, tasks, git, boardStart, lastEnd, start, end, finished, lead,
       span: daysBetween(start, end),
       openCount: open.length,
       doneCount: tasks.filter((t) => t.status === 'done').length,
       percent: Math.round(tasks.reduce((s, t) => s + (t.percent ?? 0), 0) / tasks.length),
-      lead: [...counts].sort((a, b) => b[1] - a[1])[0][0],
+      leadColor: tasks.find((t) => t.who === lead)?.color || 'var(--accent1)',
       team: [...counts.keys()],
     })
   }
@@ -193,12 +203,34 @@ export default function ProjectTimeline() {
   )
   const vacations = useMemo(() => readVacations(engineers), [engineers])
 
-  const sorted = useMemo(() => {
-    const list = [...projects]
-    if (sort === 'start') list.sort((a, b) => a.start.localeCompare(b.start))
-    else if (sort === 'size') list.sort((a, b) => b.tasks.length - a.tasks.length)
-    else list.sort((a, b) => (a.finished - b.finished) || (b.span - a.span))
-    return list
+  /* В режиме «по разработчику» строки собираются в группы с шапкой на человека —
+   * тогда его отпуск виден одной полосой сразу по всем его проектам. */
+  const groups = useMemo(() => {
+    const byDuration = (a, b) => (a.finished - b.finished) || (b.span - a.span)
+    if (sort !== 'owner') {
+      const list = [...projects]
+      if (sort === 'start') list.sort((a, b) => a.start.localeCompare(b.start))
+      else if (sort === 'size') list.sort((a, b) => b.tasks.length - a.tasks.length)
+      else list.sort(byDuration)
+      return [{ key: null, projects: list }]
+    }
+    const byLead = new Map()
+    for (const p of projects) {
+      if (!byLead.has(p.lead)) byLead.set(p.lead, [])
+      byLead.get(p.lead).push(p)
+    }
+    return [...byLead.entries()]
+      .map(([lead, list]) => {
+        list.sort(byDuration)
+        return {
+          key: lead,
+          color: list[0].leadColor,
+          projects: list,
+          open: list.filter((p) => !p.finished).length,
+          longest: list.reduce((m, p) => (!p.finished && p.span > m ? p.span : m), 0),
+        }
+      })
+      .sort((a, b) => b.longest - a.longest || b.projects.length - a.projects.length)
   }, [projects, sort])
 
   const scale = useMemo(() => {
@@ -270,13 +302,37 @@ export default function ProjectTimeline() {
               <div className="pt-grid">
                 <div className="pt-row pt-head">
                   <div className="pt-c">Проект</div>
+                  <div className="pt-c pt-who">Кто</div>
                   <div className="pt-c pt-dur">Тянется</div>
                   <div className="pt-track pt-months" style={{ gridTemplateColumns: `repeat(${scale.months.length},1fr)` }}>
                     {scale.months.map((m) => <span key={+m} className="pt-mo">{MONTHS_RU[m.getMonth()]}</span>)}
                   </div>
                 </div>
 
-                {sorted.map((p) => {
+                {groups.map((g) => (
+                <Fragment key={g.key || 'all'}>
+                {g.key && (
+                  <div className="pt-row pt-owner">
+                    <div className="pt-c">
+                      <span className="pt-dot" style={{ background: g.color }} />
+                      <span className="pt-nm">{g.key}</span>
+                    </div>
+                    <div className="pt-c pt-who">{g.projects.length}&nbsp;пр.</div>
+                    <div className="pt-c pt-dur">{g.open ? `${g.open} откр.` : 'всё закрыто'}</div>
+                    <div className="pt-track">
+                      {(vacations.get(g.key) || []).map((v) => (
+                        <span
+                          key={v.start}
+                          className="pt-vacband"
+                          title={`${g.key}: ${v.label}, ${fmtDate(v.start)} — ${fmtDate(v.end)}`}
+                          style={{ left: `${scale.pos(v.start)}%`, width: `${Math.max(scale.pos(v.end) - scale.pos(v.start), 0.5)}%` }}
+                        />
+                      ))}
+                      <span className="pt-today" style={{ left: `${scale.pos(today)}%` }} />
+                    </div>
+                  </div>
+                )}
+                {g.projects.map((p) => {
                   const isOpen = opened.has(p.name)
                   return (
                     <div key={p.name} className="pt-g">
@@ -292,6 +348,11 @@ export default function ProjectTimeline() {
                           <span className={`pt-pill${p.finished ? ' is-done' : ''}`}>
                             {p.finished ? 'закрыт' : `${p.openCount} в работе`}
                           </span>
+                        </div>
+                        <div className="pt-c pt-who" title={`Ведёт: ${p.lead}. Участвуют: ${p.team.join(', ')}`}>
+                          <span className="pt-dot" style={{ background: p.leadColor }} />
+                          <span className="pt-who-nm">{lastName(p.lead)}</span>
+                          {p.team.length > 1 && <span className="pt-more">+{p.team.length - 1}</span>}
                         </div>
                         <div className={`pt-c pt-dur${!p.finished && p.span >= 150 ? ' is-hot' : ''}`}>
                           <b>{p.span}</b>&nbsp;дн{p.git && <sup title="длительность по git">*</sup>}
@@ -324,6 +385,10 @@ export default function ProjectTimeline() {
                         <div key={t.ref || t.title} className="pt-row pt-task">
                           <div className="pt-c">
                             <span className="pt-nm pt-nm-sub" title={t.title}>{t.title}</span>
+                          </div>
+                          <div className="pt-c pt-who pt-who-sub">
+                            <span className="pt-dot" style={{ background: t.color }} />
+                            <span className="pt-who-nm">{lastName(t.who)}</span>
                           </div>
                           <div className="pt-c pt-dur pt-dur-sub">{t.days}&nbsp;р.д.</div>
                           <div className="pt-track" title={taskTitle(t)}>
@@ -359,6 +424,8 @@ export default function ProjectTimeline() {
                     </div>
                   )
                 })}
+                </Fragment>
+                ))}
               </div>
             </div>
           </div>
@@ -463,7 +530,7 @@ function Style() {
 .pt-board{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);overflow:hidden}
 .pt-scroll{overflow-x:auto}
 .pt-grid{min-width:920px}
-.pt-row{display:grid;grid-template-columns:262px 92px 1fr;border-bottom:1px solid var(--border)}
+.pt-row{display:grid;grid-template-columns:230px 126px 84px 1fr;border-bottom:1px solid var(--border)}
 .pt-g:last-child .pt-row:last-child{border-bottom:0}
 .pt-head{position:sticky;top:0;background:var(--card);z-index:3}
 .pt-head .pt-c,.pt-mo{font-size:11px;text-transform:uppercase;letter-spacing:.07em;color:var(--muted)}
@@ -503,6 +570,19 @@ function Style() {
 .pt-vac{position:absolute;top:50%;transform:translateY(-50%);height:17px;border-radius:4px;
   background:repeating-linear-gradient(45deg,var(--border-strong) 0 3px,transparent 3px 6px)}
 .pt-today{position:absolute;top:0;bottom:0;width:2px;background:var(--danger);z-index:2}
+
+.pt-who{gap:6px;padding-left:8px;padding-right:8px;font-size:12px;color:var(--text-secondary);min-width:0}
+.pt-who-nm{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pt-who-sub{color:var(--muted);font-size:11.5px}
+.pt-dot{flex:0 0 8px;width:8px;height:8px;border-radius:50%}
+.pt-more{flex:0 0 auto;font-size:10px;color:var(--muted)}
+.pt-owner{background:var(--card2);border-top:2px solid var(--border-strong)}
+.pt-owner .pt-c{padding-top:10px;padding-bottom:10px}
+.pt-owner .pt-nm{font-size:13.5px;font-weight:700}
+.pt-owner .pt-who,.pt-owner .pt-dur{color:var(--muted);font-size:11.5px}
+.pt-vacband{position:absolute;top:4px;bottom:4px;border-radius:4px;
+  background:repeating-linear-gradient(45deg,var(--border-strong) 0 4px,transparent 4px 8px);
+  border:1px solid var(--border-strong)}
 .pt-legend{display:flex;flex-wrap:wrap;gap:14px;margin-top:13px;font-size:12px;color:var(--muted)}
 .pt-k{display:inline-block;width:12px;height:12px;border-radius:3px;margin-right:6px;vertical-align:-2px}
 .pt-k[data-state="active"]{background:var(--accent1)}
@@ -513,7 +593,9 @@ function Style() {
 .pt-foot{color:var(--muted);font-size:12.5px;line-height:1.6;margin-top:14px;max-width:82ch}
 .pt-foot b{color:var(--text)}
 .pt-foot code{font-size:11.5px;color:var(--text-secondary)}
-@media(max-width:560px){.pt-row{grid-template-columns:152px 74px 1fr}.pt-h1{font-size:21px}.pt-pill{display:none}}
+@media(max-width:860px){.pt-row{grid-template-columns:200px 108px 78px 1fr}.pt-more{display:none}}
+@media(max-width:560px){.pt-row{grid-template-columns:150px 92px 1fr}.pt-h1{font-size:21px}
+  .pt-pill{display:none}.pt-dur{display:none}}
     `}</style>
   )
 }
