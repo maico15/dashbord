@@ -36,6 +36,32 @@ const SORTS = {
 }
 const ZOOMS = { all: 'весь период', quarter: 'последний квартал' }
 
+/* Кого показываем в каждом проекте. Состав задан вручную: по отчётам человек
+ * мелькает в чужом проекте из-за одной строчки, а на доску идут те, кто проект
+ * действительно вёл. Проекта нет в списке — показываем всех троих.
+ * Переопределяется без выкатки через PUT /api/blobs/project_people. */
+const PROJECT_PEOPLE = {
+  'Home Alliance ID': ['Andrey Brunetkin'],
+  'FOS и бухгалтерия': ['Andrey Brunetkin'],
+  'CRM Apollo и интеграции': ['Andrey Brunetkin', 'Andrey Pogrebnyak', 'Azizbek Turgunov'],
+  'Колл-центр и телефония': ['Andrey Pogrebnyak'],
+  'Passport': ['Andrey Pogrebnyak'],
+  'TechApp / Alliance Connect': ['Andrey Pogrebnyak'],
+  'Home Alliance OS': ['Andrey Pogrebnyak'],
+  'Автоматизации n8n и агенты': ['Azizbek Turgunov'],
+  'Звонки: аналитика и качество': ['Azizbek Turgunov', 'Andrey Pogrebnyak'],
+  'Сайты и веб': ['Azizbek Turgunov'],
+  'Partner Success OS': ['Azizbek Turgunov'],
+}
+
+/* Проекты, которые на эту доску не идут совсем. */
+const HIDDEN_PROJECTS = [
+  'Инфраструктура и деплой',
+  'Расходы и AI-подписки',
+  'Доступы, безопасность, офбординг',
+  'База знаний и SEO',
+]
+
 /* Пока выгрузка Dev meet не пришла из API, страница работает без её точек. */
 const EMPTY_DEVMEET = { projects: {}, weeks: [], meetings: 0, matched: 0 }
 
@@ -59,12 +85,16 @@ const levelOf = (n) => (n >= 10 ? 3 : n >= 3 ? 2 : 1)
  * Пункты остальных инженеров не красят неделю и не попадают в «кто»: иначе
  * строка Брюнеткина загоралась бы от того, что по тому же проекту написал
  * Мисан. Проект попадает на доску, если по нему писал хоть кто-то из троих. */
-function buildProjects(activity, devmeet) {
+function buildProjects(activity, devmeet, roster) {
   const byPerson = activity.by_person || {}
   const talk = devmeet.projects || {}
 
-  return Object.keys(byPerson).map((name) => {
-    const mine = Object.entries(byPerson[name] || {}).filter(([who]) => LEADS.includes(who))
+  const people = roster?.people || PROJECT_PEOPLE
+  const hidden = roster?.hidden || HIDDEN_PROJECTS
+
+  return Object.keys(byPerson).filter((name) => !hidden.includes(name)).map((name) => {
+    const allowed = people[name] || LEADS
+    const mine = Object.entries(byPerson[name] || {}).filter(([who]) => allowed.includes(who))
 
     /* Недели проекта — сумма по трём, а не общий счёт из ответа. */
     const weeks = {}
@@ -76,7 +106,7 @@ function buildProjects(activity, devmeet) {
     /* Что именно делали — строки отчётов троих, новые сверху. */
     const lines = (activity.items || {})[name] || {}
     const work = Object.entries(lines)
-      .flatMap(([week, list]) => list.filter((it) => LEADS.includes(it.who)).map((it) => ({ ...it, week, text: it.text_ru || it.text })))
+      .flatMap(([week, list]) => list.filter((it) => allowed.includes(it.who)).map((it) => ({ ...it, week, text: it.text_ru || it.text })))
       .sort((a, b) => b.day.localeCompare(a.day))
     const who = mine
       .map(([n, byWeek]) => [n, Object.values(byWeek).reduce((s, x) => s + x, 0)])
@@ -93,6 +123,7 @@ function buildProjects(activity, devmeet) {
       name,
       weeks,
       talk: talk[name] || {},
+      allowed,
       lines,
       work,
       workMore: Math.max(0, Object.values(weeks).reduce((s, n) => s + n, 0) - work.length),
@@ -114,6 +145,7 @@ export default function ProjectTimeline() {
   const [teamXp, setTeamXp] = useState(0)
   const [activity, setActivity] = useState(null)
   const [devmeet, setDevmeet] = useState(EMPTY_DEVMEET)
+  const [roster, setRoster] = useState(null)
   const [error, setError] = useState(null)
   const [zoom, setZoom] = useState('all')
   const [sort, setSort] = useState('gaps')
@@ -131,6 +163,10 @@ export default function ProjectTimeline() {
     api.get('/blobs/devmeet')
       .then((d) => { if (alive && d?.value?.projects) setDevmeet(d.value) })
       .catch(() => { /* выгрузки ещё нет — страница живёт без точек Dev meet */ })
+    /* Состав по проектам тоже правится без выкатки: PUT /api/blobs/project_people */
+    api.get('/blobs/project_people')
+      .then((d) => { if (alive && d?.value?.people) setRoster(d.value) })
+      .catch(() => { /* нет записи — работает список в коде */ })
     api.get('/overview').then((d) => { if (alive) setOverview(d) }).catch(() => {})
     api.get('/leaderboard')
       .then((d) => { if (alive) setTeamXp((d || []).reduce((s, m) => s + (m.total_score || 0), 0)) })
@@ -139,8 +175,8 @@ export default function ProjectTimeline() {
   }, [today])
 
   const all = useMemo(
-    () => (activity ? buildProjects(activity, devmeet) : []),
-    [activity, devmeet],
+    () => (activity ? buildProjects(activity, devmeet, roster) : []),
+    [activity, devmeet, roster],
   )
   const shown = useMemo(() => all.filter((p) => p.lead && p.activeWeeks.length), [all])
 
@@ -240,9 +276,9 @@ export default function ProjectTimeline() {
             </div>
 
             <p className="pt-filtered">
-              На доске только Погребняк, Брюнеткин и Тургунов — и в строке проекта, и внутри
-              неё. Пункты остальных инженеров не считаются совсем, поэтому «недель» и
-              насыщенность клеток — это работа троих, а не всей команды.
+              Состав по каждому проекту задан вручную: показан тот, кто проект вёл, а не
+              всякий, кто однажды упомянул его в отчёте. Пункты остальных не считаются,
+              поэтому «недель» и насыщенность клеток — это работа только этих людей.
             </p>
 
             <div className="pt-board">
@@ -285,7 +321,7 @@ export default function ProjectTimeline() {
                           </div>
                           <Track
                             weeks={scale.weeks} counts={p.weeks} talk={p.talk}
-                            items={p.lines} name={p.name} only={LEADS}
+                            items={p.lines} name={p.name} only={p.allowed}
                           />
                         </div>
 
