@@ -479,6 +479,89 @@ function LedgerTable({ rows, lang, t, showWhen }) {
   )
 }
 
+/** Bar fills for the saving chart.
+ *
+ *  Not --success / --warning: those are tuned as text and pill accents, and in
+ *  dark mode they sit at OKLCH L≈0.88, far above the 0.48–0.67 band a large
+ *  fill needs — as a block of colour they glare. Same two hues, stepped per
+ *  theme and validated against the chart surface. Both pairs land in the 6–8
+ *  CVD band, which is legal only with a second encoding, so the estimate
+ *  segment is also hatched and every bar carries its number. */
+const CHART_FILL = {
+  light: { confirmed: '#00a060', estimate: '#c08000' },
+  dark:  { confirmed: '#13a06c', estimate: '#b88c12' },
+}
+
+/** Diagonal hatch, the estimate segment's second encoding. */
+const hatch = color =>
+  `repeating-linear-gradient(135deg, ${color} 0 4px, color-mix(in srgb, ${color} 42%, var(--card)) 4px 8px)`
+
+function LegendSwatch({ background, label }) {
+  return (
+    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+      <span style={{ width: 14, height: 10, borderRadius: 2, background, flexShrink: 0 }} />
+      <span style={{ fontSize: 11, color: 'var(--muted)' }}>{label}</span>
+    </span>
+  )
+}
+
+/** Saving per period — one horizontal bar each, split into the confirmed and
+ *  the estimated part. One measure on one scale: the running total is the
+ *  table's "Итого" row below, never a second axis drawn over these bars. */
+function SavingChart({ rows, lang, t }) {
+  const theme = useTheme()
+  const fill = CHART_FILL[theme === 'dark' ? 'dark' : 'light']
+
+  // Periods in the order they first appear, which is the order the rows are
+  // sorted in — so the chart reads in the same sequence as the table.
+  const periods = []
+  for (const r of rows) {
+    const key = pick(r, 'period', lang)
+    if (!key) continue
+    let hit = periods.find(p => p.key === key)
+    if (!hit) { hit = { key, confirmed: 0, estimate: 0 }; periods.push(hit) }
+    const amount = parseAmount(r.value_amount)
+    if (r.confidence === 'confirmed') hit.confirmed += amount
+    else hit.estimate += amount
+  }
+  const max = Math.max(...periods.map(p => p.confirmed + p.estimate), 0)
+  if (periods.length < 2 || !max) return null
+
+  const pct = n => `${(n / max) * 100}%`
+
+  return (
+    <div style={{ marginBottom: 20, paddingBottom: 18, borderBottom: '1px solid var(--border)' }}>
+      <div style={{ display: 'flex', gap: 16, marginBottom: 14 }}>
+        <LegendSwatch background={fill.confirmed} label={t.conf.confirmed} />
+        <LegendSwatch background={hatch(fill.estimate)} label={t.conf.estimate} />
+      </div>
+      {periods.map(p => {
+        const total = p.confirmed + p.estimate
+        return (
+          <div key={p.key} style={{ display: 'grid', gridTemplateColumns: 'minmax(96px, 170px) 1fr auto', gap: 12, alignItems: 'center', padding: '5px 0' }}>
+            <span style={{ fontSize: 11, color: 'var(--muted)', lineHeight: 1.3 }}>{p.key}</span>
+            <div style={{ display: 'flex', alignItems: 'center', height: 14, borderLeft: '1px solid var(--border)', paddingLeft: 1 }}>
+              {p.confirmed > 0 && (
+                <div
+                  title={`${p.key} · ${t.conf.confirmed} · ${money(p.confirmed)}`}
+                  style={{ width: pct(p.confirmed), height: 14, background: fill.confirmed, borderRadius: p.estimate > 0 ? '2px' : '2px 4px 4px 2px' }}
+                />
+              )}
+              {p.estimate > 0 && (
+                <div
+                  title={`${p.key} · ${t.conf.estimate} · ${money(p.estimate)}`}
+                  style={{ width: pct(p.estimate), height: 14, marginLeft: p.confirmed > 0 ? 2 : 0, background: hatch(fill.estimate), borderRadius: p.confirmed > 0 ? '2px 4px 4px 2px' : '2px 4px 4px 2px' }}
+                />
+              )}
+            </div>
+            <span style={{ fontSize: 12, fontWeight: 700, whiteSpace: 'nowrap', color: 'var(--text)' }}>{money(total)}</span>
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
 function TotalRow({ label, amount, right }) {
   return (
     <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 16, padding: '12px 0', borderTop: '1px solid var(--border)' }}>
@@ -528,6 +611,7 @@ function SavingsLedger({ ledger, lang, t }) {
       <SectionLabel>{t.sectionSaving}</SectionLabel>
       {saving.length > 0 && (
         <Card>
+          <SavingChart rows={saving} lang={lang} t={t} />
           <LedgerTable rows={saving} lang={lang} t={t} showWhen />
           <TotalRow label={t.totalConfirmed} amount={`≈ ${money(confirmed)}`} right={t.perYear(perYear(confirmed))} />
           <TotalRow label={t.totalWithEstimates} amount={`≈ ${money(withEstimates)}`} right={t.perYear(perYear(withEstimates))} />
