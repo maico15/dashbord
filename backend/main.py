@@ -1040,6 +1040,25 @@ def init_db():
         conn.add_column_if_missing("monthly_review_tasks", "project_en", "TEXT DEFAULT ''")
         conn.add_column_if_missing("monthly_review_tasks", "project_ru", "TEXT DEFAULT ''")
 
+    # ── The money ledger (October 2026 onward) ───────────────────────────────
+    # A task with a non-empty `bucket` is a money row rather than a piece of
+    # work: it leaves the per-engineer/per-project lists and renders in one of
+    # the three tables the review opens with. `period_*` is the "when" column —
+    # saving accrues across months, so a row carries its own period rather than
+    # inheriting the review's. Empty bucket = ordinary task, which is every row
+    # written before this change, so August and September are untouched.
+    with conn.step("monthly_review_tasks ledger columns"):
+        conn.add_column_if_missing("monthly_review_tasks", "period_en", "TEXT DEFAULT ''")
+        conn.add_column_if_missing("monthly_review_tasks", "period_ru", "TEXT DEFAULT ''")
+        conn.add_column_if_missing("monthly_review_tasks", "bucket", "TEXT DEFAULT ''")
+
+    # Which way the page groups the work. Empty or 'engineers' = the original
+    # layout (one card per engineer, project bands inside); 'projects' = a
+    # section per project with a "who" column. Stored per month so changing the
+    # layout of a new review never restyles the ones already published.
+    with conn.step("monthly_review_meta layout column"):
+        conn.add_column_if_missing("monthly_review_meta", "layout", "TEXT DEFAULT ''")
+
     # Before → after figures shown under the engineers ("Измеренные изменения").
     with conn.step("monthly_review_changes"):
         conn.executescript("""
@@ -7639,12 +7658,21 @@ def get_releases():
 
 CONFIDENCE_LEVELS = ("confirmed", "estimate", "needs_data", "none")
 
+# A task's ledger bucket. "" is an ordinary piece of work; the other three are
+# the money tables the review opens with, in the order they render.
+LEDGER_BUCKETS = ("", "saving", "in_progress", "prevented")
+
+# How the work section groups. "" behaves as "engineers" so every review
+# written before the October 2026 structure keeps its layout.
+REVIEW_LAYOUTS = ("", "engineers", "projects")
+
 
 class ReviewMeta(BaseModel):
     label_en: str = ""
     label_ru: str = ""
     assumptions_en: str = ""
     assumptions_ru: str = ""
+    layout: str = ""
 
 
 class ReviewSummaryCard(BaseModel):
@@ -7679,6 +7707,9 @@ class ReviewTask(BaseModel):
     confidence: str = "none"
     project_en: str = ""
     project_ru: str = ""
+    period_en: str = ""
+    period_ru: str = ""
+    bucket: str = ""
 
 
 class ReviewChange(BaseModel):
@@ -7705,6 +7736,18 @@ def _initials(name: str) -> str:
 def _check_confidence(value: str):
     if value not in CONFIDENCE_LEVELS:
         raise HTTPException(422, "confidence must be one of " + ", ".join(CONFIDENCE_LEVELS))
+
+
+def _check_bucket(value: str):
+    if value not in LEDGER_BUCKETS:
+        raise HTTPException(422, "bucket must be one of " + ", ".join(
+            repr(b) for b in LEDGER_BUCKETS))
+
+
+def _check_layout(value: str):
+    if value not in REVIEW_LAYOUTS:
+        raise HTTPException(422, "layout must be one of " + ", ".join(
+            repr(l) for l in REVIEW_LAYOUTS))
 
 
 def _next_order(conn, table: str, month: int, year: int) -> int:
@@ -7758,14 +7801,16 @@ def get_monthly_review(year: int, month: int):
     c = conn.cursor()
 
     c.execute(
-        "SELECT label_en, label_ru, assumptions_en, assumptions_ru "
+        "SELECT label_en, label_ru, assumptions_en, assumptions_ru, layout "
         "FROM monthly_review_meta WHERE month=? AND year=?",
         (month, year),
     )
     row = c.fetchone()
     meta = dict(row) if row else {
-        "label_en": "", "label_ru": "", "assumptions_en": "", "assumptions_ru": ""
+        "label_en": "", "label_ru": "", "assumptions_en": "", "assumptions_ru": "",
+        "layout": "",
     }
+    meta["layout"] = meta.get("layout") or "engineers"
 
     c.execute(
         "SELECT id, sort_order, label_en, label_ru, value, sub_en, sub_ru, tone "
@@ -7788,11 +7833,11 @@ def get_monthly_review(year: int, month: int):
         "SELECT id, engineer_id, sort_order, title_en, title_ru, task_en, task_ru, "
         "       goal_en, goal_ru, benefit_en, benefit_ru, "
         "       value_amount, value_note_en, value_note_ru, confidence, "
-        "       project_en, project_ru "
+        "       project_en, project_ru, period_en, period_ru, bucket "
         "FROM monthly_review_tasks WHERE month=? AND year=? ORDER BY sort_order, id",
         (month, year),
     )
-    tasks = [dict(r) for r in c.fetchall()]
+    all_tasks = [dict(r) for r in c.fetchall()]
 
     c.execute(
         "SELECT id, sort_order, label_en, label_ru, note_en, note_ru, "
@@ -7813,21 +7858,48 @@ def get_monthly_review(year: int, month: int):
     prev_ref = {"year": earlier[-1][0], "month": earlier[-1][1]} if earlier else None
     next_ref = {"year": later[0][0], "month": later[0][1]} if later else None
 
+    for e in engineers:
+        e["initials"] = _initials(e["name_en"])
+
+    # A ledger row is money, not work: it leaves the engineer and project lists
+    # and renders in its own table, so nothing appears twice on the page.
+    tasks = [t for t in all_tasks if not (t.get("bucket") or "")]
+    ledger_rows = [t for t in all_tasks if (t.get("bucket") or "")]
+
     by_engineer = {}
     for t in tasks:
         by_engineer.setdefault(t["engineer_id"], []).append(t)
 
     for e in engineers:
-        e["initials"] = _initials(e["name_en"])
         e["tasks"] = by_engineer.get(e["engineer_id"], [])
         e["projects"] = _group_by_project(e["tasks"])
 
     listed = {e["engineer_id"] for e in engineers}
+    # The "who" of a row, resolved here so no caller joins team_members itself.
+    who = {e["engineer_id"]: e for e in engineers}
+
+    def _with_who(t):
+        e = who.get(t["engineer_id"])
+        return {**t,
+                "who_en": (e or {}).get("name_en", ""),
+                "who_ru": (e or {}).get("name_ru", "") or (e or {}).get("name_en", ""),
+                "color": (e or {}).get("color", ""),
+                "initials": (e or {}).get("initials", "")}
+
+    ledger = [_with_who(t) for t in ledger_rows if t["engineer_id"] in listed]
+    # Project-first view of the same tasks the engineer cards hold, for the
+    # months whose layout is 'projects'. Built for every month regardless — it
+    # is cheap, and the page decides which of the two it draws.
+    projects = _group_by_project([_with_who(t) for t in tasks
+                                  if t["engineer_id"] in listed])
+
     return {
         "month": month, "year": year,
         "meta": meta,
         "summary": summary,
         "engineers": engineers,
+        "projects": projects,
+        "ledger": ledger,
         "changes": changes,
         "prev": prev_ref,
         "next": next_ref,
@@ -7841,6 +7913,7 @@ def get_monthly_review(year: int, month: int):
 def put_monthly_review_meta(year: int, month: int, data: ReviewMeta, password: str = ""):
     if password != ADMIN_PASSWORD:
         raise HTTPException(403, "Unauthorized")
+    _check_layout(data.layout)
     conn = get_db()
     now = datetime.utcnow().isoformat()
     existing = conn.execute(
@@ -7849,17 +7922,18 @@ def put_monthly_review_meta(year: int, month: int, data: ReviewMeta, password: s
     if existing:
         conn.execute(
             "UPDATE monthly_review_meta SET label_en=?, label_ru=?, assumptions_en=?, "
-            "assumptions_ru=?, updated_at=? WHERE month=? AND year=?",
+            "assumptions_ru=?, layout=?, updated_at=? WHERE month=? AND year=?",
             (data.label_en, data.label_ru, data.assumptions_en, data.assumptions_ru,
-             now, month, year),
+             data.layout, now, month, year),
         )
     else:
         conn.execute(
             "INSERT INTO monthly_review_meta "
-            "(month, year, label_en, label_ru, assumptions_en, assumptions_ru, updated_at) "
-            "VALUES (?,?,?,?,?,?,?)",
+            "(month, year, label_en, label_ru, assumptions_en, assumptions_ru, "
+            " layout, updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?)",
             (month, year, data.label_en, data.label_ru, data.assumptions_en,
-             data.assumptions_ru, now),
+             data.assumptions_ru, data.layout, now),
         )
     conn.commit()
     conn.close()
@@ -8059,6 +8133,7 @@ def add_review_task(year: int, month: int, data: ReviewTask, password: str = "")
     if password != ADMIN_PASSWORD:
         raise HTTPException(403, "Unauthorized")
     _check_confidence(data.confidence)
+    _check_bucket(data.bucket)
     conn = get_db()
     if not conn.execute("SELECT id FROM team_members WHERE id=?", (data.engineer_id,)).fetchone():
         conn.close()
@@ -8067,14 +8142,16 @@ def add_review_task(year: int, month: int, data: ReviewTask, password: str = "")
         "INSERT INTO monthly_review_tasks "
         "(month, year, engineer_id, sort_order, title_en, title_ru, task_en, task_ru, "
         " goal_en, goal_ru, benefit_en, benefit_ru, value_amount, value_note_en, "
-        " value_note_ru, confidence, project_en, project_ru, updated_at) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        " value_note_ru, confidence, project_en, project_ru, period_en, period_ru, "
+        " bucket, updated_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (month, year, data.engineer_id,
          _next_order(conn, "monthly_review_tasks", month, year),
          data.title_en, data.title_ru, data.task_en, data.task_ru,
          data.goal_en, data.goal_ru, data.benefit_en, data.benefit_ru,
          data.value_amount, data.value_note_en, data.value_note_ru,
          data.confidence, data.project_en, data.project_ru,
+         data.period_en, data.period_ru, data.bucket,
          datetime.utcnow().isoformat()),
     )
     conn.commit()
@@ -8088,16 +8165,18 @@ def update_review_task(task_id: int, data: ReviewTask, password: str = ""):
     if password != ADMIN_PASSWORD:
         raise HTTPException(403, "Unauthorized")
     _check_confidence(data.confidence)
+    _check_bucket(data.bucket)
     conn = get_db()
     conn.execute(
         "UPDATE monthly_review_tasks SET engineer_id=?, title_en=?, title_ru=?, task_en=?, "
         "task_ru=?, goal_en=?, goal_ru=?, benefit_en=?, benefit_ru=?, value_amount=?, "
         "value_note_en=?, value_note_ru=?, confidence=?, project_en=?, project_ru=?, "
-        "updated_at=? WHERE id=?",
+        "period_en=?, period_ru=?, bucket=?, updated_at=? WHERE id=?",
         (data.engineer_id, data.title_en, data.title_ru, data.task_en, data.task_ru,
          data.goal_en, data.goal_ru, data.benefit_en, data.benefit_ru,
          data.value_amount, data.value_note_en, data.value_note_ru, data.confidence,
-         data.project_en, data.project_ru, datetime.utcnow().isoformat(), task_id),
+         data.project_en, data.project_ru, data.period_en, data.period_ru, data.bucket,
+         datetime.utcnow().isoformat(), task_id),
     )
     conn.commit()
     conn.close()

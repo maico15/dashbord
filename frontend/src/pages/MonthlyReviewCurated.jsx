@@ -135,6 +135,21 @@ const T = {
     sectionChanges: 'Measured changes',
     prevMonth: 'Previous review',
     nextMonth: 'Next review',
+    sectionProjects: m => `Work by Project — ${m}`,
+    sectionSaving: 'Cost savings — by month',
+    ledgerWhen: 'When',
+    ledgerItem: 'Item',
+    ledgerDone: 'What was done',
+    ledgerWho: 'Who',
+    ledgerAmount: '$ / month',
+    ledgerStatus: 'Status',
+    ledgerSource: 'Source',
+    totalConfirmed: 'Confirmed total',
+    totalWithEstimates: 'Total including estimates',
+    perYear: n => `≈ $${n}K a year`,
+    byMonth: 'Confirmed by period (per month):',
+    bucketInProgress: 'In progress / awaiting a decision',
+    bucketPrevented: 'Cost avoided (not counted in the saving)',
     conf: {
       confirmed: 'Confirmed',
       estimate: 'Estimate',
@@ -176,6 +191,21 @@ const T = {
     sectionChanges: 'Измеренные изменения',
     prevMonth: 'Предыдущий обзор',
     nextMonth: 'Следующий обзор',
+    sectionProjects: m => `Работа по проектам — ${m}`,
+    sectionSaving: 'Экономия расходов — по месяцам',
+    ledgerWhen: 'Когда',
+    ledgerItem: 'Статья',
+    ledgerDone: 'Что сделано',
+    ledgerWho: 'Кто',
+    ledgerAmount: '$ в месяц',
+    ledgerStatus: 'Статус',
+    ledgerSource: 'Источник',
+    totalConfirmed: 'Итого подтверждено',
+    totalWithEstimates: 'Итого с оценками',
+    perYear: n => `≈ $${n} тыс. в год`,
+    byMonth: 'Подтверждено по периодам (в месяц):',
+    bucketInProgress: 'В работе / ждёт решения',
+    bucketPrevented: 'Предотвращённые расходы (в экономию не включены)',
     conf: {
       confirmed: 'Подтверждено',
       estimate: 'Оценка',
@@ -388,6 +418,164 @@ function EngineerCard({ eng, lang, t, open, onToggle, scoreInput }) {
 /** "← August 2026" / "October 2026 →". Targets come from the API's prev/next,
  *  which only ever point at months that have a review, so there is no dead
  *  link across a gap. Disabled at either end. */
+// ── Money ledger ──────────────────────────────────────────────────────────────
+/** First number in an amount string, so "$564–579" and "≈ $2 180" both total.
+ *  A range contributes its lower end — the conservative read, and the one the
+ *  draft's own totals used. Returns 0 when there is no number ("нужны данные"). */
+function parseAmount(text) {
+  const m = String(text || '').match(/\d[\d\s, ]*/)
+  return m ? Number(m[0].replace(/[\s, ]/g, '')) : 0
+}
+
+const money = n => `$${n.toLocaleString('en-US')}`
+
+/** Avatar + name, the page's existing way of naming an engineer. */
+function WhoChip({ row, lang }) {
+  const name = lang === 'ru' ? (row.who_ru || row.who_en) : row.who_en
+  return (
+    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, whiteSpace: 'nowrap' }}>
+      <span style={{ width: 20, height: 20, borderRadius: '50%', background: row.color || 'var(--muted)', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', fontSize: 9, fontWeight: 700, color: 'var(--bg)', flexShrink: 0 }}>{row.initials}</span>
+      <span style={{ fontSize: 12 }}>{name}</span>
+    </span>
+  )
+}
+
+const TH = {
+  fontSize: 10, fontWeight: 600, letterSpacing: '.06em', textTransform: 'uppercase',
+  color: 'var(--muted)', textAlign: 'left', padding: '0 12px 10px 0', whiteSpace: 'nowrap',
+}
+const TD = { fontSize: 12, color: 'var(--text)', padding: '11px 12px 11px 0', verticalAlign: 'top', lineHeight: 1.5 }
+
+/** One ledger table. `showWhen` drops the period column for the buckets whose
+ *  rows have no period of their own. */
+function LedgerTable({ rows, lang, t, showWhen }) {
+  return (
+    <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+      <thead>
+        <tr style={{ borderBottom: '1px solid var(--border)' }}>
+          {showWhen && <th style={TH}>{t.ledgerWhen}</th>}
+          <th style={TH}>{t.ledgerItem}</th>
+          <th style={{ ...TH, width: '34%' }}>{t.ledgerDone}</th>
+          <th style={TH}>{t.ledgerWho}</th>
+          <th style={{ ...TH, textAlign: 'right' }}>{t.ledgerAmount}</th>
+          <th style={TH}>{t.ledgerStatus}</th>
+          <th style={TH}>{t.ledgerSource}</th>
+        </tr>
+      </thead>
+      <tbody>
+        {rows.map((r, i) => (
+          <tr key={r.id} style={{ borderBottom: i === rows.length - 1 ? 'none' : '1px solid var(--border)' }}>
+            {showWhen && <td style={{ ...TD, color: 'var(--muted)', whiteSpace: 'nowrap' }}>{pick(r, 'period', lang)}</td>}
+            <td style={{ ...TD, fontWeight: 600 }}>{pick(r, 'title', lang)}</td>
+            <td style={{ ...TD, color: 'var(--muted)' }}>{pick(r, 'task', lang)}</td>
+            <td style={TD}><WhoChip row={r} lang={lang} /></td>
+            <td style={{ ...TD, textAlign: 'right', whiteSpace: 'nowrap', fontWeight: 700, fontSize: 13, color: confColor(r.confidence) }}>{r.value_amount}</td>
+            <td style={TD}><ConfidenceBadge level={r.confidence} t={t} /></td>
+            <td style={{ ...TD, fontSize: 11, color: 'var(--muted)' }}>{pick(r, 'value_note', lang)}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  )
+}
+
+function TotalRow({ label, amount, right }) {
+  return (
+    <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 16, padding: '12px 0', borderTop: '1px solid var(--border)' }}>
+      <span style={{ fontSize: 12, fontWeight: 700 }}>{label}</span>
+      <span style={{ display: 'flex', alignItems: 'baseline', gap: 12, whiteSpace: 'nowrap' }}>
+        <span style={{ fontSize: 15, fontWeight: 700, letterSpacing: '-.01em' }}>{amount}</span>
+        <span style={{ fontSize: 11, color: 'var(--muted)' }}>{right}</span>
+      </span>
+    </div>
+  )
+}
+
+function Card({ children, pad = '18px 24px' }) {
+  return (
+    <div style={{ background: 'var(--card)', border: '1px solid var(--border)', borderRadius: 12, padding: pad, overflowX: 'auto' }}>
+      {children}
+    </div>
+  )
+}
+
+/** The three money tables the review opens with. Totals are derived from the
+ *  rows rather than stored, so a corrected row moves the total with it. */
+function SavingsLedger({ ledger, lang, t }) {
+  const saving = ledger.filter(r => r.bucket === 'saving')
+  const inProgress = ledger.filter(r => r.bucket === 'in_progress')
+  const prevented = ledger.filter(r => r.bucket === 'prevented')
+  if (!ledger.length) return null
+
+  const confirmed = saving.filter(r => r.confidence === 'confirmed')
+    .reduce((n, r) => n + parseAmount(r.value_amount), 0)
+  const withEstimates = saving.reduce((n, r) => n + parseAmount(r.value_amount), 0)
+  const perYear = n => Math.round(n * 12 / 1000)
+
+  // Confirmed money per period, in the order the periods first appear.
+  const periods = []
+  for (const r of saving) {
+    if (r.confidence !== 'confirmed') continue
+    const key = pick(r, 'period', lang)
+    if (!key) continue
+    const hit = periods.find(p => p.key === key)
+    if (hit) hit.sum += parseAmount(r.value_amount)
+    else periods.push({ key, sum: parseAmount(r.value_amount) })
+  }
+
+  return (
+    <div style={{ marginBottom: 52 }}>
+      <SectionLabel>{t.sectionSaving}</SectionLabel>
+      {saving.length > 0 && (
+        <Card>
+          <LedgerTable rows={saving} lang={lang} t={t} showWhen />
+          <TotalRow label={t.totalConfirmed} amount={`≈ ${money(confirmed)}`} right={t.perYear(perYear(confirmed))} />
+          <TotalRow label={t.totalWithEstimates} amount={`≈ ${money(withEstimates)}`} right={t.perYear(perYear(withEstimates))} />
+          {periods.length > 0 && (
+            <div style={{ fontSize: 11, color: 'var(--muted)', paddingTop: 10, borderTop: '1px solid var(--border)', lineHeight: 1.7 }}>
+              <strong style={{ color: 'var(--text)' }}>{t.byMonth}</strong>{' '}
+              {periods.map(p => `${p.key} ${money(p.sum)}`).join(' · ')}
+            </div>
+          )}
+        </Card>
+      )}
+      {[[inProgress, t.bucketInProgress], [prevented, t.bucketPrevented]].map(([rows, label]) => (
+        rows.length > 0 && (
+          <div key={label} style={{ marginTop: 18 }}>
+            <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--muted)', marginBottom: 8 }}>{label}</div>
+            <Card><LedgerTable rows={rows} lang={lang} t={t} showWhen={rows.some(r => pick(r, 'period', lang))} /></Card>
+          </div>
+        )
+      ))}
+    </div>
+  )
+}
+
+// ── Project-first layout ──────────────────────────────────────────────────────
+/** One project, with its tasks and the engineer who did each. Same card and
+ *  band styling as the engineer layout — only the nesting is inverted. */
+function ProjectCard({ project, lang, t }) {
+  return (
+    <div style={{ background: 'var(--card)', border: '1px solid var(--border)', borderRadius: 12, padding: '16px 24px' }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, paddingBottom: 12, borderBottom: '1px solid var(--border)' }}>
+        <span style={{ fontSize: 14, fontWeight: 700 }}>{pick(project, 'name', lang)}</span>
+        <span style={{ fontSize: 11, color: 'var(--muted)', whiteSpace: 'nowrap' }}>{t.countTasks(project.tasks.length)}</span>
+      </div>
+      {project.tasks.map((task, ti) => (
+        <div key={task.id} style={{ padding: '12px 0', borderBottom: ti === project.tasks.length - 1 ? 'none' : '1px solid var(--border)' }}>
+          <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 14 }}>
+            <div style={{ fontSize: 13, fontWeight: 700, lineHeight: 1.4, marginBottom: 6 }}>{pick(task, 'title', lang)}</div>
+            <WhoChip row={task} lang={lang} />
+          </div>
+          <InlineLine label={t.done} text={pick(task, 'task', lang)} />
+          <InlineLine label={t.benefitInline} text={pick(task, 'benefit', lang)} />
+          {task.value_amount && <ValueLine task={task} lang={lang} t={t} />}
+        </div>
+      ))}
+    </div>
+  )
+}
+
 function MonthNavButton({ target, dir, lang, t }) {
   const navigate = useNavigate()
   const hint = dir < 0 ? t.prevMonth : t.nextMonth
@@ -512,9 +700,15 @@ export default function MonthlyReviewCurated() {
   const engineers = review?.engineers ?? []
   const summary = review?.summary ?? []
   const changes = review?.changes ?? []
+  const ledger = review?.ledger ?? []
   // Any named project switches the month to the grouped layout; otherwise the
   // original grid renders untouched (August 2026).
   const projectLayout = engineers.some(e => (e.projects ?? []).some(isNamedProject))
+  // 'projects' inverts the nesting: a section per project with a "who" column,
+  // the way the October 2026 review is written. Stored per month, so the
+  // reviews published before it keep the engineer-first layout.
+  const projectFirst = review?.meta?.layout === 'projects'
+  const projectSections = (review?.projects ?? []).filter(isNamedProject)
   const toggleEng = id => setOpenEng(prev => ({ ...prev, [id]: !prev[id] }))
   const totalTasks = engineers.reduce((n, e) => n + e.tasks.length, 0)
   const monthLabel = monthYear(reviewYear, reviewMonth, lang)
@@ -631,9 +825,14 @@ export default function MonthlyReviewCurated() {
           </div>
         </div>
 
-        {/* ── ENGINEERS ── */}
+        {/* ── COST SAVINGS LEDGER ── hidden when the month has no money rows */}
+        <SavingsLedger ledger={ledger} lang={lang} t={t} />
+
+        {/* ── WORK ── by project when the month says so, otherwise by engineer */}
         <div style={{ marginBottom: 52 }}>
-          <SectionLabel>{t.sectionEngineers(monthLabel)} · {totalTasks} {t.tasks}</SectionLabel>
+          <SectionLabel>
+            {projectFirst ? t.sectionProjects(monthLabel) : t.sectionEngineers(monthLabel)} · {totalTasks} {t.tasks}
+          </SectionLabel>
           {/* A task whose engineer is not in this review renders nowhere. Say so
               rather than letting it disappear silently. */}
           {review.orphan_tasks > 0 && (
@@ -641,7 +840,35 @@ export default function MonthlyReviewCurated() {
               ⚠ {t.orphanWarning(review.orphan_tasks)}
             </div>
           )}
-          {projectLayout ? (
+          {projectFirst ? (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+              {/* Grouping by project leaves the per-engineer score with nowhere
+                  to live, so it keeps its own strip above the projects. */}
+              <div style={{ background: 'var(--card)', border: '1px solid var(--border)', borderRadius: 12, padding: '12px 24px', display: 'flex', flexWrap: 'wrap', gap: '10px 28px' }}>
+                {engineers.map(eng => (
+                  <div key={eng.id} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <div style={{ width: 26, height: 26, borderRadius: '50%', background: eng.color, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 10, fontWeight: 700, color: 'var(--bg)', flexShrink: 0 }}>{eng.initials}</div>
+                    <div style={{ minWidth: 0 }}>
+                      <div style={{ fontSize: 12, fontWeight: 600, whiteSpace: 'nowrap' }}>{lang === 'ru' && eng.name_ru ? eng.name_ru : eng.name_en}</div>
+                      <div style={{ fontSize: 10, color: 'var(--muted)' }}>{pick(eng, 'role', lang)}</div>
+                    </div>
+                    <ScoreInput
+                      engId={eng.engineer_id}
+                      color={eng.color}
+                      scores={scores}
+                      saveScore={saveScore}
+                      savedId={savedId}
+                      failedId={failedId}
+                      t={t}
+                    />
+                  </div>
+                ))}
+              </div>
+              {projectSections.map(p => (
+                <ProjectCard key={`${p.name_en}|${p.name_ru}`} project={p} lang={lang} t={t} />
+              ))}
+            </div>
+          ) : projectLayout ? (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
               {engineers.map(eng => (
                 <EngineerCard
