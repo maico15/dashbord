@@ -144,9 +144,6 @@ const T = {
     ledgerAmount: '$ / month',
     ledgerStatus: 'Status',
     ledgerSource: 'Source',
-    totalConfirmed: 'Confirmed total',
-    totalWithEstimates: 'Total including estimates',
-    perYear: n => `≈ $${n}K a year`,
     byMonth: 'Confirmed by period (per month):',
     bucketInProgress: 'In progress / awaiting a decision',
     bucketPrevented: 'Cost avoided (not counted in the saving)',
@@ -200,9 +197,6 @@ const T = {
     ledgerAmount: '$ в месяц',
     ledgerStatus: 'Статус',
     ledgerSource: 'Источник',
-    totalConfirmed: 'Итого подтверждено',
-    totalWithEstimates: 'Итого с оценками',
-    perYear: n => `≈ $${n} тыс. в год`,
     byMonth: 'Подтверждено по периодам (в месяц):',
     bucketInProgress: 'В работе / ждёт решения',
     bucketPrevented: 'Предотвращённые расходы (в экономию не включены)',
@@ -562,18 +556,6 @@ function SavingChart({ rows, lang, t }) {
   )
 }
 
-function TotalRow({ label, amount, right }) {
-  return (
-    <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 16, padding: '12px 0', borderTop: '1px solid var(--border)' }}>
-      <span style={{ fontSize: 12, fontWeight: 700 }}>{label}</span>
-      <span style={{ display: 'flex', alignItems: 'baseline', gap: 12, whiteSpace: 'nowrap' }}>
-        <span style={{ fontSize: 15, fontWeight: 700, letterSpacing: '-.01em' }}>{amount}</span>
-        <span style={{ fontSize: 11, color: 'var(--muted)' }}>{right}</span>
-      </span>
-    </div>
-  )
-}
-
 function Card({ children, pad = '18px 24px' }) {
   return (
     <div style={{ background: 'var(--card)', border: '1px solid var(--border)', borderRadius: 12, padding: pad, overflowX: 'auto' }}>
@@ -582,18 +564,16 @@ function Card({ children, pad = '18px 24px' }) {
   )
 }
 
-/** The three money tables the review opens with. Totals are derived from the
- *  rows rather than stored, so a corrected row moves the total with it. */
+/** The money tables the review opens with. There is deliberately no grand
+ *  total under them: the headline card already carries it, and a second copy
+ *  under the table only invites the two to disagree. The per-period line below
+ *  stays — it says something the table does not, which is when the money came
+ *  from. It is derived from the rows, so a corrected row moves it. */
 function SavingsLedger({ ledger, lang, t }) {
   const saving = ledger.filter(r => r.bucket === 'saving')
   const inProgress = ledger.filter(r => r.bucket === 'in_progress')
   const prevented = ledger.filter(r => r.bucket === 'prevented')
   if (!ledger.length) return null
-
-  const confirmed = saving.filter(r => r.confidence === 'confirmed')
-    .reduce((n, r) => n + parseAmount(r.value_amount), 0)
-  const withEstimates = saving.reduce((n, r) => n + parseAmount(r.value_amount), 0)
-  const perYear = n => Math.round(n * 12 / 1000)
 
   // Confirmed money per period, in the order the periods first appear.
   const periods = []
@@ -613,8 +593,6 @@ function SavingsLedger({ ledger, lang, t }) {
         <Card>
           <SavingChart rows={saving} lang={lang} t={t} />
           <LedgerTable rows={saving} lang={lang} t={t} showWhen />
-          <TotalRow label={t.totalConfirmed} amount={`≈ ${money(confirmed)}`} right={t.perYear(perYear(confirmed))} />
-          <TotalRow label={t.totalWithEstimates} amount={`≈ ${money(withEstimates)}`} right={t.perYear(perYear(withEstimates))} />
           {periods.length > 0 && (
             <div style={{ fontSize: 11, color: 'var(--muted)', paddingTop: 10, borderTop: '1px solid var(--border)', lineHeight: 1.7 }}>
               <strong style={{ color: 'var(--text)' }}>{t.byMonth}</strong>{' '}
