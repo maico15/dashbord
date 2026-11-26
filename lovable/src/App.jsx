@@ -1,60 +1,73 @@
-import { Routes, Route, Navigate, Link } from 'react-router-dom'
+import { Routes, Route } from 'react-router-dom'
+import Dashboard from './pages/Dashboard'
+import Admin from './pages/Admin'
+import EngineerProfile from './pages/EngineerProfile'
+import Reports from './pages/Reports'
+import Releases from './pages/Releases'
+import MonthlyReview from './pages/MonthlyReview'
+import MonthlyReviewCurated from './pages/MonthlyReviewCurated'
+import MonthlyReviewLive from './pages/MonthlyReviewLive'
 import TeamGantt from './pages/TeamGantt'
-
-/* Разделы переезжают по одному. Пока здесь только Гант; остальные шесть
- * (Daily Report, Weekly Report, Monthly Review, Trends, Проекты, IT request)
- * добавляются сюда строкой каждый, когда переносятся.
- *
- * Пока раздел не перенесён, ссылка на него из футера ведёт на заглушку —
- * она честно говорит, что страница ещё на старом дашборде, и даёт туда
- * перейти, а не показывает пустой экран. */
-
-const OLD_DASHBOARD = 'https://dashbord-frontend-hb0m.onrender.com'
-
-function NotMigrated() {
-  const path = window.location.pathname
-  return (
-    <div style={{
-      minHeight: '100vh', display: 'flex', alignItems: 'center',
-      justifyContent: 'center', padding: 24, textAlign: 'center',
-      fontFamily: 'Inter, system-ui, sans-serif', color: 'var(--ios-text, #e6e6e6)',
-      background: 'var(--ios-bg, #0b0d10)',
-    }}>
-      <div style={{ maxWidth: 440 }}>
-        <div style={{ fontSize: 42, marginBottom: 12 }}>🚧</div>
-        <h1 style={{ fontSize: 20, fontWeight: 700, margin: '0 0 10px' }}>
-          Этот раздел ещё не перенесён
-        </h1>
-        <p style={{ fontSize: 14, lineHeight: 1.6, opacity: 0.75, margin: '0 0 20px' }}>
-          Страница <code>{path}</code> пока живёт на старом дашборде.
-          Разделы переезжают по одному, Гант — первый.
-        </p>
-        <a
-          href={`${OLD_DASHBOARD}${path}`}
-          style={{
-            display: 'inline-block', padding: '10px 18px', borderRadius: 10,
-            background: 'var(--ios-accent, #0a84ff)', color: '#fff',
-            textDecoration: 'none', fontSize: 14, fontWeight: 600,
-          }}
-        >
-          Открыть на старом дашборде
-        </a>
-        <div style={{ marginTop: 16, fontSize: 13 }}>
-          <Link to="/team-gantt" style={{ color: 'var(--ios-accent, #0a84ff)' }}>
-            ← к Ганту
-          </Link>
-        </div>
-      </div>
-    </div>
-  )
-}
+import ProjectTimeline from './pages/ProjectTimeline'
+import TeamPlan from './pages/TeamPlan'
+import TaskBoard from './pages/TaskBoard'
+import Roadmap from './pages/Roadmap'
+import NorthStar from './pages/NorthStar'
+import ITBacklog from './pages/ITBacklog'
+import ITRequestsHome from './pages/ITRequestsHome'
+import ITRequestForm from './pages/ITRequestForm'
+import ITRequestStatus from './pages/ITRequestStatus'
+import ITRequestsMine from './pages/ITRequestsMine'
+import ITRequestsAdmin from './pages/ITRequestsAdmin'
+import AIAccess from './pages/AIAccess'
+import AIAccessRespond from './pages/AIAccessRespond'
+import MonthlyReviewLatest from './pages/MonthlyReviewLatest'
+import NotFound from './pages/NotFound'
 
 export default function App() {
   return (
     <Routes>
-      <Route path="/" element={<Navigate to="/team-gantt" replace />} />
+      <Route path="/" element={<Dashboard />} />
+      <Route path="/admin" element={<Admin />} />
+      <Route path="/engineer/:id" element={<EngineerProfile />} />
+      <Route path="/reports" element={<Reports />} />
+      <Route path="/releases" element={<Releases />} />
+      {/* Legacy path — no params, so the page falls back to August 2026. */}
+      <Route path="/review/august-2026" element={<MonthlyReviewCurated />} />
+      <Route path="/review/june-2026" element={<MonthlyReview />} />
+      {/* Stable address for "the newest review" — what the footer links to. */}
+      <Route path="/review/latest" element={<MonthlyReviewLatest />} />
+      <Route path="/review/:year/:month" element={<MonthlyReviewCurated />} />
+      <Route path="/monthly-review" element={<MonthlyReviewLive />} />
       <Route path="/team-gantt" element={<TeamGantt />} />
-      <Route path="*" element={<NotMigrated />} />
+      <Route path="/projects" element={<ProjectTimeline />} />
+      <Route path="/team-plan" element={<TeamPlan />} />
+      <Route path="/tasks" element={<TaskBoard />} />
+      <Route path="/roadmap" element={<Roadmap />} />
+      <Route path="/north-star" element={<NorthStar />} />
+      {/* Hidden page: intentionally absent from every nav, tab bar and link.
+       * Reachable only by typing /it-backlog. */}
+      <Route path="/it-backlog" element={<ITBacklog />} />
+
+      {/* IT requests. The first three are public; /admin asks for the password
+        * itself and, like /it-backlog, is not in the tab bar. */}
+      <Route path="/it-requests/home" element={<ITRequestsHome />} />
+      <Route path="/it-requests" element={<ITRequestForm />} />
+      <Route path="/it-requests/status" element={<ITRequestStatus />} />
+      <Route path="/it-requests/status/:ref" element={<ITRequestStatus />} />
+      <Route path="/it-requests/mine" element={<ITRequestsMine />} />
+      <Route path="/it-requests/admin" element={<ITRequestsAdmin />} />
+
+      {/* AI access register. Admin-only, not in the tab bar — the footer's Admin
+        * group and the direct URL are the ways in. */}
+      <Route path="/ai-access" element={<AIAccess />} />
+      {/* Where a manager lands from the Slack DM; token-protected, one seat only. */}
+      <Route path="/ai-access/respond/:id" element={<AIAccessRespond />} />
+
+      {/* Anything else. Without this route React Router renders nothing, and an
+        * unknown URL — most often one newer than the deployed bundle — shows a
+        * blank page that looks like a broken build. */}
+      <Route path="*" element={<NotFound />} />
     </Routes>
   )
 }
