@@ -1,0 +1,6 @@
+/* Imported after index.css so Tailwind's preflight cannot reset the ported
+ * page's own styling. Tailwind is here for pages written from now on; the
+ * Gantt does not use it. */
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
