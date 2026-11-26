@@ -9,9 +9,14 @@
 const DEFAULT_API = 'https://dashbord-5u0i.onrender.com'
 
 const _rawApiUrl = import.meta.env.VITE_API_URL || ''
-const BASE = _rawApiUrl.startsWith('http')
-  ? `${_rawApiUrl}/api`
-  : `${DEFAULT_API}/api`
+
+/* Единственное место, где решается адрес бэкенда. Несколько страниц раньше
+ * считали его сами и получали пустой экран там, где переменная окружения не
+ * задана; теперь они берут отсюда. Новый код, которому нужен адрес, тоже
+ * импортирует API_ORIGIN, а не читает import.meta.env. */
+export const API_ORIGIN = _rawApiUrl.startsWith('http') ? _rawApiUrl : DEFAULT_API
+
+const BASE = `${API_ORIGIN}/api`
 
 async function req(method, path, body, password) {
   const base = BASE.startsWith('http') ? BASE : `${window.location.origin}${BASE}`

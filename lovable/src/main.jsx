@@ -3,9 +3,11 @@ import ReactDOM from 'react-dom/client'
 import { BrowserRouter } from 'react-router-dom'
 import App from './App'
 import './index.css'
+// После index.css, чтобы preflight Tailwind не сбросил оформление страниц,
+// которые на него не рассчитаны. Tailwind здесь для нового кода.
 import './tailwind.css'
 
-// Apply the saved theme before the first render so the page never flashes light.
+// Apply saved theme before first render to avoid flash
 document.documentElement.setAttribute(
   'data-theme',
   localStorage.getItem('theme') || 'dark'
