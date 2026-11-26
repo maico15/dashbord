@@ -1,10 +1,17 @@
+/* Адрес нынешнего бэкенда зашит по умолчанию, а не берётся из переменной
+ * окружения. Так сделано нарочно: в Lovable проект должен открыться и
+ * показать данные сразу после импорта, без единой настройки. Настройка,
+ * без которой пустой экран, — это настройка, о которой узнают по пустому
+ * экрану.
+ *
+ * VITE_API_URL всё ещё перекрывает это значение — она нужна, когда бэкенд
+ * поднят локально или появится новый адрес. */
+const DEFAULT_API = 'https://dashbord-5u0i.onrender.com'
+
 const _rawApiUrl = import.meta.env.VITE_API_URL || ''
-// Guard: PLACEHOLDER or non-http values mean the env var was never properly set.
-// Fall back to same-origin /api (works with Vite proxy in dev; on production the
-// Render env var must be set to the actual backend URL).
-const BASE = (_rawApiUrl && _rawApiUrl.startsWith('http'))
+const BASE = _rawApiUrl.startsWith('http')
   ? `${_rawApiUrl}/api`
-  : '/api'
+  : `${DEFAULT_API}/api`
 
 async function req(method, path, body, password) {
   const base = BASE.startsWith('http') ? BASE : `${window.location.origin}${BASE}`

@@ -55,8 +55,8 @@ Report, Monthly Review, Trends, Гант, Проекты, IT request. Первы
 2. Перенести туда содержимое этой папки (не саму папку — её содержимое должно
    оказаться в корне репозитория, Lovable ждёт проект в корне).
 3. В Lovable: New Project → Import from GitHub → выбрать этот репозиторий.
-4. В настройках проекта Lovable задать переменные окружения из `.env.example`:
-   `VITE_DATA_SOURCE=rest` и `VITE_API_URL=https://dashbord-5u0i.onrender.com`.
+4. Ничего настраивать не нужно: адрес бэкенда зашит в `src/api/client.js`,
+   проект открывается с данными сразу после импорта.
 5. После этого я работаю как сейчас: пишу код, пушу в репозиторий, Lovable
    подхватывает. Твоих действий больше не требуется.
 
@@ -83,8 +83,9 @@ src/data/index.js          выбирает реализацию по VITE_DATA_
 ```bash
 cd lovable
 npm install
-VITE_API_URL=https://dashbord-5u0i.onrender.com npm run dev
-# откроется на http://localhost:8080/team-gantt
+npm run dev
+# откроется на http://localhost:8080/team-gantt, данные — с Render.
+# Чтобы работать со своим бэкендом: VITE_API_URL=http://localhost:8000 npm run dev
 ```
 
 ## Про Tailwind
